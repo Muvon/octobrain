@@ -600,6 +600,67 @@ async fn execute_memory_command(
 
             format_memories(&related_memories, &format);
         }
+
+        MemoryCommand::AutoLink { memory_id } => {
+            println!("🔗 Auto-linking memory '{}'...", memory_id);
+            let relationships = memory_manager.auto_link_memory(&memory_id).await?;
+
+            if relationships.is_empty() {
+                println!("❌ No similar memories found to link (threshold not met).");
+            } else {
+                println!("✅ Created {} auto-link(s):", relationships.len());
+                for rel in relationships {
+                    println!(
+                        "  {} -> {} (strength: {:.2})",
+                        rel.source_id, rel.target_id, rel.strength
+                    );
+                }
+            }
+        }
+
+        MemoryCommand::Graph {
+            memory_id,
+            depth,
+            format,
+        } => {
+            println!("🕸️  Building memory graph (depth: {})...", depth);
+            let graph = memory_manager.get_memory_graph(&memory_id, depth).await?;
+
+            if graph.memories.is_empty() {
+                println!("❌ Memory '{}' not found.", memory_id);
+                return Ok(());
+            }
+
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&graph)?);
+            } else {
+                println!("\n📊 Memory Graph:");
+                println!("  Root: {}", graph.root);
+                println!("  Memories: {}", graph.memories.len());
+                println!("  Relationships: {}", graph.relationships.len());
+                println!("\n🧠 Memories in Graph:");
+
+                for (id, memory) in &graph.memories {
+                    println!("\n  [{}]", id);
+                    println!("    Title: {}", memory.title);
+                    println!("    Type: {}", memory.memory_type);
+                    println!(
+                        "    Created: {}",
+                        memory.created_at.format("%Y-%m-%d %H:%M")
+                    );
+                }
+
+                if !graph.relationships.is_empty() {
+                    println!("\n🔗 Relationships:");
+                    for rel in &graph.relationships {
+                        println!(
+                            "  {} -> {} ({}, strength: {:.2})",
+                            rel.source_id, rel.target_id, rel.relationship_type, rel.strength
+                        );
+                    }
+                }
+            }
+        }
     }
 
     Ok(())

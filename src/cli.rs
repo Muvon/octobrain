@@ -273,4 +273,24 @@ pub enum MemoryCommand {
         #[arg(short, long, default_value = "text")]
         format: String,
     },
+
+    /// Manually trigger auto-linking for a memory
+    AutoLink {
+        /// Memory ID to auto-link
+        memory_id: String,
+    },
+
+    /// Get memory graph with linked context
+    Graph {
+        /// Root memory ID
+        memory_id: String,
+
+        /// Depth of graph traversal (1-3 recommended)
+        #[arg(short, long, default_value = "2")]
+        depth: usize,
+
+        /// Output format: text, json, or compact
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
 }

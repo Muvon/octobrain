@@ -104,6 +104,11 @@ impl MemoryManager {
             self.create_automatic_relationships(&memory).await?;
         }
 
+        // Auto-link to similar memories if enabled
+        if self.config.auto_linking_enabled {
+            self.auto_link_memory(&memory.id).await?;
+        }
+
         Ok(memory)
     }
 
@@ -411,6 +416,139 @@ impl MemoryManager {
         }
 
         Ok(related_memories)
+    }
+
+    /// Automatically link a memory to similar memories based on semantic similarity
+    /// Creates bidirectional AutoLinked relationships
+    pub async fn auto_link_memory(&mut self, memory_id: &str) -> Result<Vec<MemoryRelationship>> {
+        if !self.config.auto_linking_enabled {
+            return Ok(Vec::new());
+        }
+
+        // 1. Get the memory
+        let memory = self
+            .store
+            .get_memory(memory_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Memory not found: {}", memory_id))?;
+
+        // 2. Search for similar memories with high threshold
+        let query = MemoryQuery {
+            query_text: Some(memory.get_searchable_text()),
+            limit: Some(self.config.max_auto_links_per_memory * 2), // Get more candidates
+            min_relevance: Some(self.config.auto_link_threshold),
+            ..Default::default()
+        };
+
+        let similar = self.store.search_memories(&query).await?;
+
+        // 3. Create bidirectional relationships
+        let mut relationships = Vec::new();
+        let mut link_count = 0;
+
+        for result in similar.iter() {
+            // Skip self-linking
+            if result.memory.id == memory_id {
+                continue;
+            }
+
+            // Stop if we've reached max links
+            if link_count >= self.config.max_auto_links_per_memory {
+                break;
+            }
+
+            // Create forward link (source -> target)
+            let forward_rel = MemoryRelationship {
+                id: uuid::Uuid::new_v4().to_string(),
+                source_id: memory_id.to_string(),
+                target_id: result.memory.id.clone(),
+                relationship_type: RelationshipType::AutoLinked,
+                strength: result.relevance_score,
+                description: format!("Auto-linked (similarity: {:.2})", result.relevance_score),
+                created_at: Utc::now(),
+            };
+
+            self.store.store_relationship(&forward_rel).await?;
+            relationships.push(forward_rel);
+
+            // Create backward link if bidirectional (target -> source)
+            if self.config.bidirectional_links {
+                let backward_rel = MemoryRelationship {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    source_id: result.memory.id.clone(),
+                    target_id: memory_id.to_string(),
+                    relationship_type: RelationshipType::AutoLinked,
+                    strength: result.relevance_score,
+                    description: format!("Auto-linked (similarity: {:.2})", result.relevance_score),
+                    created_at: Utc::now(),
+                };
+
+                self.store.store_relationship(&backward_rel).await?;
+                relationships.push(backward_rel);
+            }
+
+            link_count += 1;
+        }
+
+        Ok(relationships)
+    }
+
+    /// Get memory graph starting from a memory ID with specified depth
+    /// Uses BFS to traverse relationships and build a graph
+    pub async fn get_memory_graph(
+        &self,
+        memory_id: &str,
+        depth: usize,
+    ) -> Result<super::types::MemoryGraph> {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
+        let mut graph = super::types::MemoryGraph {
+            root: memory_id.to_string(),
+            memories: HashMap::new(),
+            relationships: Vec::new(),
+        };
+
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        queue.push_back((memory_id.to_string(), 0));
+
+        while let Some((current_id, current_depth)) = queue.pop_front() {
+            // Skip if already visited or exceeded depth
+            if visited.contains(&current_id) || current_depth > depth {
+                continue;
+            }
+
+            visited.insert(current_id.clone());
+
+            // Get memory
+            if let Some(memory) = self.store.get_memory(&current_id).await? {
+                graph.memories.insert(current_id.clone(), memory);
+            }
+
+            // Get relationships
+            let rels = self.store.get_memory_relationships(&current_id).await?;
+
+            // Add relationships to graph (avoid duplicates)
+            for rel in &rels {
+                if !graph.relationships.iter().any(|r| r.id == rel.id) {
+                    graph.relationships.push(rel.clone());
+                }
+            }
+
+            // Add connected memories to queue if within depth
+            if current_depth < depth {
+                for rel in rels {
+                    // Add both source and target to explore bidirectional links
+                    if rel.source_id == current_id && !visited.contains(&rel.target_id) {
+                        queue.push_back((rel.target_id, current_depth + 1));
+                    } else if rel.target_id == current_id && !visited.contains(&rel.source_id) {
+                        queue.push_back((rel.source_id, current_depth + 1));
+                    }
+                }
+            }
+        }
+
+        Ok(graph)
     }
 
     /// Clean up old memories

@@ -141,6 +141,8 @@ impl McpServer {
                     "memorize" => self.memory.execute_memorize(arguments).await,
                     "remember" => self.memory.execute_remember(arguments).await,
                     "forget" => self.memory.execute_forget(arguments).await,
+                    "auto_link" => self.memory.execute_auto_link(arguments).await,
+                    "memory_graph" => self.memory.execute_memory_graph(arguments).await,
                     _ => Err(crate::mcp::types::McpError::method_not_found(
                         format!("Unknown tool: {}", tool_name),
                         "tools/call",

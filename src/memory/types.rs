@@ -491,6 +491,17 @@ pub struct MemoryRelationship {
     pub created_at: DateTime<Utc>,
 }
 
+/// Memory graph representing a memory and its connected memories
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryGraph {
+    /// Root memory ID
+    pub root: String,
+    /// All memories in the graph (ID -> Memory)
+    pub memories: HashMap<String, Memory>,
+    /// All relationships in the graph
+    pub relationships: Vec<MemoryRelationship>,
+}
+
 /// Types of relationships between memories
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RelationshipType {
@@ -508,6 +519,8 @@ pub enum RelationshipType {
     Implements,
     /// One memory extends another
     Extends,
+    /// Automatically detected relationship (via auto-linking)
+    AutoLinked,
     /// Custom relationship type
     Custom(String),
 }
@@ -522,6 +535,7 @@ impl std::fmt::Display for RelationshipType {
             RelationshipType::Conflicts => write!(f, "conflicts"),
             RelationshipType::Implements => write!(f, "implements"),
             RelationshipType::Extends => write!(f, "extends"),
+            RelationshipType::AutoLinked => write!(f, "auto_linked"),
             RelationshipType::Custom(s) => write!(f, "{}", s),
         }
     }
@@ -552,6 +566,14 @@ pub struct MemoryConfig {
     pub access_boost_factor: f32,
     /// Minimum importance threshold (floor value after decay)
     pub min_importance_threshold: f32,
+    /// Enable automatic linking between similar memories
+    pub auto_linking_enabled: bool,
+    /// Similarity threshold for auto-linking (0.75-0.85 recommended)
+    pub auto_link_threshold: f32,
+    /// Maximum auto-links per memory (3-5 recommended)
+    pub max_auto_links_per_memory: usize,
+    /// Create bidirectional links
+    pub bidirectional_links: bool,
 }
 
 impl Default for MemoryConfig {
@@ -568,6 +590,10 @@ impl Default for MemoryConfig {
             decay_half_life_days: 90, // 3 months half-life
             access_boost_factor: 1.2,
             min_importance_threshold: 0.05, // 5% minimum
+            auto_linking_enabled: true,
+            auto_link_threshold: 0.78, // High threshold for quality links
+            max_auto_links_per_memory: 5,
+            bidirectional_links: true,
         }
     }
 }

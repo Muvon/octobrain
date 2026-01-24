@@ -211,6 +211,49 @@ impl MemoryProvider {
 					"required": ["confirm"],
 					"additionalProperties": false
 				}),
+			},
+			crate::mcp::types::McpTool {
+				name: "auto_link".to_string(),
+				description: "Manually trigger automatic linking for a memory to find and connect related memories based on semantic similarity.".to_string(),
+				input_schema: json!({
+					"type": "object",
+					"properties": {
+						"memory_id": {
+							"type": "string",
+							"description": "Memory ID to auto-link with similar memories"
+						}
+					},
+					"required": ["memory_id"],
+					"additionalProperties": false
+				}),
+			},
+			crate::mcp::types::McpTool {
+				name: "memory_graph".to_string(),
+				description: "Retrieve a memory graph showing a memory and all its connected memories through relationships. Enables multi-hop reasoning and context discovery.".to_string(),
+				input_schema: json!({
+					"type": "object",
+					"properties": {
+						"memory_id": {
+							"type": "string",
+							"description": "Root memory ID to build graph from"
+						},
+						"depth": {
+							"type": "integer",
+							"description": "Depth of graph traversal (1-3 recommended, higher = more memories)",
+							"minimum": 1,
+							"maximum": 5,
+							"default": 2
+						},
+						"max_tokens": {
+							"type": "integer",
+							"description": "Maximum tokens allowed in output before truncation (default: 2000, set to 0 for unlimited)",
+							"minimum": 0,
+							"default": 2000
+						}
+					},
+					"required": ["memory_id"],
+					"additionalProperties": false
+				}),
 			}
 		]
     }
@@ -671,5 +714,179 @@ impl MemoryProvider {
         } else {
             Ok("❌ Either 'memory_id' or 'query' must be provided".to_string())
         }
+    }
+
+    /// Execute the auto_link tool
+    pub async fn execute_auto_link(&self, arguments: &Value) -> Result<String, McpError> {
+        let memory_id = arguments
+            .get("memory_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                McpError::invalid_params("Missing required parameter 'memory_id'", "auto_link")
+            })?;
+
+        // Validate memory ID
+        if memory_id.trim().is_empty() || memory_id.len() > 100 {
+            return Err(McpError::invalid_params(
+                "Invalid memory ID format",
+                "auto_link",
+            ));
+        }
+
+        debug!(
+            memory_id = %memory_id,
+            "Auto-linking memory"
+        );
+
+        let relationships = {
+            let mut manager_guard = self.memory_manager.lock().await;
+            manager_guard
+                .auto_link_memory(memory_id)
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(
+                        format!("Failed to auto-link memory: {}", e),
+                        "auto_link",
+                    )
+                })?
+        };
+
+        if relationships.is_empty() {
+            Ok(format!(
+                "No similar memories found to link with '{}' (similarity threshold not met)",
+                memory_id
+            ))
+        } else {
+            let mut output = format!(
+                "✅ Created {} auto-link(s) for memory '{}':\n\n",
+                relationships.len(),
+                memory_id
+            );
+
+            for rel in relationships.iter().take(10) {
+                // Limit to 10 for readability
+                output.push_str(&format!(
+                    "  {} -> {} (strength: {:.2})\n",
+                    rel.source_id, rel.target_id, rel.strength
+                ));
+            }
+
+            if relationships.len() > 10 {
+                output.push_str(&format!("\n  ... and {} more\n", relationships.len() - 10));
+            }
+
+            Ok(output)
+        }
+    }
+
+    /// Execute the memory_graph tool
+    pub async fn execute_memory_graph(&self, arguments: &Value) -> Result<String, McpError> {
+        let memory_id = arguments
+            .get("memory_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                McpError::invalid_params("Missing required parameter 'memory_id'", "memory_graph")
+            })?;
+
+        // Validate memory ID
+        if memory_id.trim().is_empty() || memory_id.len() > 100 {
+            return Err(McpError::invalid_params(
+                "Invalid memory ID format",
+                "memory_graph",
+            ));
+        }
+
+        let depth = arguments
+            .get("depth")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(2)
+            .clamp(1, 5);
+
+        let max_tokens = arguments
+            .get("max_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(2000) as usize;
+
+        debug!(
+            memory_id = %memory_id,
+            depth = depth,
+            "Building memory graph"
+        );
+
+        let graph = {
+            let manager_guard = self.memory_manager.lock().await;
+            manager_guard
+                .get_memory_graph(memory_id, depth)
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(
+                        format!("Failed to build memory graph: {}", e),
+                        "memory_graph",
+                    )
+                })?
+        };
+
+        if graph.memories.is_empty() {
+            return Ok(format!("Memory '{}' not found", memory_id));
+        }
+
+        // Format graph as text
+        let mut output = format!(
+            "📊 Memory Graph (root: {}, depth: {})\n\n",
+            graph.root, depth
+        );
+        output.push_str(&format!("Memories: {}\n", graph.memories.len()));
+        output.push_str(&format!("Relationships: {}\n\n", graph.relationships.len()));
+
+        // List memories
+        output.push_str("🧠 Memories in Graph:\n\n");
+        for (id, memory) in graph.memories.iter().take(20) {
+            // Limit for readability
+            output.push_str(&format!("[{}]\n", id));
+            output.push_str(&format!("  Title: {}\n", memory.title));
+            output.push_str(&format!("  Type: {}\n", memory.memory_type));
+            output.push_str(&format!(
+                "  Created: {}\n",
+                memory.created_at.format("%Y-%m-%d %H:%M")
+            ));
+
+            // Add snippet of content
+            let content_preview = if memory.content.len() > 100 {
+                format!("{}...", &memory.content[..100])
+            } else {
+                memory.content.clone()
+            };
+            output.push_str(&format!("  Content: {}\n\n", content_preview));
+        }
+
+        if graph.memories.len() > 20 {
+            output.push_str(&format!(
+                "... and {} more memories\n\n",
+                graph.memories.len() - 20
+            ));
+        }
+
+        // List relationships
+        if !graph.relationships.is_empty() {
+            output.push_str("🔗 Relationships:\n\n");
+            for rel in graph.relationships.iter().take(30) {
+                // Limit for readability
+                output.push_str(&format!(
+                    "  {} -> {} ({}, strength: {:.2})\n",
+                    rel.source_id, rel.target_id, rel.relationship_type, rel.strength
+                ));
+            }
+
+            if graph.relationships.len() > 30 {
+                output.push_str(&format!(
+                    "\n... and {} more relationships\n",
+                    graph.relationships.len() - 30
+                ));
+            }
+        }
+
+        // Apply token truncation
+        Ok(truncate_output(&output, max_tokens))
     }
 }

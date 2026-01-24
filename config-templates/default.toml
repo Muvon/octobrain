@@ -83,3 +83,27 @@ access_boost_factor = 1.2
 # Memories will never decay below this value
 # Default: 0.05 (5%)
 min_importance_threshold = 0.05
+
+[memory.auto_linking]
+# Enable automatic linking between semantically similar memories
+# Creates bidirectional relationships automatically (Zettelkasten-style)
+# Default: true
+enabled = true
+
+# Similarity threshold for auto-linking (0.0-1.0)
+# Higher values = only very similar memories get linked
+# Recommended: 0.75-0.85 for quality links
+# Default: 0.78
+similarity_threshold = 0.78
+
+# Maximum number of auto-links per memory
+# Prevents over-linking and maintains graph quality
+# Recommended: 3-5 links per memory
+# Default: 5
+max_links_per_memory = 5
+
+# Create bidirectional links (A->B and B->A)
+# Enables graph traversal in both directions
+# Default: true
+bidirectional = true
+
