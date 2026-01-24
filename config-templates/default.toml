@@ -1,0 +1,27 @@
+# Octobrain Default Configuration Template
+# This file contains default values for octobrain configuration
+# It will be copied to the system config directory on first run
+
+[embedding]
+# Embedding model for memory operations
+# Format: provider:model (e.g., voyage:voyage-3.5-lite, openai:text-embedding-3-small)
+# Default: voyage:voyage-3.5-lite
+model = "voyage:voyage-4"
+
+# Batch size for embedding generation (number of texts to process at once)
+# Default: 32
+batch_size = 32
+
+# Maximum tokens per batch request
+# Default: 100000
+max_tokens_per_batch = 100000
+
+[search]
+# Similarity threshold for memory search (0.0 to 1.0)
+# Lower values = more results, higher values = fewer but more relevant
+# Default: 0.3
+similarity_threshold = 0.3
+
+# Maximum number of results to return from search
+# Default: 50
+max_results = 50
