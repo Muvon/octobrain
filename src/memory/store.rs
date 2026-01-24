@@ -341,6 +341,7 @@ impl MemoryStore {
     }
 
     /// Search memories using vector similarity and optional filters
+    /// Now includes temporal decay integration for relevance scoring
     pub async fn search_memories(&self, query: &MemoryQuery) -> Result<Vec<MemorySearchResult>> {
         let table = self.db.open_table("memories").execute().await?;
 
@@ -395,12 +396,23 @@ impl MemoryStore {
                     }
 
                     // Convert distance to similarity (cosine distance is 1 - similarity)
-                    let similarity = 1.0 - distance;
-                    if similarity >= min_relevance {
+                    let vector_similarity = 1.0 - distance;
+
+                    // Calculate current importance with decay
+                    let current_importance = memory.get_current_importance(
+                        self.config.decay_enabled,
+                        self.config.min_importance_threshold,
+                    );
+
+                    // Combine vector similarity with temporal importance
+                    // Final score = vector_similarity * current_importance
+                    let final_score = vector_similarity * current_importance;
+
+                    if final_score >= min_relevance {
                         results.push(MemorySearchResult {
                             memory,
-                            relevance_score: similarity,
-                            selection_reason: self.generate_selection_reason(query, similarity),
+                            relevance_score: final_score,
+                            selection_reason: self.generate_selection_reason(query, final_score),
                         });
                     }
                 }
@@ -418,7 +430,12 @@ impl MemoryStore {
 
                 for memory in memories {
                     if self.matches_filters(&memory, query) {
-                        let relevance_score = memory.metadata.importance;
+                        // Use current importance with decay
+                        let relevance_score = memory.get_current_importance(
+                            self.config.decay_enabled,
+                            self.config.min_importance_threshold,
+                        );
+
                         if relevance_score >= min_relevance {
                             results.push(MemorySearchResult {
                                 memory,
@@ -444,12 +461,20 @@ impl MemoryStore {
                     super::types::MemorySortBy::CreatedAt => {
                         a.memory.created_at.cmp(&b.memory.created_at)
                     }
-                    super::types::MemorySortBy::Importance => a
-                        .memory
-                        .metadata
-                        .importance
-                        .partial_cmp(&b.memory.metadata.importance)
-                        .unwrap_or(std::cmp::Ordering::Equal),
+                    super::types::MemorySortBy::Importance => {
+                        // Use current importance with decay for sorting
+                        let a_importance = a.memory.get_current_importance(
+                            self.config.decay_enabled,
+                            self.config.min_importance_threshold,
+                        );
+                        let b_importance = b.memory.get_current_importance(
+                            self.config.decay_enabled,
+                            self.config.min_importance_threshold,
+                        );
+                        a_importance
+                            .partial_cmp(&b_importance)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    }
                 };
 
                 match sort_order {
@@ -470,6 +495,38 @@ impl MemoryStore {
         results.truncate(limit);
 
         Ok(results)
+    }
+
+    /// Track access to a memory (updates access count and timestamp for decay reinforcement)
+    pub async fn track_memory_access(&mut self, memory_id: &str) -> Result<()> {
+        if !self.config.decay_enabled {
+            return Ok(()); // Skip if decay is disabled
+        }
+
+        // Get the memory
+        if let Some(mut memory) = self.get_memory(memory_id).await? {
+            // Record access
+            memory.record_access();
+
+            // Update in database
+            self.update_memory(&memory).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Batch track access for multiple memories (more efficient)
+    pub async fn track_batch_access(&mut self, memory_ids: &[String]) -> Result<()> {
+        if !self.config.decay_enabled {
+            return Ok(()); // Skip if decay is disabled
+        }
+
+        for memory_id in memory_ids {
+            // Note: In production, this should be optimized with batch updates
+            self.track_memory_access(memory_id).await?;
+        }
+
+        Ok(())
     }
 
     /// Store a memory relationship

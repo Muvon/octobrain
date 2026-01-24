@@ -5,7 +5,7 @@
 [embedding]
 # Embedding model for memory operations
 # Format: provider:model (e.g., voyage:voyage-3.5-lite, openai:text-embedding-3-small)
-# Default: voyage:voyage-3.5-lite
+# Default: voyage:voyage-4
 model = "voyage:voyage-4"
 
 # Batch size for embedding generation (number of texts to process at once)
@@ -25,3 +25,24 @@ similarity_threshold = 0.3
 # Maximum number of results to return from search
 # Default: 50
 max_results = 50
+
+[memory]
+# Enable temporal decay system (Ebbinghaus forgetting curve)
+# When enabled, memories naturally fade over time unless accessed
+# Default: true
+decay_enabled = true
+
+# Half-life for importance decay in days (time for importance to halve)
+# Higher values = slower decay, memories stay relevant longer
+# Default: 90 (3 months)
+decay_half_life_days = 90
+
+# Boost factor for access reinforcement (multiplier per access)
+# Higher values = stronger reinforcement from repeated access
+# Default: 1.2
+access_boost_factor = 1.2
+
+# Minimum importance threshold (floor value after decay)
+# Memories will never decay below this value
+# Default: 0.05 (5%)
+min_importance_threshold = 0.05

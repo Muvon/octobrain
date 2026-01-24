@@ -87,6 +87,66 @@ impl From<String> for MemoryType {
     }
 }
 
+/// Temporal decay tracking for memory importance
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryDecay {
+    /// Base importance score before decay (0.0 to 1.0)
+    pub base_importance: f32,
+    /// Number of times this memory has been accessed
+    pub access_count: u32,
+    /// Last time this memory was accessed
+    pub last_accessed: DateTime<Utc>,
+    /// Decay rate (higher = faster decay)
+    pub decay_rate: f32,
+}
+
+impl MemoryDecay {
+    /// Create new decay tracker with base importance
+    pub fn new(base_importance: f32) -> Self {
+        let now = Utc::now();
+        Self {
+            base_importance,
+            access_count: 0,
+            last_accessed: now,
+            decay_rate: 1.0, // Default decay rate
+        }
+    }
+
+    /// Calculate current importance based on temporal decay and access reinforcement
+    /// Formula: importance = base_importance * exp(-decay_rate * days_since_access / 30) * ln(access_count + 1)
+    pub fn calculate_current_importance(&self, min_threshold: f32) -> f32 {
+        let now = Utc::now();
+        let days_since_access = (now - self.last_accessed).num_days() as f32;
+
+        // Exponential decay over time (normalized to 30-day periods)
+        let time_decay = (-self.decay_rate * days_since_access / 30.0).exp();
+
+        // Access reinforcement using logarithmic scaling
+        let access_boost = (self.access_count as f32 + 1.0).ln();
+
+        // Combined score with minimum threshold
+        let current_importance = self.base_importance * time_decay * access_boost;
+        current_importance.max(min_threshold)
+    }
+
+    /// Record an access to this memory
+    pub fn record_access(&mut self) {
+        self.access_count += 1;
+        self.last_accessed = Utc::now();
+    }
+
+    /// Update base importance (e.g., when memory is manually updated)
+    pub fn update_base_importance(&mut self, new_importance: f32) {
+        self.base_importance = new_importance.clamp(0.0, 1.0);
+    }
+}
+
+impl Default for MemoryDecay {
+    fn default() -> Self {
+        Self::new(0.5)
+    }
+}
+
 /// Metadata associated with a memory
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryMetadata {
@@ -104,6 +164,8 @@ pub struct MemoryMetadata {
     pub created_by: Option<String>,
     /// Additional key-value metadata
     pub custom_fields: HashMap<String, String>,
+    /// Temporal decay tracking
+    pub decay: MemoryDecay,
 }
 
 impl Default for MemoryMetadata {
@@ -116,6 +178,7 @@ impl Default for MemoryMetadata {
             confidence: 1.0,
             created_by: None,
             custom_fields: HashMap::new(),
+            decay: MemoryDecay::new(0.5),
         }
     }
 }
@@ -191,6 +254,22 @@ impl Memory {
             self.metadata.tags.join(" "),
             self.metadata.related_files.join(" ")
         )
+    }
+
+    /// Get current importance considering temporal decay
+    pub fn get_current_importance(&self, decay_enabled: bool, min_threshold: f32) -> f32 {
+        if decay_enabled {
+            self.metadata
+                .decay
+                .calculate_current_importance(min_threshold)
+        } else {
+            self.metadata.importance
+        }
+    }
+
+    /// Record access to this memory (for decay reinforcement)
+    pub fn record_access(&mut self) {
+        self.metadata.decay.record_access();
     }
 
     /// Add a tag if it doesn't exist
@@ -359,6 +438,14 @@ pub struct MemoryConfig {
     pub max_search_results: usize,
     /// Default importance for new memories
     pub default_importance: f32,
+    /// Enable temporal decay system
+    pub decay_enabled: bool,
+    /// Half-life for importance decay in days (time for importance to halve)
+    pub decay_half_life_days: u32,
+    /// Boost factor for access reinforcement (multiplier per access)
+    pub access_boost_factor: f32,
+    /// Minimum importance threshold (floor value after decay)
+    pub min_importance_threshold: f32,
 }
 
 impl Default for MemoryConfig {
@@ -371,6 +458,10 @@ impl Default for MemoryConfig {
             relationship_threshold: 0.7,
             max_search_results: 50,
             default_importance: 0.5,
+            decay_enabled: true,
+            decay_half_life_days: 90, // 3 months half-life
+            access_boost_factor: 1.2,
+            min_importance_threshold: 0.05, // 5% minimum
         }
     }
 }
