@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+*'  # Matches semver tags like 0.1.0, 1.0.0, etc.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (semver format, e.g., 0.1.0)'
+        required: true
+        type: string
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      release_id: ${{ steps.create_release.outputs.id }}
+      version: ${{ steps.get_version.outputs.VERSION }}
+      changelog: ${{ steps.changelog.outputs.CHANGELOG }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: get_version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+          echo "VERSION_NO_V=${VERSION#v}" >> $GITHUB_OUTPUT
+
+      - name: Validate semver format
+        run: |
+          VERSION="${{ steps.get_version.outputs.VERSION }}"
+          # POSIX-compatible regex check for semver
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*)
+              # Basic semver format matched
+              ;;
+            *)
+              echo "Error: Tag '$VERSION' is not a valid semver format"
+              echo "Expected format: X.Y.Z, X.Y.Z-prerelease, or X.Y.Z+build"
+              exit 1
+              ;;
+          esac
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -z "$PREV_TAG" ]; then
+            CHANGELOG="Initial release"
+          else
+            # Generate changelog from commits since last tag
+            CHANGELOG=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s" --no-merges | head -20)
+            if [ -z "$CHANGELOG" ]; then
+              CHANGELOG="- No changes since last release"
+            fi
+          fi
+
+          # Escape for GitHub output (POSIX compatible)
+          CHANGELOG=$(printf '%s\n' "$CHANGELOG" | sed 's/%/%25/g; s/\\r/%0D/g' | awk '{printf "%s%0A", $0}' | sed 's/%0A$//')
+
+          echo "CHANGELOG=$CHANGELOG" >> $GITHUB_OUTPUT
+
+      - name: Check if release exists
+        id: check_release
+        run: |
+          VERSION="${{ steps.get_version.outputs.VERSION }}"
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        id: create_release
+        if: steps.check_release.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.get_version.outputs.version }}"
+          IS_PRERELEASE="false"
+
+          # Check if this is a prerelease (contains - or is 0.x.x)
+          case "$VERSION" in
+            *-*|0.*)
+              IS_PRERELEASE="true"
+              ;;
+          esac
+
+          # Create release as draft
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            gh release create "$VERSION" \
+              --title "Release $VERSION" \
+              --notes "${{ steps.changelog.outputs.CHANGELOG }}" \
+              --draft \
+              --prerelease
+          else
+            gh release create "$VERSION" \
+              --title "Release $VERSION" \
+              --notes "${{ steps.changelog.outputs.CHANGELOG }}" \
+              --draft
+          fi
+
+        # Get release info
+        - name: Get release info
+        run: |
+          VERSION="${{ steps.get_version.outputs.version }}"
+          RELEASE_INFO=$(gh release view "$VERSION" --json id,uploadUrl)
+          RELEASE_ID=$(echo "$RELEASE_INFO" | jq -r '.id')
+          UPLOAD_URL=$(echo "$RELEASE_INFO" | jq -r '.uploadUrl')
+
+          echo "id=${RELEASE_ID}" >> $GITHUB_OUTPUT
+          echo "upload_url=${UPLOAD_URL}" >> $GITHUB_OUTPUT
+
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
