@@ -529,6 +529,256 @@ impl MemoryStore {
         Ok(())
     }
 
+    // ===== Keyword Search Methods =====
+
+    /// Tokenize text into lowercase words, removing punctuation
+    pub(crate) fn tokenize(text: &str) -> Vec<String> {
+        text.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// Calculate term frequency for a keyword in text
+    pub(crate) fn calculate_tf(keyword: &str, text: &str) -> f32 {
+        let tokens = Self::tokenize(text);
+        if tokens.is_empty() {
+            return 0.0;
+        }
+
+        let keyword_lower = keyword.to_lowercase();
+        let count = tokens.iter().filter(|t| *t == &keyword_lower).count();
+        count as f32 / tokens.len() as f32
+    }
+
+    /// Score a field (title/content/tags) for keyword matches
+    pub(crate) fn score_field(keywords: &[String], text: &str, field_weight: f32) -> f32 {
+        if keywords.is_empty() || text.is_empty() {
+            return 0.0;
+        }
+
+        let mut total_score = 0.0;
+        for keyword in keywords {
+            let tf = Self::calculate_tf(keyword, text);
+            total_score += tf * field_weight;
+        }
+
+        total_score
+    }
+
+    /// Perform keyword-based search on memories
+    /// Returns memories with keyword match scores
+    pub async fn keyword_search(
+        &self,
+        keywords: &[String],
+        filters: &super::types::MemoryQuery,
+    ) -> Result<Vec<(Memory, f32)>> {
+        if keywords.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let table = self.db.open_table("memories").execute().await?;
+        let mut results = Vec::new();
+
+        // Get all memories (we'll score them)
+        let mut db_results = table.query().execute().await?;
+
+        while let Some(batch) = db_results.try_next().await? {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+
+            let memories = self.batch_to_memories(&batch)?;
+
+            for memory in memories {
+                // Apply filters
+                if !self.matches_filters(&memory, filters) {
+                    continue;
+                }
+
+                // Calculate keyword score for each field
+                let title_score = Self::score_field(keywords, &memory.title, 3.0);
+                let content_score = Self::score_field(keywords, &memory.content, 1.0);
+                let tags_score = Self::score_field(keywords, &memory.metadata.tags.join(" "), 2.0);
+
+                let total_score = title_score + content_score + tags_score;
+
+                // Only include if there's a match
+                if total_score > 0.0 {
+                    results.push((memory, total_score));
+                }
+            }
+        }
+
+        // Normalize scores to [0.0, 1.0]
+        if !results.is_empty() {
+            let max_score = results
+                .iter()
+                .map(|(_, score)| *score)
+                .fold(0.0f32, f32::max);
+
+            if max_score > 0.0 {
+                for (_, score) in &mut results {
+                    *score /= max_score;
+                }
+            }
+        }
+
+        // Sort by score descending
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        Ok(results)
+    }
+
+    // ===== Recency Scoring Methods =====
+
+    /// Calculate days since memory creation
+    fn days_since_creation(memory: &Memory) -> f32 {
+        let now = Utc::now();
+        let duration = now - memory.created_at;
+        duration.num_days() as f32
+    }
+
+    /// Calculate recency score using exponential decay
+    /// Score = exp(-days_old / decay_days)
+    /// Returns value in [0.0, 1.0] where 1.0 = created today
+    pub(crate) fn calculate_recency_score(memory: &Memory, recency_decay_days: u32) -> f32 {
+        let days_old = Self::days_since_creation(memory);
+
+        // Handle future timestamps (shouldn't happen, but be safe)
+        if days_old < 0.0 {
+            return 1.0;
+        }
+
+        // Exponential decay: e^(-days / decay_period)
+        let decay_rate = days_old / recency_decay_days as f32;
+        (-decay_rate).exp()
+    }
+
+    // ===== Hybrid Search Methods =====
+
+    /// Perform hybrid search combining multiple signals
+    pub async fn hybrid_search(
+        &self,
+        query: &super::types::HybridSearchQuery,
+    ) -> Result<Vec<super::types::MemorySearchResult>> {
+        // Validate query
+        query
+            .validate()
+            .map_err(|e| anyhow::anyhow!("Invalid hybrid query: {}", e))?;
+
+        let limit = query
+            .filters
+            .limit
+            .unwrap_or(self.config.max_search_results);
+        let min_relevance = query.filters.min_relevance.unwrap_or(0.0);
+
+        // Step 1: Get candidate memories from vector search or keyword search
+        let mut candidates: std::collections::HashMap<String, (Memory, f32, f32, f32, f32)> =
+            std::collections::HashMap::new();
+
+        // Perform vector search if query provided
+        if let Some(ref vector_query) = query.vector_query {
+            let vector_results = self
+                .search_memories(&super::types::MemoryQuery {
+                    query_text: Some(vector_query.clone()),
+                    limit: Some(limit * 2), // Get more candidates for filtering
+                    ..query.filters.clone()
+                })
+                .await?;
+
+            for result in vector_results {
+                let memory_id = result.memory.id.clone();
+                candidates.insert(
+                    memory_id,
+                    (result.memory, result.relevance_score, 0.0, 0.0, 0.0),
+                );
+            }
+        }
+
+        // Perform keyword search if keywords provided
+        if let Some(ref keywords) = query.keywords {
+            let keyword_results = self.keyword_search(keywords, &query.filters).await?;
+
+            for (memory, kw_score) in keyword_results {
+                let memory_id = memory.id.clone();
+                candidates
+                    .entry(memory_id)
+                    .and_modify(|(_, vec_score, kw, _, _)| *kw = kw_score)
+                    .or_insert((memory, 0.0, kw_score, 0.0, 0.0));
+            }
+        }
+
+        // If no candidates yet, get all memories (for recency/importance only queries)
+        if candidates.is_empty() {
+            let table = self.db.open_table("memories").execute().await?;
+            let mut db_results = table.query().execute().await?;
+
+            while let Some(batch) = db_results.try_next().await? {
+                if batch.num_rows() == 0 {
+                    continue;
+                }
+
+                let memories = self.batch_to_memories(&batch)?;
+                for memory in memories {
+                    if self.matches_filters(&memory, &query.filters) {
+                        let memory_id = memory.id.clone();
+                        candidates.insert(memory_id, (memory, 0.0, 0.0, 0.0, 0.0));
+                    }
+                }
+            }
+        }
+
+        // Step 2: Calculate recency and importance scores for all candidates
+        let recency_decay_days = self.main_config.search.hybrid.recency_decay_days;
+        for (memory_id, (memory, _vec_score, _kw_score, rec_score, imp_score)) in
+            candidates.iter_mut()
+        {
+            *rec_score = Self::calculate_recency_score(memory, recency_decay_days);
+            *imp_score = memory.get_current_importance(
+                self.config.decay_enabled,
+                self.config.min_importance_threshold,
+            );
+        }
+
+        // Step 3: Combine scores with weights
+        let mut results: Vec<super::types::MemorySearchResult> = candidates
+            .into_iter()
+            .map(|(_, (memory, vec_score, kw_score, rec_score, imp_score))| {
+                // Calculate weighted final score
+                let final_score = query.vector_weight * vec_score
+                    + query.keyword_weight * kw_score
+                    + query.recency_weight * rec_score
+                    + query.importance_weight * imp_score;
+
+                // Generate selection reason with signal breakdown
+                let selection_reason = format!(
+                    "Hybrid: vector={:.2}, keyword={:.2}, recency={:.2}, importance={:.2}, final={:.2}",
+                    vec_score, kw_score, rec_score, imp_score, final_score
+                );
+
+                super::types::MemorySearchResult {
+                    memory,
+                    relevance_score: final_score,
+                    selection_reason,
+                }
+            })
+            .filter(|result| result.relevance_score >= min_relevance)
+            .collect();
+
+        // Step 4: Sort by final score descending
+        results.sort_by(|a, b| {
+            b.relevance_score
+                .partial_cmp(&a.relevance_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Step 5: Apply limit
+        results.truncate(limit);
+
+        Ok(results)
+    }
     /// Store a memory relationship
     pub async fn store_relationship(&mut self, relationship: &MemoryRelationship) -> Result<()> {
         let table = self.db.open_table("memory_relationships").execute().await?;

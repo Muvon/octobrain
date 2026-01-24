@@ -340,6 +340,112 @@ pub struct MemoryQuery {
     pub sort_order: Option<SortOrder>,
 }
 
+/// Hybrid search query combining multiple retrieval signals
+#[derive(Debug, Clone)]
+pub struct HybridSearchQuery {
+    /// Vector semantic search query
+    pub vector_query: Option<String>,
+    /// Keywords for exact/fuzzy matching
+    pub keywords: Option<Vec<String>>,
+    /// Weight for vector similarity signal (0.0-1.0)
+    pub vector_weight: f32,
+    /// Weight for keyword matching signal (0.0-1.0)
+    pub keyword_weight: f32,
+    /// Weight for recency signal (0.0-1.0)
+    pub recency_weight: f32,
+    /// Weight for importance signal (0.0-1.0)
+    pub importance_weight: f32,
+    /// Standard filters (same as MemoryQuery)
+    pub filters: MemoryQuery,
+}
+
+impl Default for HybridSearchQuery {
+    fn default() -> Self {
+        Self {
+            vector_query: None,
+            keywords: None,
+            vector_weight: 0.6,
+            keyword_weight: 0.2,
+            recency_weight: 0.1,
+            importance_weight: 0.1,
+            filters: MemoryQuery::default(),
+        }
+    }
+}
+
+impl HybridSearchQuery {
+    /// Normalize weights to sum to 1.0
+    pub fn normalize_weights(&mut self) {
+        let sum =
+            self.vector_weight + self.keyword_weight + self.recency_weight + self.importance_weight;
+        if sum > 0.0 {
+            self.vector_weight /= sum;
+            self.keyword_weight /= sum;
+            self.recency_weight /= sum;
+            self.importance_weight /= sum;
+        }
+    }
+
+    /// Validate that weights are in valid ranges
+    pub fn validate(&self) -> Result<(), String> {
+        if self.vector_weight < 0.0 || self.vector_weight > 1.0 {
+            return Err(format!(
+                "vector_weight must be in [0.0, 1.0], got {}",
+                self.vector_weight
+            ));
+        }
+        if self.keyword_weight < 0.0 || self.keyword_weight > 1.0 {
+            return Err(format!(
+                "keyword_weight must be in [0.0, 1.0], got {}",
+                self.keyword_weight
+            ));
+        }
+        if self.recency_weight < 0.0 || self.recency_weight > 1.0 {
+            return Err(format!(
+                "recency_weight must be in [0.0, 1.0], got {}",
+                self.recency_weight
+            ));
+        }
+        if self.importance_weight < 0.0 || self.importance_weight > 1.0 {
+            return Err(format!(
+                "importance_weight must be in [0.0, 1.0], got {}",
+                self.importance_weight
+            ));
+        }
+
+        // Check if at least one signal is enabled
+        if self.vector_query.is_none() && self.keywords.is_none() {
+            return Err("At least one of vector_query or keywords must be provided".to_string());
+        }
+
+        Ok(())
+    }
+}
+
+/// Keyword match information for debugging
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeywordMatch {
+    /// The matched keyword
+    pub keyword: String,
+    /// Number of occurrences
+    pub count: usize,
+    /// Locations where found (title, content, tags)
+    pub locations: Vec<String>,
+}
+
+/// Search signal contribution for debugging
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SearchSignal {
+    /// Vector similarity score
+    Vector(f32),
+    /// Keyword matching score
+    Keyword(f32),
+    /// Recency score
+    Recency(f32),
+    /// Importance score
+    Importance(f32),
+}
+
 /// Sort options for memory queries
 #[derive(Debug, Clone)]
 pub enum MemorySortBy {

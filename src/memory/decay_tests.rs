@@ -14,7 +14,7 @@
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::{Memory, MemoryDecay, MemoryMetadata, MemoryType};
+    use super::super::types::{HybridSearchQuery, Memory, MemoryDecay, MemoryMetadata, MemoryType};
     use chrono::{Duration, Utc};
 
     #[test]
@@ -251,5 +251,111 @@ mod tests {
         // With decay disabled, should always return base importance
         let importance = memory.get_current_importance(false, 0.05);
         assert_eq!(importance, 0.75);
+    }
+
+    // Hybrid Search Query Tests
+
+    #[test]
+    fn test_hybrid_query_default_weights() {
+        let query = HybridSearchQuery::default();
+
+        assert_eq!(query.vector_weight, 0.6);
+        assert_eq!(query.keyword_weight, 0.2);
+        assert_eq!(query.recency_weight, 0.1);
+        assert_eq!(query.importance_weight, 0.1);
+
+        // Weights should sum to 1.0
+        let sum = query.vector_weight
+            + query.keyword_weight
+            + query.recency_weight
+            + query.importance_weight;
+        assert!(
+            (sum - 1.0).abs() < 0.001,
+            "Weights should sum to 1.0, got {}",
+            sum
+        );
+    }
+
+    #[test]
+    fn test_weight_normalization() {
+        let mut query = HybridSearchQuery {
+            vector_query: Some("test".to_string()),
+            keywords: None,
+            vector_weight: 2.0,
+            keyword_weight: 1.0,
+            recency_weight: 1.0,
+            importance_weight: 0.0,
+            filters: Default::default(),
+        };
+
+        query.normalize_weights();
+
+        // After normalization, weights should sum to 1.0
+        let sum = query.vector_weight
+            + query.keyword_weight
+            + query.recency_weight
+            + query.importance_weight;
+        assert!(
+            (sum - 1.0).abs() < 0.001,
+            "Normalized weights should sum to 1.0, got {}",
+            sum
+        );
+
+        // Check proportions are maintained
+        assert!((query.vector_weight - 0.5).abs() < 0.001); // 2/4 = 0.5
+        assert!((query.keyword_weight - 0.25).abs() < 0.001); // 1/4 = 0.25
+        assert!((query.recency_weight - 0.25).abs() < 0.001); // 1/4 = 0.25
+        assert_eq!(query.importance_weight, 0.0);
+    }
+
+    #[test]
+    fn test_weight_validation() {
+        // Valid query
+        let valid_query = HybridSearchQuery {
+            vector_query: Some("test".to_string()),
+            keywords: None,
+            vector_weight: 0.5,
+            keyword_weight: 0.3,
+            recency_weight: 0.1,
+            importance_weight: 0.1,
+            filters: Default::default(),
+        };
+        assert!(valid_query.validate().is_ok());
+
+        // Invalid: weight > 1.0
+        let invalid_query = HybridSearchQuery {
+            vector_query: Some("test".to_string()),
+            keywords: None,
+            vector_weight: 1.5,
+            keyword_weight: 0.2,
+            recency_weight: 0.1,
+            importance_weight: 0.1,
+            filters: Default::default(),
+        };
+        assert!(invalid_query.validate().is_err());
+
+        // Invalid: weight < 0.0
+        let invalid_query2 = HybridSearchQuery {
+            vector_query: Some("test".to_string()),
+            keywords: None,
+            vector_weight: 0.5,
+            keyword_weight: -0.1,
+            recency_weight: 0.1,
+            importance_weight: 0.1,
+            filters: Default::default(),
+        };
+        assert!(invalid_query2.validate().is_err());
+
+        // Invalid: no query or keywords
+        let invalid_query3 = HybridSearchQuery {
+            vector_query: None,
+            keywords: None,
+            vector_weight: 0.5,
+            keyword_weight: 0.3,
+            recency_weight: 0.1,
+            importance_weight: 0.1,
+            filters: Default::default(),
+        };
+        assert!(invalid_query3.validate().is_err());
     }
 }

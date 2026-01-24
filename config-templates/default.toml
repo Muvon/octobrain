@@ -26,6 +26,43 @@ similarity_threshold = 0.3
 # Default: 50
 max_results = 50
 
+[search.hybrid]
+# Enable hybrid search combining multiple signals
+# When enabled, searches use vector similarity + keyword matching + recency + importance
+# Default: true
+enabled = true
+
+# Default weight for vector similarity signal (0.0-1.0)
+# Higher = more emphasis on semantic similarity
+# Default: 0.6
+default_vector_weight = 0.6
+
+# Default weight for keyword matching signal (0.0-1.0)
+# Higher = more emphasis on exact keyword matches
+# Default: 0.2
+default_keyword_weight = 0.2
+
+# Default weight for recency signal (0.0-1.0)
+# Higher = more emphasis on recently created memories
+# Default: 0.1
+default_recency_weight = 0.1
+
+# Default weight for importance signal (0.0-1.0)
+# Higher = more emphasis on important/frequently accessed memories
+# Default: 0.1
+default_importance_weight = 0.1
+
+# Recency decay period in days
+# Memories decay to ~37% relevance after this many days
+# Default: 30
+recency_decay_days = 30
+
+# Keyword field weights (relative importance of matches in different fields)
+# Title matches are weighted highest, then tags, then content
+keyword_title_weight = 3.0
+keyword_content_weight = 1.0
+keyword_tags_weight = 2.0
+
 [memory]
 # Enable temporal decay system (Ebbinghaus forgetting curve)
 # When enabled, memories naturally fade over time unless accessed
