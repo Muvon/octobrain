@@ -130,12 +130,14 @@ impl MemoryDecay {
     }
 
     /// Record an access to this memory
+    #[allow(dead_code)]
     pub fn record_access(&mut self) {
         self.access_count += 1;
         self.last_accessed = Utc::now();
     }
 
     /// Update base importance (e.g., when memory is manually updated)
+    #[allow(dead_code)]
     pub fn update_base_importance(&mut self, new_importance: f32) {
         self.base_importance = new_importance.clamp(0.0, 1.0);
     }
@@ -268,10 +270,12 @@ impl Memory {
     }
 
     /// Record access to this memory (for decay reinforcement)
+    #[allow(dead_code)]
     pub fn record_access(&mut self) {
         self.metadata.decay.record_access();
     }
 
+    /// Add a tag if it doesn't exist
     /// Add a tag if it doesn't exist
     pub fn add_tag(&mut self, tag: String) {
         if !self.metadata.tags.contains(&tag) {
@@ -374,18 +378,6 @@ impl Default for HybridSearchQuery {
 }
 
 impl HybridSearchQuery {
-    /// Normalize weights to sum to 1.0
-    pub fn normalize_weights(&mut self) {
-        let sum =
-            self.vector_weight + self.keyword_weight + self.recency_weight + self.importance_weight;
-        if sum > 0.0 {
-            self.vector_weight /= sum;
-            self.keyword_weight /= sum;
-            self.recency_weight /= sum;
-            self.importance_weight /= sum;
-        }
-    }
-
     /// Validate that weights are in valid ranges
     pub fn validate(&self) -> Result<(), String> {
         if self.vector_weight < 0.0 || self.vector_weight > 1.0 {
@@ -420,30 +412,6 @@ impl HybridSearchQuery {
 
         Ok(())
     }
-}
-
-/// Keyword match information for debugging
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeywordMatch {
-    /// The matched keyword
-    pub keyword: String,
-    /// Number of occurrences
-    pub count: usize,
-    /// Locations where found (title, content, tags)
-    pub locations: Vec<String>,
-}
-
-/// Search signal contribution for debugging
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SearchSignal {
-    /// Vector similarity score
-    Vector(f32),
-    /// Keyword matching score
-    Keyword(f32),
-    /// Recency score
-    Recency(f32),
-    /// Importance score
-    Importance(f32),
 }
 
 /// Sort options for memory queries

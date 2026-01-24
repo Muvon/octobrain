@@ -188,7 +188,11 @@ mod tests {
         // Day 0 (just created)
         decay.last_accessed = Utc::now();
         let importance_day_0 = decay.calculate_current_importance(0.0);
-        // ln(1) = 0, so importance should be 0 or min_threshold
+        // ln(1) = 0, so importance should be 0 (base_importance * 1 * 0 = 0)
+        assert_eq!(
+            importance_day_0, 0.0,
+            "Day 0 importance should be 0 with no accesses"
+        );
 
         // Day 30
         decay.last_accessed = Utc::now() - Duration::days(30);
@@ -277,40 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn test_weight_normalization() {
-        let mut query = HybridSearchQuery {
-            vector_query: Some("test".to_string()),
-            keywords: None,
-            vector_weight: 2.0,
-            keyword_weight: 1.0,
-            recency_weight: 1.0,
-            importance_weight: 0.0,
-            filters: Default::default(),
-        };
-
-        query.normalize_weights();
-
-        // After normalization, weights should sum to 1.0
-        let sum = query.vector_weight
-            + query.keyword_weight
-            + query.recency_weight
-            + query.importance_weight;
-        assert!(
-            (sum - 1.0).abs() < 0.001,
-            "Normalized weights should sum to 1.0, got {}",
-            sum
-        );
-
-        // Check proportions are maintained
-        assert!((query.vector_weight - 0.5).abs() < 0.001); // 2/4 = 0.5
-        assert!((query.keyword_weight - 0.25).abs() < 0.001); // 1/4 = 0.25
-        assert!((query.recency_weight - 0.25).abs() < 0.001); // 1/4 = 0.25
-        assert_eq!(query.importance_weight, 0.0);
-    }
-
-    #[test]
     fn test_weight_validation() {
-        // Valid query
         let valid_query = HybridSearchQuery {
             vector_query: Some("test".to_string()),
             keywords: None,

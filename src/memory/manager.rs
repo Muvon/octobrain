@@ -33,12 +33,11 @@ pub struct MemoryManager {
 impl MemoryManager {
     /// Create a new memory manager
     pub async fn new(config: &Config) -> Result<Self> {
-        let memory_config = MemoryConfig::default();
-
+        // Use memory config from main config (loaded from config file)
+        let memory_config = config.memory.clone();
         // Use the same storage system as the main application
         let current_dir = std::env::current_dir()?;
         let db_path = crate::storage::get_project_database_path(&current_dir)?;
-        let db_path_str = db_path.to_string_lossy().to_string();
 
         // Create embedding provider using model from config
         let model_string = &config.embedding.model;
@@ -46,7 +45,7 @@ impl MemoryManager {
         let embedding_provider = create_embedding_provider_from_parts(&provider, &model).await?;
 
         let store = MemoryStore::new(
-            &db_path_str,
+            db_path.to_string_lossy().as_ref(),
             embedding_provider,
             memory_config.clone(),
             config.clone(),

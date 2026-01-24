@@ -15,6 +15,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::memory::types::MemoryConfig;
 /// Embedding configuration for memory operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingConfig {
@@ -97,6 +98,7 @@ impl Default for HybridSearchConfig {
 pub struct Config {
     pub embedding: EmbeddingConfig,
     pub search: SearchConfig,
+    pub memory: MemoryConfig,
 }
 
 impl Config {

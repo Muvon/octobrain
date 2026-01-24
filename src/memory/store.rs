@@ -341,8 +341,21 @@ impl MemoryStore {
     }
 
     /// Search memories using vector similarity and optional filters
-    /// Now includes temporal decay integration for relevance scoring
+    /// Uses hybrid search when enabled (vector + keyword + recency + importance)
     pub async fn search_memories(&self, query: &MemoryQuery) -> Result<Vec<MemorySearchResult>> {
+        // Use hybrid search if enabled and we have a text query
+        if self.main_config.search.hybrid.enabled && query.query_text.is_some() {
+            return self
+                .hybrid_search(&self.convert_to_hybrid_query(query))
+                .await;
+        }
+
+        // Fall back to standard vector search
+        self.vector_search(query).await
+    }
+
+    /// Standard vector search with temporal decay
+    async fn vector_search(&self, query: &MemoryQuery) -> Result<Vec<MemorySearchResult>> {
         let table = self.db.open_table("memories").execute().await?;
 
         let limit = query
@@ -497,38 +510,6 @@ impl MemoryStore {
         Ok(results)
     }
 
-    /// Track access to a memory (updates access count and timestamp for decay reinforcement)
-    pub async fn track_memory_access(&mut self, memory_id: &str) -> Result<()> {
-        if !self.config.decay_enabled {
-            return Ok(()); // Skip if decay is disabled
-        }
-
-        // Get the memory
-        if let Some(mut memory) = self.get_memory(memory_id).await? {
-            // Record access
-            memory.record_access();
-
-            // Update in database
-            self.update_memory(&memory).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Batch track access for multiple memories (more efficient)
-    pub async fn track_batch_access(&mut self, memory_ids: &[String]) -> Result<()> {
-        if !self.config.decay_enabled {
-            return Ok(()); // Skip if decay is disabled
-        }
-
-        for memory_id in memory_ids {
-            // Note: In production, this should be optimized with batch updates
-            self.track_memory_access(memory_id).await?;
-        }
-
-        Ok(())
-    }
-
     // ===== Keyword Search Methods =====
 
     /// Tokenize text into lowercase words, removing punctuation
@@ -656,6 +637,21 @@ impl MemoryStore {
         (-decay_rate).exp()
     }
 
+    /// Convert MemoryQuery to HybridSearchQuery using config weights
+    fn convert_to_hybrid_query(&self, query: &MemoryQuery) -> super::types::HybridSearchQuery {
+        let hybrid_config = &self.main_config.search.hybrid;
+
+        super::types::HybridSearchQuery {
+            vector_query: query.query_text.clone(),
+            keywords: None, // Could be extracted from query_text in future
+            vector_weight: hybrid_config.default_vector_weight,
+            keyword_weight: hybrid_config.default_keyword_weight,
+            recency_weight: hybrid_config.default_recency_weight,
+            importance_weight: hybrid_config.default_importance_weight,
+            filters: query.clone(),
+        }
+    }
+
     // ===== Hybrid Search Methods =====
 
     /// Perform hybrid search combining multiple signals
@@ -681,7 +677,7 @@ impl MemoryStore {
         // Perform vector search if query provided
         if let Some(ref vector_query) = query.vector_query {
             let vector_results = self
-                .search_memories(&super::types::MemoryQuery {
+                .vector_search(&super::types::MemoryQuery {
                     query_text: Some(vector_query.clone()),
                     limit: Some(limit * 2), // Get more candidates for filtering
                     ..query.filters.clone()
@@ -705,7 +701,7 @@ impl MemoryStore {
                 let memory_id = memory.id.clone();
                 candidates
                     .entry(memory_id)
-                    .and_modify(|(_, vec_score, kw, _, _)| *kw = kw_score)
+                    .and_modify(|(_, _vec_score, kw, _, _)| *kw = kw_score)
                     .or_insert((memory, 0.0, kw_score, 0.0, 0.0));
             }
         }
@@ -732,7 +728,7 @@ impl MemoryStore {
 
         // Step 2: Calculate recency and importance scores for all candidates
         let recency_decay_days = self.main_config.search.hybrid.recency_decay_days;
-        for (memory_id, (memory, _vec_score, _kw_score, rec_score, imp_score)) in
+        for (_memory_id, (memory, _vec_score, _kw_score, rec_score, imp_score)) in
             candidates.iter_mut()
         {
             *rec_score = Self::calculate_recency_score(memory, recency_decay_days);

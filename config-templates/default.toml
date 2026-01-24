@@ -6,7 +6,7 @@
 # Embedding model for memory operations
 # Format: provider:model (e.g., voyage:voyage-3.5-lite, openai:text-embedding-3-small)
 # Default: voyage:voyage-4
-model = "voyage:voyage-4"
+model = "voyage:voyage-3.5-lite"
 
 # Batch size for embedding generation (number of texts to process at once)
 # Default: 32
@@ -64,6 +64,37 @@ keyword_content_weight = 1.0
 keyword_tags_weight = 2.0
 
 [memory]
+# Maximum number of memories to keep in storage
+# Default: 10000
+max_memories = 10000
+
+# Automatic cleanup threshold in days
+# Memories older than this may be cleaned up if below importance threshold
+# Default: 365 (1 year)
+auto_cleanup_days = 365
+
+# Minimum importance for automatic cleanup
+# Memories below this threshold and older than auto_cleanup_days may be removed
+# Default: 0.1
+cleanup_min_importance = 0.1
+
+# Enable automatic relationship detection between memories
+# Default: true
+auto_relationships = true
+
+# Relationship detection threshold (0.0-1.0)
+# Higher values = only very similar memories get linked
+# Default: 0.7
+relationship_threshold = 0.7
+
+# Maximum memories returned in search
+# Default: 50
+max_search_results = 50
+
+# Default importance for new memories (0.0-1.0)
+# Default: 0.5
+default_importance = 0.5
+
 # Enable temporal decay system (Ebbinghaus forgetting curve)
 # When enabled, memories naturally fade over time unless accessed
 # Default: true
@@ -84,26 +115,25 @@ access_boost_factor = 1.2
 # Default: 0.05 (5%)
 min_importance_threshold = 0.05
 
-[memory.auto_linking]
 # Enable automatic linking between semantically similar memories
 # Creates bidirectional relationships automatically (Zettelkasten-style)
 # Default: true
-enabled = true
+auto_linking_enabled = true
 
 # Similarity threshold for auto-linking (0.0-1.0)
 # Higher values = only very similar memories get linked
 # Recommended: 0.75-0.85 for quality links
 # Default: 0.78
-similarity_threshold = 0.78
+auto_link_threshold = 0.78
 
 # Maximum number of auto-links per memory
 # Prevents over-linking and maintains graph quality
 # Recommended: 3-5 links per memory
 # Default: 5
-max_links_per_memory = 5
+max_auto_links_per_memory = 5
 
 # Create bidirectional links (A->B and B->A)
 # Enables graph traversal in both directions
 # Default: true
-bidirectional = true
+bidirectional_links = true
 
