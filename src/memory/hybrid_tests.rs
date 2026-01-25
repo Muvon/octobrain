@@ -248,7 +248,7 @@ mod tests {
 
             // Score should always be in [0.0, 1.0]
             assert!(
-                score >= 0.0 && score <= 1.0,
+                (0.0..=1.0).contains(&score),
                 "Score for {} days should be in [0,1], got {}",
                 days,
                 score

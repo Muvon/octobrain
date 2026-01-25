@@ -133,9 +133,11 @@ mod tests {
 
     #[test]
     fn test_memory_get_current_importance_with_decay_enabled() {
-        let mut metadata = MemoryMetadata::default();
-        metadata.importance = 0.8;
-        metadata.decay = MemoryDecay::new(0.8);
+        let mut metadata = MemoryMetadata {
+            importance: 0.8,
+            decay: MemoryDecay::new(0.8),
+            ..Default::default()
+        };
 
         // Simulate 30 days old
         metadata.decay.last_accessed = Utc::now() - Duration::days(30);
@@ -240,9 +242,11 @@ mod tests {
 
     #[test]
     fn test_decay_disabled_returns_base_importance() {
-        let mut metadata = MemoryMetadata::default();
-        metadata.importance = 0.75;
-        metadata.decay = MemoryDecay::new(0.75);
+        let mut metadata = MemoryMetadata {
+            importance: 0.75,
+            decay: MemoryDecay::new(0.75),
+            ..Default::default()
+        };
         metadata.decay.last_accessed = Utc::now() - Duration::days(365); // Very old
 
         let memory = Memory::new(

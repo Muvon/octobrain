@@ -96,13 +96,13 @@ mod tests {
 
     #[test]
     fn test_auto_link_config_customization() {
-        let mut config = MemoryConfig::default();
-
-        // Test that we can customize the config
-        config.auto_linking_enabled = false;
-        config.auto_link_threshold = 0.85;
-        config.max_auto_links_per_memory = 3;
-        config.bidirectional_links = false;
+        let config = MemoryConfig {
+            auto_linking_enabled: false,
+            auto_link_threshold: 0.85,
+            max_auto_links_per_memory: 3,
+            bidirectional_links: false,
+            ..Default::default()
+        };
 
         assert!(!config.auto_linking_enabled);
         assert_eq!(config.auto_link_threshold, 0.85);
