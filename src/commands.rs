@@ -29,8 +29,11 @@ pub async fn execute(config: &Config, command: Commands) -> Result<()> {
             execute_memory_command(&mut memory_manager, command).await
         }
         Commands::Mcp => {
-            // Start MCP server
+            // Initialize file-only logging for MCP server (no console output)
             let working_directory = std::env::current_dir()?;
+            crate::mcp::logging::init_mcp_logging(working_directory.clone(), false)?;
+
+            // Start MCP server
             let server = McpServer::new(config.clone(), working_directory).await?;
             server.run().await?;
             Ok(())

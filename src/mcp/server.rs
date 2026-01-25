@@ -15,7 +15,7 @@
 use anyhow::Result;
 use serde_json::json;
 use tokio::io::{stdin, stdout, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::config::Config;
 use crate::mcp::memory::MemoryProvider;
@@ -24,32 +24,23 @@ use crate::mcp::types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 /// Simplified MCP Server for memory tools only
 pub struct McpServer {
     memory: MemoryProvider,
-    working_directory: std::path::PathBuf,
 }
 
 impl McpServer {
     pub async fn new(config: Config, working_directory: std::path::PathBuf) -> Result<Self> {
         // Initialize memory provider
-        let memory = MemoryProvider::new(&config, working_directory.clone())
+        let memory = MemoryProvider::new(&config, working_directory)
             .await
             .ok_or_else(|| anyhow::anyhow!("Failed to initialize memory provider"))?;
 
-        Ok(Self {
-            memory,
-            working_directory,
-        })
+        Ok(Self { memory })
     }
-
     /// Run the MCP server on stdio
     pub async fn run(&self) -> Result<()> {
-        info!("Starting Octobrain MCP server");
-        info!("Working directory: {}", self.working_directory.display());
-
         let stdin = stdin();
         let mut stdout = stdout();
         let mut reader = BufReader::new(stdin);
         let mut line = String::new();
-
         loop {
             line.clear();
             let bytes_read = reader.read_line(&mut line).await?;
@@ -98,7 +89,6 @@ impl McpServer {
             stdout.flush().await?;
         }
 
-        info!("MCP server shutdown complete");
         Ok(())
     }
 

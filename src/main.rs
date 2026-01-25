@@ -26,7 +26,7 @@ mod memory;
 mod storage;
 mod vector_optimizer;
 
-use cli::Cli;
+use cli::{Cli, Commands};
 use config::Config;
 
 #[tokio::main]
@@ -34,19 +34,21 @@ async fn main() -> Result<()> {
     // Load environment variables from .env file if present
     dotenvy::dotenv().ok();
 
-    // Initialize tracing subscriber for logging
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("octobrain=info"));
-
-    fmt().with_env_filter(filter).with_target(false).init();
-
-    // Parse command line arguments
+    // Parse command line arguments first to determine logging strategy
     let cli = Cli::parse();
+
+    // Initialize tracing subscriber for logging (skip for MCP command which uses file-only logging)
+    if !matches!(cli.command, Commands::Mcp) {
+        let filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("octobrain=info"));
+
+        fmt().with_env_filter(filter).with_target(false).init();
+    }
 
     // Load configuration
     let config = Config::load()?;
 
-    // Execute the command
+    // Execute command
     if let Err(e) = commands::execute(&config, cli.command).await {
         eprintln!("Error: {}", e);
         std::process::exit(1);
