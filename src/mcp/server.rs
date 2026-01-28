@@ -23,17 +23,18 @@ use crate::mcp::types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
 /// Simplified MCP Server for memory tools only
 pub struct McpServer {
-    memory: MemoryProvider,
+    memory: tokio::sync::Mutex<Option<MemoryProvider>>,
+    config: Config,
+    working_directory: std::path::PathBuf,
 }
 
 impl McpServer {
     pub async fn new(config: Config, working_directory: std::path::PathBuf) -> Result<Self> {
-        // Initialize memory provider
-        let memory = MemoryProvider::new(&config, working_directory)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("Failed to initialize memory provider"))?;
-
-        Ok(Self { memory })
+        Ok(Self {
+            memory: tokio::sync::Mutex::new(None),
+            config,
+            working_directory,
+        })
     }
     /// Run the MCP server on stdio
     pub async fn run(&self) -> Result<()> {
@@ -83,20 +84,23 @@ impl McpServer {
             let response = self.handle_request(request).await;
 
             // Send response
-            let response_json = serde_json::to_string(&response)?;
-            stdout.write_all(response_json.as_bytes()).await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
+            if let Some(response) = response {
+                let response_json = serde_json::to_string(&response)?;
+                stdout.write_all(response_json.as_bytes()).await?;
+                stdout.write_all(b"\n").await?;
+                stdout.flush().await?;
+            }
         }
 
         Ok(())
     }
 
-    async fn handle_request(&self, request: JsonRpcRequest) -> JsonRpcResponse {
+    async fn handle_request(&self, request: JsonRpcRequest) -> Option<JsonRpcResponse> {
         let id = request.id.clone();
+        let has_id = id.is_some();
 
         match request.method.as_str() {
-            "initialize" => JsonRpcResponse {
+            "initialize" => Some(JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
                 id,
                 result: Some(json!({
@@ -110,36 +114,48 @@ impl McpServer {
                     }
                 })),
                 error: None,
-            },
+            }),
 
             "tools/list" => {
                 let tools = MemoryProvider::get_tool_definitions();
-                JsonRpcResponse {
+                Some(JsonRpcResponse {
                     jsonrpc: "2.0".to_string(),
                     id,
                     result: Some(json!({ "tools": tools })),
                     error: None,
-                }
+                })
             }
 
             "tools/call" => {
                 let params = request.params.unwrap_or(json!({}));
-                let tool_name = params["name"].as_str().unwrap_or("");
-                let arguments = &params["arguments"];
+                let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+
+                let memory = match self.get_or_init_memory().await {
+                    Ok(memory) => memory,
+                    Err(err) => {
+                        return Some(JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id,
+                            result: None,
+                            error: Some(err.into_jsonrpc()),
+                        });
+                    }
+                };
 
                 let result = match tool_name {
-                    "memorize" => self.memory.execute_memorize(arguments).await,
-                    "remember" => self.memory.execute_remember(arguments).await,
-                    "forget" => self.memory.execute_forget(arguments).await,
-                    "auto_link" => self.memory.execute_auto_link(arguments).await,
-                    "memory_graph" => self.memory.execute_memory_graph(arguments).await,
+                    "memorize" => memory.execute_memorize(&arguments).await,
+                    "remember" => memory.execute_remember(&arguments).await,
+                    "forget" => memory.execute_forget(&arguments).await,
+                    "auto_link" => memory.execute_auto_link(&arguments).await,
+                    "memory_graph" => memory.execute_memory_graph(&arguments).await,
                     _ => Err(crate::mcp::types::McpError::method_not_found(
                         format!("Unknown tool: {}", tool_name),
                         "tools/call",
                     )),
                 };
 
-                match result {
+                let response = match result {
                     Ok(content) => JsonRpcResponse {
                         jsonrpc: "2.0".to_string(),
                         id,
@@ -157,19 +173,45 @@ impl McpServer {
                         result: None,
                         error: Some(e.into_jsonrpc()),
                     },
-                }
+                };
+                Some(response)
             }
 
-            _ => JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                id,
-                result: None,
-                error: Some(JsonRpcError {
-                    code: -32601,
-                    message: format!("Method not found: {}", request.method),
-                    data: None,
-                }),
-            },
+            _ => {
+                if !has_id {
+                    // Notification: no response required
+                    None
+                } else {
+                    Some(JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32601,
+                            message: format!("Method not found: {}", request.method),
+                            data: None,
+                        }),
+                    })
+                }
+            }
         }
+    }
+
+    async fn get_or_init_memory(&self) -> Result<MemoryProvider, crate::mcp::types::McpError> {
+        {
+            let guard = self.memory.lock().await;
+            if let Some(provider) = guard.as_ref() {
+                return Ok(provider.clone());
+            }
+        }
+
+        let mut guard = self.memory.lock().await;
+        if let Some(provider) = guard.as_ref() {
+            return Ok(provider.clone());
+        }
+
+        let provider = MemoryProvider::new(&self.config, self.working_directory.clone()).await?;
+        *guard = Some(provider.clone());
+        Ok(provider)
     }
 }

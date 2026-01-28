@@ -34,20 +34,33 @@ pub struct MemoryProvider {
 }
 
 impl MemoryProvider {
-    pub async fn new(config: &Config, working_directory: std::path::PathBuf) -> Option<Self> {
-        match MemoryManager::new(config).await {
-            Ok(manager) => Some(Self {
-                memory_manager: Arc::new(Mutex::new(manager)),
-                working_directory,
-            }),
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "Failed to initialize memory manager"
-                );
-                None
-            }
+    pub async fn new(
+        config: &Config,
+        working_directory: std::path::PathBuf,
+    ) -> Result<Self, McpError> {
+        let original_dir = std::env::current_dir().ok();
+        if let Err(e) = std::env::set_current_dir(&working_directory) {
+            warn!(
+                error = %e,
+                "Failed to change to working directory for memory initialization"
+            );
         }
+
+        let manager = MemoryManager::new(config).await.map_err(|e| {
+            McpError::internal_error(
+                format!("Failed to initialize memory manager: {}", e),
+                "memory_init",
+            )
+        })?;
+
+        if let Some(original) = original_dir {
+            let _ = std::env::set_current_dir(&original);
+        }
+
+        Ok(Self {
+            memory_manager: Arc::new(Mutex::new(manager)),
+            working_directory,
+        })
     }
 
     /// Get all tool definitions for memory operations

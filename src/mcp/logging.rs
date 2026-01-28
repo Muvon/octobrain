@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tracing::info;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
@@ -23,10 +23,7 @@ static MCP_LOG_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// Initialize logging for MCP server with file rotation
 /// All logs go to files only - NO console output to maintain MCP protocol compliance
 pub fn init_mcp_logging(base_dir: PathBuf, debug_mode: bool) -> Result<(), anyhow::Error> {
-    // Use the system-wide storage directory for logs
-    let project_storage = crate::storage::get_project_storage_path(&base_dir)?;
-    let log_dir = project_storage.join("logs");
-    std::fs::create_dir_all(&log_dir)?;
+    let log_dir = select_log_dir(&base_dir)?;
 
     // Store log directory for potential future use
     MCP_LOG_DIR
@@ -34,12 +31,9 @@ pub fn init_mcp_logging(base_dir: PathBuf, debug_mode: bool) -> Result<(), anyho
         .map_err(|_| anyhow::anyhow!("Failed to set log directory"))?;
 
     // Cross-platform way to create a "latest" indicator
-    let latest_file = project_storage.join("latest_log.txt");
+    let latest_file = log_dir.parent().unwrap_or(&log_dir).join("latest_log.txt");
     // Silently ignore errors creating latest log indicator to maintain MCP protocol compliance
     let _ = std::fs::write(&latest_file, log_dir.to_string_lossy().as_bytes());
-
-    // Create rotating file appender
-    let file_appender = RollingFileAppender::new(Rotation::DAILY, &log_dir, "mcp_server.log");
 
     // Set up environment filter with sensible defaults
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -51,6 +45,22 @@ pub fn init_mcp_logging(base_dir: PathBuf, debug_mode: bool) -> Result<(), anyho
             EnvFilter::new("info,octobrain::mcp::logging=info")
         }
     });
+
+    // Create rotating file appender
+    let file_appender = match RollingFileAppender::builder()
+        .rotation(Rotation::DAILY)
+        .filename_prefix("mcp_server")
+        .filename_suffix("log")
+        .build(&log_dir)
+    {
+        Ok(appender) => appender,
+        Err(_e) => {
+            // If logging cannot be initialized, fall back to a no-op subscriber
+            let registry = Registry::default().with(env_filter);
+            let _ = registry.try_init();
+            return Ok(());
+        }
+    };
 
     // File layer with JSON formatting for structured logs
     let file_layer = Layer::new()
@@ -68,7 +78,7 @@ pub fn init_mcp_logging(base_dir: PathBuf, debug_mode: bool) -> Result<(), anyho
 
     // Create registry with file layer only (no console output)
     let registry = Registry::default().with(file_layer).with(env_filter);
-    registry.init();
+    let _ = registry.try_init();
 
     info!(
         project_path = %base_dir.display(),
@@ -77,6 +87,50 @@ pub fn init_mcp_logging(base_dir: PathBuf, debug_mode: bool) -> Result<(), anyho
         "MCP Server logging initialized"
     );
 
+    Ok(())
+}
+
+fn select_log_dir(base_dir: &Path) -> Result<PathBuf, anyhow::Error> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(project_storage) = crate::storage::get_project_storage_path(base_dir) {
+        candidates.push(project_storage.join("logs"));
+    }
+
+    candidates.push(base_dir.join(".octobrain").join("logs"));
+
+    if let Ok(project_id) = crate::storage::get_project_identifier(base_dir) {
+        candidates.push(
+            std::env::temp_dir()
+                .join("octobrain")
+                .join(project_id)
+                .join("logs"),
+        );
+    } else {
+        candidates.push(std::env::temp_dir().join("octobrain").join("logs"));
+    }
+
+    for candidate in candidates {
+        if try_prepare_log_dir(&candidate).is_ok() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(anyhow::anyhow!("No writable log directory available"))
+}
+
+fn try_prepare_log_dir(dir: &PathBuf) -> Result<(), anyhow::Error> {
+    std::fs::create_dir_all(dir)?;
+    let test_file = dir.join(".mcp_log_write_test");
+    if let Ok(mut handle) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&test_file)
+    {
+        use std::io::Write;
+        let _ = handle.write_all(b"");
+    }
+    let _ = std::fs::remove_file(test_file);
     Ok(())
 }
 
