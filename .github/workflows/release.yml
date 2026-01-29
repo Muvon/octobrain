@@ -10,9 +10,10 @@ on:
         description: 'Tag to release (semver format, e.g., 0.1.0)'
         required: true
         type: string
-    env:
-      CARGO_TERM_COLOR: always
-      RUST_BACKTRACE: 1
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
   create-release:
@@ -88,7 +89,7 @@ jobs:
         id: create_release
         if: steps.check_release.outputs.exists == 'false'
         run: |
-          VERSION="${{ steps.get_version.outputs.version }}"
+          VERSION="${{ steps.get_version.outputs.VERSION }}"
           IS_PRERELEASE="false"
 
           # Check if this is a prerelease (contains - or is 0.x.x)
@@ -112,10 +113,9 @@ jobs:
               --draft
           fi
 
-        # Get release info
-        - name: Get release info
+      - name: Get release info
         run: |
-          VERSION="${{ steps.get_version.outputs.version }}"
+          VERSION="${{ steps.get_version.outputs.VERSION }}"
           RELEASE_INFO=$(gh release view "$VERSION" --json id,uploadUrl)
           RELEASE_ID=$(echo "$RELEASE_INFO" | jq -r '.id')
           UPLOAD_URL=$(echo "$RELEASE_INFO" | jq -r '.uploadUrl')
@@ -123,5 +123,119 @@ jobs:
           echo "id=${RELEASE_ID}" >> $GITHUB_OUTPUT
           echo "upload_url=${UPLOAD_URL}" >> $GITHUB_OUTPUT
 
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - target: x86_64-unknown-linux-musl
+          os: ubuntu-latest
+          archive: tar.gz
+        - target: aarch64-unknown-linux-musl
+          os: ubuntu-22.04-arm
+          archive: tar.gz
+        - target: x86_64-pc-windows-msvc
+          os: windows-latest
+          archive: zip
+        - target: aarch64-pc-windows-msvc
+          os: windows-11-arm
+          archive: zip
+        - target: x86_64-apple-darwin
+          os: macos-14
+          archive: tar.gz
+        - target: aarch64-apple-darwin
+          os: macos-15
+          archive: tar.gz
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@1.91.1
+      with:
+        targets: ${{ matrix.target }}
+
+    - name: Install protobuf compiler (macOS)
+      if: startsWith(matrix.os, 'macos')
+      run: brew install protobuf
+
+    - name: Install protobuf compiler (Windows)
+      if: startsWith(matrix.os, 'windows')
+      run: |
+        choco install protoc
+
+    - name: Cache dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ endsWith(matrix.target, '-unknown-linux-musl') && 'docker-alpine' || runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ endsWith(matrix.target, '-unknown-linux-musl') && 'docker-alpine' || runner.os }}-${{ matrix.target }}-cargo-
+          ${{ endsWith(matrix.target, '-unknown-linux-musl') && 'docker-alpine' || runner.os }}-cargo-
+
+    - name: Build binary
+      shell: sh
+      run: |
+        if [ "${{ runner.os }}" = "Linux" ]; then
+          # Use official Rust Docker image for Linux builds
+          # Disable default features to avoid ONNX Runtime issues
+          docker run --rm \
+            -v "$(pwd):/workspace" \
+            -w /workspace \
+            rust:1.91.1-alpine3.21 \
+            sh -c "
+              apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig gcc g++ protobuf-dev && \
+              rustup target add ${{ matrix.target }} && \
+              cargo build --release --target ${{ matrix.target }} --no-default-features
+            "
+        elif [ "${{ runner.os }}" = "Windows" ]; then
+          # Windows: disable default features to avoid ONNX Runtime issues
+          cargo build --release --target ${{ matrix.target }} --no-default-features
+        else
+          # macOS: build with default features (fastembed + huggingface work fine)
+          cargo build --release --target ${{ matrix.target }}
+        fi
+
+    - name: Create archive directory
+      shell: sh
+      run: mkdir -p dist
+
+    - name: Create archive (Unix)
+      if: matrix.archive == 'tar.gz'
+      shell: sh
+      run: |
+        cd target/${{ matrix.target }}/release
+        case "${{ matrix.target }}" in
+          *windows*)
+            tar czf ../../../dist/octobrain-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz octobrain.exe
+            ;;
+          *)
+            tar czf ../../../dist/octobrain-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz octobrain
+            ;;
+        esac
+
+    - name: Create archive (Windows)
+      if: matrix.archive == 'zip'
+      shell: sh
+      run: |
+        cd target/${{ matrix.target }}/release
+        7z a ../../../dist/octobrain-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.zip octobrain.exe
+
+    - name: Upload release asset
+      shell: sh
+      run: |
+        gh release upload "${{ needs.create-release.outputs.version }}" \
+          "./dist/octobrain-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}" \
+          --clobber
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

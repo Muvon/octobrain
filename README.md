@@ -13,9 +13,43 @@ Standalone memory management system for AI context and conversation state.
 
 ## Installation
 
+### From Source
+
 ```bash
+# Build with default features (fastembed + huggingface)
 cargo build --release
+
+# Or build without default features (API-based embeddings only)
+cargo build --no-default-features --release
+
+# Or build with specific features
+cargo build --no-default-features --features fastembed --release
+cargo build --no-default-features --features huggingface --release
+cargo build --no-default-features --features "fastembed,huggingface" --release
+
+# Run the binary
 ./target/release/octobrain --help
+```
+
+### Features
+
+Octobrain supports multiple embedding providers through feature flags:
+
+- **fastembed**: Local embedding models via FastEmbed (no API key required)
+- **huggingface**: Local embedding models via HuggingFace (no API key required)
+- **default**: Both fastembed and huggingface features enabled
+
+When building without default features (`--no-default-features`), you can use API-based embedding providers:
+- Voyage AI (requires `VOYAGE_API_KEY`)
+- OpenAI (requires `OPENAI_API_KEY`)
+- Google (requires `GOOGLE_API_KEY`)
+- Jina (requires `JINA_API_KEY`)
+
+Configure your embedding provider in `~/.local/share/octobrain/config.toml`:
+
+```toml
+[embedding]
+model = "voyage:voyage-3.5-lite"  # or "openai:text-embedding-3-small", etc.
 ```
 
 ## Usage

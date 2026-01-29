@@ -34,7 +34,7 @@ help: ## Show this help message
 	@echo "$(BLUE)Rust version: $(RUST_VERSION)$(NC)"
 	@echo ""
 	@echo "$(YELLOW)Available targets:$(NC)"
-	@awk 'BEGIN {FS = ":.*##"}; printf "  $(GREEN)%-20s$(NC) %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*##"}; /^[a-zA-Z_-]+:.*##/ { printf "  $(GREEN)%-20s$(NC) %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 	@echo ""
 	@echo "$(YELLOW)Usage:$(NC)"
 	@echo "  make $(GREEN)<target>$(NC)          # Build specific target"
@@ -71,7 +71,7 @@ install-targets: ## Install compilation targets
 .PHONY: check
 check: ## Run cargo check
 	@echo "$(YELLOW)Running cargo check...$(NC)"
-	cargo check --all-targets --all-features
+	cargo check --no-default-features --all-targets
 	@echo "$(GREEN)Cargo check passed$(NC)"
 
 .PHONY: fmt
@@ -83,7 +83,7 @@ fmt: ## Format code with cargo fmt
 .PHONY: clippy
 clippy: ## Run cargo clippy
 	@echo "$(YELLOW)Running clippy lints...$(NC)"
-	cargo clippy --all-targets --all-features -- -D warnings
+	cargo clippy --no-default-features --all-targets -- -D warnings
 	@echo "$(GREEN)Clippy checks passed$(NC)"
 
 .PHONY: test
@@ -91,6 +91,37 @@ test: ## Run tests
 	@echo "$(YELLOW)Running tests...$(NC)"
 	cargo test --verbose --no-default-features
 	@echo "$(GREEN)Tests passed$(NC)"
+
+.PHONY: test-fastembed
+test-fastembed: ## Run tests with fastembed feature only
+	@echo "$(YELLOW)Running tests with fastembed feature...$(NC)"
+	cargo test --verbose --no-default-features --features fastembed
+	@echo "$(GREEN)Tests passed with fastembed$(NC)"
+
+.PHONY: test-huggingface
+test-huggingface: ## Run tests with huggingface feature only
+	@echo "$(YELLOW)Running tests with huggingface feature...$(NC)"
+	cargo test --verbose --no-default-features --features huggingface
+	@echo "$(GREEN)Tests passed with huggingface$(NC)"
+
+.PHONY: test-all-features
+test-all-features: ## Run tests with all features
+	@echo "$(YELLOW)Running tests with all features...$(NC)"
+	cargo test --verbose --no-default-features --features "fastembed,huggingface"
+	@echo "$(GREEN)Tests passed with all features$(NC)"
+
+.PHONY: check-features
+check-features: ## Check all feature combinations
+	@echo "$(YELLOW)Checking all feature combinations...$(NC)"
+	@echo "$(BLUE)1. No features...$(NC)"
+	@cargo check --no-default-features --all-targets
+	@echo "$(BLUE)2. FastEmbed only...$(NC)"
+	@cargo check --no-default-features --features fastembed --all-targets
+	@echo "$(BLUE)3. HuggingFace only...$(NC)"
+	@cargo check --no-default-features --features huggingface --all-targets
+	@echo "$(BLUE)4. All features...$(NC)"
+	@cargo check --no-default-features --features "fastembed,huggingface" --all-targets
+	@echo "$(GREEN)All feature combinations checked successfully$(NC)"
 
 .PHONY: clean
 clean: ## Clean build artifacts
@@ -125,25 +156,25 @@ test-completions: build-release ## Test shell completion generation
 .PHONY: run
 run: ## Run the application in debug mode
 	@echo "$(YELLOW)Running $(BINARY_NAME) in debug mode...$(NC)"
-	cargo run
+	cargo run --no-default-features
 	@echo "$(GREEN)Application exited$(NC)"
 
 .PHONY: run-release
 run-release: ## Run the application in release mode
 	@echo "$(YELLOW)Running $(BINARY_NAME) in release mode...$(NC)"
-	cargo run --release
+	cargo run --no-default-features --release
 	@echo "$(GREEN)Application exited$(NC)"
 
 .PHONY: build
 build: ## Build the project in debug mode
 	@echo "$(YELLOW)Building $(BINARY_NAME) in debug mode...$(NC)"
-	cargo build
+	cargo build --no-default-features
 	@echo "$(GREEN)Build complete$(NC)"
 
 .PHONY: build-release
 build-release: ## Build the project in release mode
 	@echo "$(YELLOW)Building $(BINARY_NAME) in release mode...$(NC)"
-	cargo build --release
+	cargo build --no-default-features --release
 	@echo "$(GREEN)Release binary built: $(RELEASE_DIR)/$(BINARY_NAME)$(NC)"
 
 .PHONY: build-all
@@ -151,7 +182,7 @@ build-all: install-targets ## Build for all supported platforms
 	@echo "$(YELLOW)Building for all supported platforms...$(NC)"
 	@for target in $(TARGETS); do \
 		echo "Building $$target..."; \
-		cargo build --release --target $$target; \
+		cargo build --no-default-features --release --target $$target; \
 		if [ $$? -eq 0 ]; then \
 			echo "$(GREEN)✓ $$target built successfully$(NC)"; \
 		else \
