@@ -158,6 +158,15 @@ jobs:
           - "fastembed"
           - "huggingface"
           - "fastembed,huggingface"
+        include:
+          - features: ""
+            cache_key: "none"
+          - features: "fastembed"
+            cache_key: "fastembed"
+          - features: "huggingface"
+            cache_key: "huggingface"
+          - features: "fastembed,huggingface"
+            cache_key: "fastembed-huggingface"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -177,9 +186,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-features-${{ matrix.features }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-features-${{ matrix.cache_key }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-features-${{ matrix.features }}-
+            ${{ runner.os }}-cargo-features-${{ matrix.cache_key }}-
 
       - name: Check with features
         run: |
