@@ -21,8 +21,11 @@
 //! # Usage
 //!
 //! ```rust,no_run
-//! use crate::memory::reranker_integration::RerankerIntegration;
+//! use octobrain::memory::reranker_integration::RerankerIntegration;
+//! use octobrain::config::RerankerConfig;
+//! use octobrain::memory::types::MemorySearchResult;
 //!
+//! # async fn example() -> anyhow::Result<()> {
 //! let config = RerankerConfig {
 //!     enabled: true,
 //!     model: "voyage:rerank-2.5".to_string(),
@@ -31,7 +34,11 @@
 //! };
 //!
 //! let reranker = RerankerIntegration::new(config);
+//! let query = "example query";
+//! let results: Vec<MemorySearchResult> = vec![];
 //! let reranked = reranker.rerank_memories(query, results).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::config::RerankerConfig;
