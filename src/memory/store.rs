@@ -94,6 +94,7 @@ impl MemoryStore {
                 Field::new("confidence", DataType::Float32, false),
                 Field::new("tags", DataType::Utf8, true), // JSON serialized
                 Field::new("related_files", DataType::Utf8, true), // JSON serialized
+                Field::new("git_commit", DataType::Utf8, true), // Git commit hash
                 Field::new(
                     "embedding",
                     DataType::FixedSizeList(
@@ -133,9 +134,19 @@ impl MemoryStore {
     /// Store a memory
     pub async fn store_memory(&mut self, memory: &Memory) -> Result<()> {
         // Generate embedding using the optimized single embedding function for better performance
+        let searchable_text = memory.get_searchable_text();
+
+        // Validate that we have text to embed
+        if searchable_text.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "Cannot generate embedding: searchable text is empty. Title: '{}', Content: '{}'",
+                memory.title,
+                memory.content
+            ));
+        }
+
         let embedding =
-            crate::embedding::generate_embeddings(&memory.get_searchable_text(), &self.main_config)
-                .await?;
+            crate::embedding::generate_embeddings(&searchable_text, &self.main_config).await?;
 
         self.store_memory_with_embedding(memory, embedding).await
     }
@@ -352,22 +363,22 @@ impl MemoryStore {
                 .await;
         }
 
-        // Use reranker if enabled and we have enough candidates
+        // Use reranker if enabled, we have a query text, and enough candidates
         if let Some(ref reranker) = self.reranker_integration {
-            let candidates_count = self.main_config.search.reranker.top_k_candidates;
+            if let Some(ref query_text) = query.query_text {
+                // Only use reranker if we have actual query text (not empty)
+                if !query_text.trim().is_empty() {
+                    let candidates_count = self.main_config.search.reranker.top_k_candidates;
 
-            // Only rerank if we have more candidates than final_top_k
-            if candidates_count > 1 {
-                let mut extended_query = query.clone();
-                extended_query.limit = Some(candidates_count);
+                    // Only rerank if we have more candidates than final_top_k
+                    if candidates_count > 1 {
+                        let mut extended_query = query.clone();
+                        extended_query.limit = Some(candidates_count);
 
-                let candidates = self.vector_search(&extended_query).await?;
-                return reranker
-                    .rerank_memories(
-                        query.query_text.as_ref().unwrap_or(&String::new()),
-                        candidates,
-                    )
-                    .await;
+                        let candidates = self.vector_search(&extended_query).await?;
+                        return reranker.rerank_memories(query_text, candidates).await;
+                    }
+                }
             }
         }
         // Fall back to standard vector search

@@ -118,7 +118,7 @@ impl Config {
 
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
-            
+
             // Try to parse config - if it fails due to missing fields, provide clear error
             let config: Self = toml::from_str(&content).map_err(|e| {
                 anyhow::anyhow!(
@@ -137,7 +137,7 @@ impl Config {
                     config_path.display()
                 )
             })?;
-            
+
             Ok(config)
         } else {
             // Config doesn't exist, create from template
