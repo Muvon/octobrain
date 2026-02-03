@@ -29,6 +29,7 @@ use lancedb::{
     Connection, DistanceType,
 };
 
+use super::reranker_integration::RerankerIntegration;
 use super::types::{Memory, MemoryConfig, MemoryQuery, MemoryRelationship, MemorySearchResult};
 use crate::embedding::EmbeddingProvider;
 
@@ -39,17 +40,19 @@ pub struct MemoryStore {
     config: MemoryConfig,
     main_config: crate::config::Config,
     vector_dim: usize,
+    reranker_integration: Option<RerankerIntegration>,
 }
 
 impl MemoryStore {
+    /// Create a new memory store
     /// Create a new memory store
     pub async fn new(
         db_path: &str,
         embedding_provider: Box<dyn EmbeddingProvider>,
         config: MemoryConfig,
         main_config: crate::config::Config,
+        reranker_integration: Option<RerankerIntegration>,
     ) -> Result<Self> {
-        // Connect to LanceDB
         let db = connect(db_path).execute().await?;
 
         // Get vector dimension from the embedding provider by testing with a short text
@@ -62,6 +65,7 @@ impl MemoryStore {
             config,
             main_config,
             vector_dim,
+            reranker_integration,
         };
 
         // Initialize tables
@@ -90,7 +94,6 @@ impl MemoryStore {
                 Field::new("confidence", DataType::Float32, false),
                 Field::new("tags", DataType::Utf8, true), // JSON serialized
                 Field::new("related_files", DataType::Utf8, true), // JSON serialized
-                Field::new("git_commit", DataType::Utf8, true),
                 Field::new(
                     "embedding",
                     DataType::FixedSizeList(
@@ -110,7 +113,6 @@ impl MemoryStore {
         // Create relationships table if it doesn't exist
         if !table_names.contains(&"memory_relationships".to_string()) {
             let schema = Arc::new(Schema::new(vec![
-                Field::new("id", DataType::Utf8, false),
                 Field::new("source_id", DataType::Utf8, false),
                 Field::new("target_id", DataType::Utf8, false),
                 Field::new("relationship_type", DataType::Utf8, false),
@@ -171,7 +173,6 @@ impl MemoryStore {
         let tags_json = serde_json::to_string(&memory.metadata.tags)?;
         let files_json = serde_json::to_string(&memory.metadata.related_files)?;
 
-        // Create embedding array
         let embedding_values = Float32Array::from(embedding);
         let embedding_array = FixedSizeListArray::new(
             Arc::new(Field::new("item", DataType::Float32, true)),
@@ -205,9 +206,10 @@ impl MemoryStore {
         table.delete(&format!("id = '{}'", memory.id)).await.ok();
 
         // Add new memory
+        use arrow::record_batch::RecordBatchIterator;
         use std::iter::once;
         let batches = once(Ok(batch));
-        let batch_reader = arrow::record_batch::RecordBatchIterator::new(batches, schema);
+        let batch_reader = RecordBatchIterator::new(batches, schema);
         table.add(batch_reader).execute().await?;
 
         // Index management moved to separate method for performance
@@ -350,6 +352,24 @@ impl MemoryStore {
                 .await;
         }
 
+        // Use reranker if enabled and we have enough candidates
+        if let Some(ref reranker) = self.reranker_integration {
+            let candidates_count = self.main_config.search.reranker.top_k_candidates;
+
+            // Only rerank if we have more candidates than final_top_k
+            if candidates_count > 1 {
+                let mut extended_query = query.clone();
+                extended_query.limit = Some(candidates_count);
+
+                let candidates = self.vector_search(&extended_query).await?;
+                return reranker
+                    .rerank_memories(
+                        query.query_text.as_ref().unwrap_or(&String::new()),
+                        candidates,
+                    )
+                    .await;
+            }
+        }
         // Fall back to standard vector search
         self.vector_search(query).await
     }
@@ -813,9 +833,10 @@ impl MemoryStore {
             .ok();
 
         // Add new relationship
+        use arrow::record_batch::RecordBatchIterator;
         use std::iter::once;
         let batches = once(Ok(batch));
-        let batch_reader = arrow::record_batch::RecordBatchIterator::new(batches, schema);
+        let batch_reader = RecordBatchIterator::new(batches, schema);
         table.add(batch_reader).execute().await?;
 
         Ok(())
@@ -1209,6 +1230,32 @@ impl MemoryStore {
             "Matches search criteria".to_string()
         } else {
             reasons.join(", ")
+        }
+    }
+
+    /// Enable reranker with optional model override
+    pub fn enable_reranker(&mut self, model: Option<String>) {
+        if let Some(ref mut reranker) = self.reranker_integration {
+            // Update existing reranker config
+            if let Some(m) = model {
+                reranker.config.model = m;
+            }
+            reranker.config.enabled = true;
+        } else {
+            // Create new reranker integration
+            let mut config = self.main_config.search.reranker.clone();
+            config.enabled = true;
+            if let Some(m) = model {
+                config.model = m;
+            }
+            self.reranker_integration = Some(RerankerIntegration::new(config));
+        }
+    }
+
+    /// Disable reranker
+    pub fn disable_reranker(&mut self) {
+        if let Some(ref mut reranker) = self.reranker_integration {
+            reranker.config.enabled = false;
         }
     }
 }

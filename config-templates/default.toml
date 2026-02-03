@@ -5,7 +5,7 @@
 [embedding]
 # Embedding model for memory operations
 # Format: provider:model (e.g., voyage:voyage-3.5-lite, openai:text-embedding-3-small)
-# Default: voyage:voyage-4
+# Default: voyage:voyage-3.5-lite
 model = "voyage:voyage-3.5-lite"
 
 # Batch size for embedding generation (number of texts to process at once)
@@ -62,6 +62,26 @@ recency_decay_days = 30
 keyword_title_weight = 3.0
 keyword_content_weight = 1.0
 keyword_tags_weight = 2.0
+
+[search.reranker]
+# Enable reranking for improved search accuracy
+# Uses cross-encoder models to score query-document pairs
+# Improves accuracy by 20-35% and reduces hallucinations by 35%
+# Default: false (disabled by default for backward compatibility)
+enabled = false
+
+# Reranker model (fully qualified, e.g., voyage:rerank-2.5, voyage:rerank-2.5-lite)
+# Default: voyage:rerank-2.5
+model = "voyage:rerank-2.5"
+
+# Number of candidates to retrieve before reranking
+# Retrieve more candidates for better reranking accuracy
+# Default: 50
+top_k_candidates = 50
+
+# Number of results to return after reranking
+# Default: 10
+final_top_k = 10
 
 [memory]
 # Maximum number of memories to keep in storage
@@ -136,4 +156,3 @@ max_auto_links_per_memory = 5
 # Enables graph traversal in both directions
 # Default: true
 bidirectional_links = true
-

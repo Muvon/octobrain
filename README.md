@@ -156,6 +156,23 @@ similarity_threshold = 0.3
 # Maximum number of results to return from search
 # Default: 50
 max_results = 50
+
+[search.reranker]
+# Enable reranking for improved search accuracy
+# Default: false
+enabled = false
+
+# Reranker model (fully qualified, e.g., voyage:rerank-2.5)
+# Default: voyage:rerank-2.5
+model = "voyage:rerank-2.5"
+
+# Number of candidates to retrieve before reranking
+# Default: 50
+top_k_candidates = 50
+
+# Number of results to return after reranking
+# Default: 10
+final_top_k = 10
 ```
 
 ## Storage Locations

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(name = "octobrain")]
@@ -67,30 +67,33 @@ pub enum MemoryCommand {
     Remember {
         /// What you want to remember or search for (multiple queries for comprehensive search)
         queries: Vec<String>,
-
         /// Filter by memory types (comma-separated)
         #[arg(short = 'm', long)]
         memory_types: Option<String>,
-
         /// Filter by tags (comma-separated)
         #[arg(long)]
         tags: Option<String>,
-
         /// Filter by related files (comma-separated)
         #[arg(long)]
         files: Option<String>,
-
         /// Maximum number of memories to return
         #[arg(short, long, default_value = "10")]
         limit: usize,
-
         /// Minimum relevance score (0.0-1.0)
         #[arg(long)]
         min_relevance: Option<f32>,
-
         /// Output format: text, json, or compact
         #[arg(short, long, default_value = "text")]
         format: String,
+        /// Enable reranking for improved search accuracy
+        #[arg(long, action = ArgAction::SetTrue)]
+        enable_reranker: bool,
+        /// Disable reranking for memory search
+        #[arg(long, action = ArgAction::SetTrue, conflicts_with = "enable_reranker")]
+        disable_reranker: bool,
+        /// Reranker model (fully qualified, e.g., voyage:rerank-2.5)
+        #[arg(long, value_name = "MODEL")]
+        reranker_model: Option<String>,
     },
 
     /// Permanently remove specific memories

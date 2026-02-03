@@ -16,6 +16,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::memory::types::MemoryConfig;
+
 /// Embedding configuration for memory operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingConfig {
@@ -40,8 +41,9 @@ pub struct SearchConfig {
     pub similarity_threshold: f32,
     pub max_results: usize,
     /// Hybrid search configuration
-    #[serde(default)]
     pub hybrid: HybridSearchConfig,
+    /// Reranker configuration for improving search accuracy
+    pub reranker: RerankerConfig,
 }
 
 impl Default for SearchConfig {
@@ -50,6 +52,12 @@ impl Default for SearchConfig {
             similarity_threshold: 0.3,
             max_results: 50,
             hybrid: HybridSearchConfig::default(),
+            reranker: RerankerConfig {
+                enabled: false,
+                model: "voyage:rerank-2.5".to_string(),
+                top_k_candidates: 50,
+                final_top_k: 10,
+            },
         }
     }
 }
@@ -100,23 +108,41 @@ pub struct Config {
     pub search: SearchConfig,
     pub memory: MemoryConfig,
 }
-
 impl Config {
     /// Load configuration from config.toml file
     /// First tries to load from system config directory, falls back to embedded template
+    /// STRICT: All config fields must be explicitly defined - no defaults allowed
     pub fn load() -> Result<Self> {
         // Try to load from system config directory
         let config_path = crate::storage::get_system_config_path()?;
 
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
-            let config: Self = toml::from_str(&content)?;
+            
+            // Try to parse config - if it fails due to missing fields, provide clear error
+            let config: Self = toml::from_str(&content).map_err(|e| {
+                anyhow::anyhow!(
+                    "Config validation failed: {}\n\n\
+                    Your config file is missing required fields or sections.\n\
+                    This likely means you have an old config format.\n\n\
+                    To fix this:\n\
+                    1. Backup your current config: cp {} {}.backup\n\
+                    2. Remove old config: rm {}\n\
+                    3. Run octobrain again to generate new config from template\n\
+                    4. Manually merge your custom settings from backup\n\n\
+                    Or manually add missing sections from config-templates/default.toml",
+                    e,
+                    config_path.display(),
+                    config_path.display(),
+                    config_path.display()
+                )
+            })?;
+            
             Ok(config)
         } else {
             // Config doesn't exist, create from template
             let template_content = include_str!("../config-templates/default.toml");
             let config: Self = toml::from_str(template_content)?;
-
             // Save to system config directory
             if let Some(parent) = config_path.parent() {
                 if !parent.exists() {
@@ -124,8 +150,20 @@ impl Config {
                 }
             }
             std::fs::write(&config_path, template_content)?;
-
             Ok(config)
         }
     }
+}
+
+/// Reranker configuration for improving search result accuracy
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RerankerConfig {
+    /// Enable reranking for memory search
+    pub enabled: bool,
+    /// Reranker model (fully qualified, e.g., "voyage:rerank-2.5")
+    pub model: String,
+    /// Number of candidates to retrieve before reranking
+    pub top_k_candidates: usize,
+    /// Number of results to return after reranking
+    pub final_top_k: usize,
 }

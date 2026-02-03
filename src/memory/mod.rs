@@ -15,14 +15,14 @@
 // Memory module for AI context and conversation state management
 // Uses LanceDB for vector storage and semantic search capabilities
 
+#[cfg(test)]
+mod decay_tests;
 pub mod formatting;
 pub mod git_utils;
 pub mod manager;
+pub mod reranker_integration;
 pub mod store;
 pub mod types;
-
-#[cfg(test)]
-mod decay_tests;
 
 #[cfg(test)]
 mod hybrid_tests;

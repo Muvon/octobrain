@@ -102,7 +102,16 @@ async fn execute_memory_command(
             limit,
             min_relevance,
             format,
+            enable_reranker,
+            disable_reranker,
+            reranker_model,
         } => {
+            // Apply CLI overrides to reranker config
+            if enable_reranker {
+                memory_manager.enable_reranker(reranker_model.clone());
+            } else if disable_reranker {
+                memory_manager.disable_reranker();
+            }
             let mem_types = memory_types.as_ref().map(|types| {
                 types
                     .split(',')

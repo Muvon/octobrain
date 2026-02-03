@@ -23,7 +23,6 @@ use super::types::{
 };
 use crate::config::Config;
 use crate::embedding::{create_embedding_provider_from_parts, parse_provider_model};
-
 /// High-level memory management interface
 pub struct MemoryManager {
     store: MemoryStore,
@@ -35,7 +34,19 @@ impl MemoryManager {
     pub async fn new(config: &Config) -> Result<Self> {
         // Use memory config from main config (loaded from config file)
         let memory_config = config.memory.clone();
-        // Use the same storage system as the main application
+
+        // Create reranker integration if enabled
+        let reranker_integration = if config.search.reranker.enabled {
+            Some(
+                crate::memory::reranker_integration::RerankerIntegration::new(
+                    config.search.reranker.clone(),
+                ),
+            )
+        } else {
+            None
+        };
+
+        // Use to same storage system as to main application
         let current_dir = std::env::current_dir()?;
         let db_path = crate::storage::get_project_database_path(&current_dir)?;
 
@@ -49,6 +60,7 @@ impl MemoryManager {
             embedding_provider,
             memory_config.clone(),
             config.clone(),
+            reranker_integration,
         )
         .await?;
 
@@ -685,6 +697,16 @@ impl MemoryManager {
         } else {
             Ok(false)
         }
+    }
+
+    /// Enable reranker with optional model override
+    pub fn enable_reranker(&mut self, model: Option<String>) {
+        self.store.enable_reranker(model);
+    }
+
+    /// Disable reranker
+    pub fn disable_reranker(&mut self) {
+        self.store.disable_reranker();
     }
 }
 
