@@ -84,6 +84,8 @@ jobs:
           else
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create Release
         id: create_release
@@ -113,9 +115,7 @@ jobs:
               --draft
           fi
 
-      - name: Get release info
-        run: |
-          VERSION="${{ steps.get_version.outputs.VERSION }}"
+          # Get release info
           RELEASE_INFO=$(gh release view "$VERSION" --json id,uploadUrl)
           RELEASE_ID=$(echo "$RELEASE_INFO" | jq -r '.id')
           UPLOAD_URL=$(echo "$RELEASE_INFO" | jq -r '.uploadUrl')
