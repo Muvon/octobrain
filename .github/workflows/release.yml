@@ -238,3 +238,130 @@ jobs:
           --clobber
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+  publish-crate:
+    name: Publish to Crates.io
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@1.91.1
+
+    - name: Cache dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-publish-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-publish-
+          ${{ runner.os }}-cargo-
+
+    - name: Validate version matches tag
+      run: |
+        VERSION="${{ needs.create-release.outputs.version }}"
+        CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+
+        if [ "$VERSION" != "$CARGO_VERSION" ]; then
+          echo "❌ Version mismatch!"
+          echo "Git tag: $VERSION"
+          echo "Cargo.toml: $CARGO_VERSION"
+          echo "Please update Cargo.toml version to match the git tag"
+          exit 1
+        fi
+
+        echo "✅ Version validation passed: $VERSION"
+
+    - name: Check if version already published
+      id: check_published
+      run: |
+        VERSION="${{ needs.create-release.outputs.version }}"
+
+        # Check if this version already exists on crates.io
+        if cargo search octobrain --limit 1 | grep -q "octobrain = \"$VERSION\""; then
+          echo "already_published=true" >> $GITHUB_OUTPUT
+          echo "⚠️  Version $VERSION already published to crates.io"
+        else
+          echo "already_published=false" >> $GITHUB_OUTPUT
+          echo "✅ Version $VERSION not yet published"
+        fi
+
+    - name: Dry run publish
+      if: steps.check_published.outputs.already_published == 'false'
+      run: |
+        echo "🔍 Running dry-run publish to validate package..."
+        cargo publish --dry-run
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+    - name: Publish to crates.io
+      if: steps.check_published.outputs.already_published == 'false'
+      run: |
+        echo "🚀 Publishing to crates.io..."
+        cargo publish
+        echo "✅ Successfully published to crates.io!"
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+    - name: Skip publishing
+      if: steps.check_published.outputs.already_published == 'true'
+      run: |
+        echo "⏭️  Skipping crates.io publish - version already exists"
+
+  finalize-release:
+    name: Finalize Release
+    needs: [create-release, build, publish-crate]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Publish release
+      run: |
+        VERSION="${{ needs.create-release.outputs.version }}"
+
+        # Update release notes with download links
+        cat > release_notes.md << EOF
+        ## 🚀 What's Changed
+
+        ${{ needs.create-release.outputs.changelog }}
+
+        ## 📦 Installation
+
+        ### Using Cargo (from crates.io)
+        \`\`\`bash
+        cargo install octobrain
+        \`\`\`
+
+        ### Using Cargo (from Git)
+        \`\`\`bash
+        cargo install --git https://github.com/${{ github.repository }}
+        \`\`\`
+
+        ### Manual Download
+
+        | Platform | Architecture | Download |
+        |----------|--------------|----------|
+         | Linux | x86_64 (static) | [octobrain-${VERSION}-x86_64-unknown-linux-musl.tar.gz](https://github.com/${{ github.repository }}/releases/download/${VERSION}/octobrain-${VERSION}-x86_64-unknown-linux-musl.tar.gz) |
+         | Linux | ARM64 (static) | [octobrain-${VERSION}-aarch64-unknown-linux-musl.tar.gz](https://github.com/${{ github.repository }}/releases/download/${VERSION}/octobrain-${VERSION}-aarch64-unknown-linux-musl.tar.gz) |
+         | Windows | x86_64 | [octobrain-${VERSION}-x86_64-pc-windows-msvc.zip](https://github.com/${{ github.repository }}/releases/download/${VERSION}/octobrain-${VERSION}-x86_64-pc-windows-msvc.zip) |
+         | Windows | ARM64 | [octobrain-${VERSION}-aarch64-pc-windows-msvc.zip](https://github.com/${{ github.repository }}/releases/download/${VERSION}/octobrain-${VERSION}-aarch64-pc-windows-msvc.zip) |
+         | macOS | x86_64 | [octobrain-${VERSION}-x86_64-apple-darwin.tar.gz](https://github.com/${{ github.repository }}/releases/download/${VERSION}/octobrain-${VERSION}-x86_64-apple-darwin.tar.gz) |
+         | macOS | ARM64 | [octobrain-${VERSION}-aarch64-apple-darwin.tar.gz](https://github.com/${{ github.repository }}/releases/download/${VERSION}/octobrain-${VERSION}-aarch64-apple-darwin.tar.gz) |
+
+         ### Verify Installation
+        \`\`\`bash
+        octobrain --version
+        \`\`\`
+        EOF
+
+        # Publish the release (remove draft status)
+        gh release edit "$VERSION" --draft=false --notes-file release_notes.md
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

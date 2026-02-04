@@ -5,7 +5,22 @@ edition = "2021"
 rust-version = "1.82"
 authors = ["Muvon Un Limited <opensource@muvon.io>"]
 description = "Standalone memory management system for AI context and conversation state"
+homepage = "https://github.com/muvon/octobrain"
+repository = "https://github.com/muvon/octobrain"
+documentation = "https://docs.rs/octobrain"
 license = "Apache-2.0"
+keywords = ["ai", "memory", "semantic-search", "mcp-server", "context"]
+categories = ["development-tools", "command-line-utilities", "database"]
+readme = "README.md"
+exclude = [
+    "tests/fixtures/*",
+    "examples/*",
+    ".github/*",
+    "docs/*",
+    "scripts/*",
+    "*.md",
+    "!README.md"
+]
 
 [[bin]]
 name = "octobrain"
