@@ -145,9 +145,6 @@ jobs:
         - target: aarch64-pc-windows-msvc
           os: windows-11-arm
           archive: zip
-        - target: x86_64-apple-darwin
-          os: macos-14
-          archive: tar.gz
         - target: aarch64-apple-darwin
           os: macos-15
           archive: tar.gz
@@ -197,7 +194,7 @@ jobs:
               rustup target add ${{ matrix.target }} && \
               cargo build --release --target ${{ matrix.target }} --no-default-features
             "
-        elif [ "${{ runner.os }}" = "Windows" ] || [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
+        elif [ "${{ runner.os }}" = "Windows" ]; then
           # Windows and x86_64 macOS: disable default features to avoid ONNX Runtime issues
           cargo build --release --target ${{ matrix.target }} --no-default-features
         else
