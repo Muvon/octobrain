@@ -197,8 +197,8 @@ jobs:
               rustup target add ${{ matrix.target }} && \
               cargo build --release --target ${{ matrix.target }} --no-default-features
             "
-        elif [ "${{ runner.os }}" = "Windows" ]; then
-          # Windows: disable default features to avoid ONNX Runtime issues
+        elif [ "${{ runner.os }}" = "Windows" ] || [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
+          # Windows and x86_64 macOS: disable default features to avoid ONNX Runtime issues
           cargo build --release --target ${{ matrix.target }} --no-default-features
         else
           # macOS: build with default features (fastembed + huggingface work fine)
