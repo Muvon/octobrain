@@ -38,37 +38,26 @@ repos:
       # Remove trailing whitespace
       - id: trailing-whitespace
         name: Trim Trailing Whitespace
-        entry: trailing-whitespace-fixer
-        language: system
 
       # Ensure files end with newline
       - id: end-of-file-fixer
         name: Fix End of Files
-        entry: end-of-file-fixer
-        language: system
 
       # Check for merge conflicts
       - id: check-merge-conflict
         name: Check for merge conflicts
-        entry: check-for-conflict-marker
-        language: system
 
       # Check YAML syntax
       - id: check-yaml
         name: Check YAML
-        entry: check-yaml
-        language: system
         files: \.ya?ml$
 
       # Check TOML syntax
       - id: check-toml
         name: Check TOML
-        entry: check-toml
-        language: system
         files: \.toml$
 
       # Prevent large files from being committed
       - id: check-added-large-files
         name: Check for large files
-        entry: check-added-large-files
         args: ['--maxkb=1000']

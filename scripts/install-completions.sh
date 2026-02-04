@@ -45,14 +45,14 @@ SHELL_TYPE=$(detect_shell)
 # Install bash completion
 install_bash_completion() {
     echo "Installing bash completion..."
-    
+
     # Standard bash completion directories (in order of preference)
     BASH_COMPLETION_DIRS=(
         "$HOME/.local/share/bash-completion/completions"
         "$HOME/.bash_completion.d"
         "/usr/local/etc/bash_completion.d"
     )
-    
+
     # Find first writable directory
     BASH_DIR=""
     for dir in "${BASH_COMPLETION_DIRS[@]}"; do
@@ -61,18 +61,18 @@ install_bash_completion() {
             break
         fi
     done
-    
+
     # Create user directory as fallback
     if [[ -z "$BASH_DIR" ]]; then
         BASH_DIR="$HOME/.local/share/bash-completion/completions"
         mkdir -p "$BASH_DIR"
     fi
-    
+
     # Generate completion
     "$OCTOBRAIN_BIN" completion bash > "$BASH_DIR/octobrain"
-    
+
     echo "✓ Bash completion installed to $BASH_DIR/octobrain"
-    
+
     # Check if bash-completion is properly configured
     if ! grep -q "bash-completion" "$HOME/.bashrc" 2>/dev/null && \
        ! grep -q "bash-completion" "$HOME/.bash_profile" 2>/dev/null; then
@@ -93,7 +93,7 @@ install_bash_completion() {
 # Install zsh completion
 install_zsh_completion() {
     echo "Installing zsh completion..."
-    
+
     # Standard zsh completion directories (in order of preference)
     ZSH_COMPLETION_DIRS=(
         "$HOME/.local/share/zsh/site-functions"
@@ -102,7 +102,7 @@ install_zsh_completion() {
         "/usr/local/share/zsh/site-functions"
         "/usr/share/zsh/site-functions"
     )
-    
+
     # Find first writable directory
     ZSH_DIR=""
     for dir in "${ZSH_COMPLETION_DIRS[@]}"; do
@@ -111,18 +111,18 @@ install_zsh_completion() {
             break
         fi
     done
-    
+
     # Create user directory as fallback
     if [[ -z "$ZSH_DIR" ]]; then
         ZSH_DIR="$HOME/.local/share/zsh/site-functions"
         mkdir -p "$ZSH_DIR"
     fi
-    
+
     # Generate completion
     "$OCTOBRAIN_BIN" completion zsh > "$ZSH_DIR/_octobrain"
-    
+
     echo "✓ Zsh completion installed to $ZSH_DIR/_octobrain"
-    
+
     # Check if directory is in fpath
     if ! grep -q "fpath=($ZSH_DIR)" "$HOME/.zshrc" 2>/dev/null; then
         echo ""

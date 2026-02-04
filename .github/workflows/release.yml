@@ -122,9 +122,8 @@ jobs:
 
           echo "id=${RELEASE_ID}" >> $GITHUB_OUTPUT
           echo "upload_url=${UPLOAD_URL}" >> $GITHUB_OUTPUT
-
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build:
     name: Build ${{ matrix.target }}
