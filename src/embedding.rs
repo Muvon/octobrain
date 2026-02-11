@@ -26,13 +26,9 @@ pub async fn generate_embeddings(contents: &str, config: &Config) -> Result<Vec<
     let model_string = &config.embedding.model;
 
     // Parse provider and model from string
-    let (provider, model) = if let Some((p, m)) = model_string.split_once(':') {
-        (p, m)
-    } else {
-        return Err(anyhow::anyhow!("Invalid model format: {}", model_string));
-    };
+    let (provider, model) = parse_provider_model(model_string)?;
 
-    octolib::embedding::generate_embeddings(contents, provider, model).await
+    octolib::embedding::generate_embeddings(contents, &format!("{:?}", provider), &model).await
 }
 
 /// Truncate output to a maximum number of tokens (approximate)
