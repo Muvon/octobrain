@@ -18,12 +18,14 @@ use tokio::io::{stdin, stdout, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::debug;
 
 use crate::config::Config;
+use crate::mcp::knowledge::KnowledgeProvider;
 use crate::mcp::memory::MemoryProvider;
 use crate::mcp::types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
 /// Simplified MCP Server for memory tools only
 pub struct McpServer {
     memory: tokio::sync::Mutex<Option<MemoryProvider>>,
+    knowledge: tokio::sync::Mutex<Option<KnowledgeProvider>>,
     config: Config,
     working_directory: std::path::PathBuf,
 }
@@ -32,6 +34,7 @@ impl McpServer {
     pub async fn new(config: Config, working_directory: std::path::PathBuf) -> Result<Self> {
         Ok(Self {
             memory: tokio::sync::Mutex::new(None),
+            knowledge: tokio::sync::Mutex::new(None),
             config,
             working_directory,
         })
@@ -117,7 +120,8 @@ impl McpServer {
             }),
 
             "tools/list" => {
-                let tools = MemoryProvider::get_tool_definitions();
+                let mut tools = MemoryProvider::get_tool_definitions();
+                tools.extend(KnowledgeProvider::get_tool_definitions());
                 Some(JsonRpcResponse {
                     jsonrpc: "2.0".to_string(),
                     id,
@@ -131,49 +135,103 @@ impl McpServer {
                 let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
-                let memory = match self.get_or_init_memory().await {
-                    Ok(memory) => memory,
-                    Err(err) => {
-                        return Some(JsonRpcResponse {
+                // Check if it's a memory or knowledge tool
+                let is_memory_tool = matches!(
+                    tool_name,
+                    "memorize" | "remember" | "forget" | "auto_link" | "memory_graph"
+                );
+                let is_knowledge_tool = tool_name == "knowledge_search";
+
+                let response = if is_memory_tool {
+                    let memory = match self.get_or_init_memory().await {
+                        Ok(memory) => memory,
+                        Err(err) => {
+                            return Some(JsonRpcResponse {
+                                jsonrpc: "2.0".to_string(),
+                                id,
+                                result: None,
+                                error: Some(err.into_jsonrpc()),
+                            });
+                        }
+                    };
+
+                    let result = match tool_name {
+                        "memorize" => memory.execute_memorize(&arguments).await,
+                        "remember" => memory.execute_remember(&arguments).await,
+                        "forget" => memory.execute_forget(&arguments).await,
+                        "auto_link" => memory.execute_auto_link(&arguments).await,
+                        "memory_graph" => memory.execute_memory_graph(&arguments).await,
+                        _ => unreachable!(),
+                    };
+
+                    match result {
+                        Ok(content) => JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id,
+                            result: Some(json!({
+                                "content": [{
+                                    "type": "text",
+                                    "text": content
+                                }]
+                            })),
+                            error: None,
+                        },
+                        Err(e) => JsonRpcResponse {
                             jsonrpc: "2.0".to_string(),
                             id,
                             result: None,
-                            error: Some(err.into_jsonrpc()),
-                        });
+                            error: Some(e.into_jsonrpc()),
+                        },
                     }
-                };
+                } else if is_knowledge_tool {
+                    let knowledge = match self.get_or_init_knowledge().await {
+                        Ok(knowledge) => knowledge,
+                        Err(err) => {
+                            return Some(JsonRpcResponse {
+                                jsonrpc: "2.0".to_string(),
+                                id,
+                                result: None,
+                                error: Some(err.into_jsonrpc()),
+                            });
+                        }
+                    };
 
-                let result = match tool_name {
-                    "memorize" => memory.execute_memorize(&arguments).await,
-                    "remember" => memory.execute_remember(&arguments).await,
-                    "forget" => memory.execute_forget(&arguments).await,
-                    "auto_link" => memory.execute_auto_link(&arguments).await,
-                    "memory_graph" => memory.execute_memory_graph(&arguments).await,
-                    _ => Err(crate::mcp::types::McpError::method_not_found(
-                        format!("Unknown tool: {}", tool_name),
-                        "tools/call",
-                    )),
-                };
+                    let result = knowledge.execute_knowledge_search(&arguments).await;
 
-                let response = match result {
-                    Ok(content) => JsonRpcResponse {
-                        jsonrpc: "2.0".to_string(),
-                        id,
-                        result: Some(json!({
-                            "content": [{
-                                "type": "text",
-                                "text": content
-                            }]
-                        })),
-                        error: None,
-                    },
-                    Err(e) => JsonRpcResponse {
+                    match result {
+                        Ok(content) => JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id,
+                            result: Some(json!({
+                                "content": [{
+                                    "type": "text",
+                                    "text": content
+                                }]
+                            })),
+                            error: None,
+                        },
+                        Err(e) => JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id,
+                            result: None,
+                            error: Some(e.into_jsonrpc()),
+                        },
+                    }
+                } else {
+                    JsonRpcResponse {
                         jsonrpc: "2.0".to_string(),
                         id,
                         result: None,
-                        error: Some(e.into_jsonrpc()),
-                    },
+                        error: Some(
+                            crate::mcp::types::McpError::method_not_found(
+                                format!("Unknown tool: {}", tool_name),
+                                "tools/call",
+                            )
+                            .into_jsonrpc(),
+                        ),
+                    }
                 };
+
                 Some(response)
             }
 
@@ -211,6 +269,26 @@ impl McpServer {
         }
 
         let provider = MemoryProvider::new(&self.config, self.working_directory.clone()).await?;
+        *guard = Some(provider.clone());
+        Ok(provider)
+    }
+
+    async fn get_or_init_knowledge(
+        &self,
+    ) -> Result<KnowledgeProvider, crate::mcp::types::McpError> {
+        {
+            let guard = self.knowledge.lock().await;
+            if let Some(provider) = guard.as_ref() {
+                return Ok(provider.clone());
+            }
+        }
+
+        let mut guard = self.knowledge.lock().await;
+        if let Some(provider) = guard.as_ref() {
+            return Ok(provider.clone());
+        }
+
+        let provider = KnowledgeProvider::new(&self.config).await?;
         *guard = Some(provider.clone());
         Ok(provider)
     }

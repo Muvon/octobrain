@@ -12,23 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config::Config;
-use anyhow::Result;
-
 // Re-export embedding functionality from octolib
 pub use octolib::embedding::{
-    create_embedding_provider_from_parts, parse_provider_model, provider::EmbeddingProvider,
+    parse_provider_model, provider::create_embedding_provider_from_parts,
+    provider::EmbeddingProvider, types::InputType,
 };
 
-/// Generate embeddings for text content
-pub async fn generate_embeddings(contents: &str, config: &Config) -> Result<Vec<f32>> {
-    // Get model string from config
-    let model_string = &config.embedding.model;
+/// Create embedding provider from config
+pub async fn create_embedding_provider(
+    config: &crate::config::Config,
+) -> anyhow::Result<Box<dyn EmbeddingProvider>> {
+    let (provider, model) = parse_provider_model(&config.embedding.model)?;
+    create_embedding_provider_from_parts(&provider, &model).await
+}
 
-    // Parse provider and model from string
-    let (provider, model) = parse_provider_model(model_string)?;
+/// Generate embeddings for a single text
+pub async fn generate_embedding(
+    text: &str,
+    provider: &dyn EmbeddingProvider,
+) -> anyhow::Result<Vec<f32>> {
+    provider.generate_embedding(text).await
+}
 
-    octolib::embedding::generate_embeddings(contents, &format!("{:?}", provider), &model).await
+/// Generate embeddings for multiple texts using batch API
+pub async fn generate_embeddings_batch(
+    texts: Vec<String>,
+    provider: &dyn EmbeddingProvider,
+) -> anyhow::Result<Vec<Vec<f32>>> {
+    provider
+        .generate_embeddings_batch(texts, InputType::None)
+        .await
 }
 
 /// Truncate output to a maximum number of tokens (approximate)

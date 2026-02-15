@@ -16,9 +16,10 @@ use anyhow::Result;
 use serde_json::Value;
 use std::io::{self, Write};
 
-use crate::cli::{Commands, MemoryCommand};
+use crate::cli::{Commands, KnowledgeCommand, MemoryCommand};
 use crate::config::Config;
 use crate::constants::MAX_QUERIES;
+use crate::knowledge::KnowledgeManager;
 use crate::mcp::server::McpServer;
 use crate::memory::{MemoryManager, MemoryQuery, MemoryType};
 
@@ -27,6 +28,10 @@ pub async fn execute(config: &Config, command: Commands) -> Result<()> {
         Commands::Memory { command } => {
             let mut memory_manager = MemoryManager::new(config).await?;
             execute_memory_command(&mut memory_manager, command).await
+        }
+        Commands::Knowledge { command } => {
+            let mut knowledge_manager = KnowledgeManager::new(config).await?;
+            execute_knowledge_command(&mut knowledge_manager, command).await
         }
         Commands::Mcp => {
             // Initialize file-only logging for MCP server (no console output)
@@ -676,6 +681,56 @@ async fn execute_memory_command(
     }
 
     Ok(())
+}
+
+async fn execute_knowledge_command(
+    knowledge_manager: &mut KnowledgeManager,
+    command: KnowledgeCommand,
+) -> Result<()> {
+    match command {
+        KnowledgeCommand::Index { url } => {
+            println!("Fetching URL...");
+            let result = knowledge_manager.index_url(&url).await?;
+
+            if result.was_cached && !result.content_changed {
+                println!("✓ Cached: {} (content unchanged)", result.url);
+            } else {
+                println!(
+                    "✓ Indexed: {} ({} chunks created)",
+                    result.url, result.chunks_created
+                );
+            }
+            Ok(())
+        }
+        KnowledgeCommand::Search { query, url } => {
+            let results = knowledge_manager.search(&query, url.as_deref()).await?;
+
+            if results.is_empty() {
+                println!("No results found");
+            } else {
+                use crate::knowledge::formatting::format_search_results;
+                println!("{}", format_search_results(&results));
+            }
+            Ok(())
+        }
+        KnowledgeCommand::Delete { url } => {
+            knowledge_manager.delete_source(&url).await?;
+            println!("✓ Deleted {} from knowledge base", url);
+            Ok(())
+        }
+        KnowledgeCommand::Stats => {
+            let stats = knowledge_manager.get_stats().await?;
+            use crate::knowledge::formatting::format_stats;
+            println!("{}", format_stats(&stats));
+            Ok(())
+        }
+        KnowledgeCommand::List { limit } => {
+            let sources = knowledge_manager.list_sources(Some(limit)).await?;
+            use crate::knowledge::formatting::format_source_list;
+            println!("{}", format_source_list(&sources));
+            Ok(())
+        }
+    }
 }
 
 fn format_memories(memories: &[crate::memory::Memory], format: &str) {
