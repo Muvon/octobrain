@@ -6,9 +6,11 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
+use lance_index::scalar::FullTextSearchQuery;
 use lancedb::{
     connect,
-    query::{ExecutableQuery, QueryBase},
+    index::Index,
+    query::{ExecutableQuery, QueryBase, QueryExecutionOptions},
     Connection, DistanceType,
 };
 use std::sync::Arc;
@@ -85,6 +87,16 @@ impl KnowledgeStore {
                 .create_table("knowledge_chunks", batch_reader)
                 .execute()
                 .await?;
+
+            // Create FTS index on content column for hybrid search (BM25 + Vector)
+            let table = self.db.open_table("knowledge_chunks").execute().await?;
+            table
+                .create_index(&["content"], Index::FTS(Default::default()))
+                .execute()
+                .await
+                .context("Failed to create FTS index on content column")?;
+
+            tracing::info!("Created FTS index on knowledge_chunks.content for hybrid search");
         }
 
         Ok(())
@@ -207,8 +219,10 @@ impl KnowledgeStore {
     pub async fn search(
         &self,
         query_embedding: &[f32],
+        query_text: &str,
         source_url: Option<&str>,
         limit: usize,
+        use_hybrid: bool,
     ) -> Result<Vec<KnowledgeSearchResult>> {
         let table = self.db.open_table("knowledge_chunks").execute().await?;
 
@@ -217,11 +231,25 @@ impl KnowledgeStore {
             .distance_type(DistanceType::Cosine)
             .limit(limit);
 
+        // Add full-text search for hybrid mode
+        if use_hybrid {
+            let fts_query = FullTextSearchQuery::new(query_text.to_string());
+            query = query.full_text_search(fts_query);
+        }
+
         if let Some(url) = source_url {
             query = query.only_if(format!("source_url = '{}'", Self::quote_filter_string(url)));
         }
 
-        let mut results = query.execute().await?;
+        // Execute hybrid search if enabled, otherwise regular vector search
+        let mut results = if use_hybrid {
+            query
+                .execute_hybrid(QueryExecutionOptions::default())
+                .await?
+        } else {
+            query.execute().await?
+        };
+
         let mut search_results = Vec::new();
 
         while let Some(batch) = results.try_next().await? {

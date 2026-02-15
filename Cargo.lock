@@ -4966,6 +4966,7 @@ dependencies = [
  "futures",
  "hex",
  "html2text",
+ "lance-index",
  "lancedb",
  "octolib",
  "reqwest 0.12.28",

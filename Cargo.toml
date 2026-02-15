@@ -32,6 +32,7 @@ huggingface = ["octolib/huggingface"]
 
 [dependencies]
 lancedb = { version = "0.23.1", default-features = false }
+lance-index = "1.0.1"
 tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "time", "sync", "io-util", "io-std", "process"] }
 arrow = { version = "56.2.0", default-features = false, features = ["prettyprint"] }
 arrow-array = { version = "56.2.0", default-features = false }

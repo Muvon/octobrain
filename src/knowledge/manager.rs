@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
 use std::sync::Arc;
 
-use crate::config::{Config, KnowledgeConfig};
+use crate::config::{Config, KnowledgeConfig, SearchConfig};
 use crate::embedding::EmbeddingProvider;
 use crate::knowledge::chunker::HtmlChunker;
 use crate::knowledge::store::KnowledgeStore;
@@ -10,6 +10,7 @@ use crate::knowledge::types::{IndexResult, KnowledgeSearchResult, KnowledgeStats
 
 pub struct KnowledgeManager {
     config: KnowledgeConfig,
+    search_config: SearchConfig,
     store: KnowledgeStore,
     chunker: HtmlChunker,
     embedding_provider: Arc<dyn EmbeddingProvider>,
@@ -28,6 +29,7 @@ impl KnowledgeManager {
 
         Ok(Self {
             config: config.knowledge.clone(),
+            search_config: config.search.clone(),
             store,
             chunker,
             embedding_provider: Arc::from(embedding_provider),
@@ -50,9 +52,18 @@ impl KnowledgeManager {
         // Generate query embedding
         let query_embedding = self.embedding_provider.generate_embedding(query).await?;
 
-        // Search with configurable limit
+        // Use global hybrid search flag
+        let use_hybrid = self.search_config.hybrid.enabled;
+
+        // Search with configurable limit and hybrid flag
         self.store
-            .search(&query_embedding, source_url, self.config.max_results)
+            .search(
+                &query_embedding,
+                query,
+                source_url,
+                self.config.max_results,
+                use_hybrid,
+            )
             .await
     }
 
