@@ -17,6 +17,12 @@ use std::sync::Arc;
 
 use crate::knowledge::types::{KnowledgeChunk, KnowledgeSearchResult, KnowledgeStats};
 
+/// RRF (Reciprocal Rank Fusion) constant k
+/// Default value from LanceDB, based on research paper:
+/// https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf
+/// "Experiments indicate that k = 60 was near-optimal, but that the choice is not critical"
+const RRF_K: f32 = 60.0;
+
 pub struct KnowledgeStore {
     db: Connection,
     vector_dim: usize,
@@ -305,14 +311,43 @@ impl KnowledgeStore {
                 .as_any()
                 .downcast_ref::<Int32Array>()
                 .unwrap();
-            let distances = batch
-                .column_by_name("_distance")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .unwrap();
+            // Extract score column - hybrid search uses _relevance_score, vector search uses _distance
+            // LanceDB hybrid search with RRF reranking returns _relevance_score (raw RRF scores)
+            // RRF formula: score = sum of 1/(rank + k) for each ranking (vector + FTS)
+            // Max possible score is 2/k (if rank 0 in both)
+            // Regular vector search returns _distance (0-2 for cosine, lower is better)
+            let relevance_scores: Vec<f32> = if use_hybrid {
+                // Hybrid search: normalize RRF scores to 0-1 range
+                // Max possible RRF score is 2/k (when rank=0 in both vector and FTS)
+                let max_rrf_score = 2.0 / RRF_K;
 
-            for i in 0..batch.num_rows() {
+                batch
+                    .column_by_name("_relevance_score")
+                    .and_then(|col| col.as_any().downcast_ref::<Float32Array>())
+                    .map(|arr| {
+                        (0..arr.len())
+                            .map(|i| {
+                                let raw_score = arr.value(i);
+                                // Normalize: divide by max possible score
+                                (raw_score / max_rrf_score).min(1.0)
+                            })
+                            .collect::<Vec<f32>>()
+                    })
+                    .unwrap_or_else(|| vec![0.5; batch.num_rows()])
+            } else {
+                // Vector search: convert _distance to relevance (1.0 - distance for cosine)
+                batch
+                    .column_by_name("_distance")
+                    .and_then(|col| col.as_any().downcast_ref::<Float32Array>())
+                    .map(|arr| {
+                        (0..arr.len())
+                            .map(|i| 1.0 - arr.value(i))
+                            .collect::<Vec<f32>>()
+                    })
+                    .unwrap_or_else(|| vec![0.5; batch.num_rows()])
+            };
+
+            for (i, &relevance_score) in relevance_scores.iter().enumerate() {
                 let section_path_array = section_paths.value(i);
                 let section_path_strings = section_path_array
                     .as_any()
@@ -332,9 +367,6 @@ impl KnowledgeStore {
                     char_start: char_starts.value(i) as usize,
                     char_end: char_ends.value(i) as usize,
                 };
-
-                let distance = distances.value(i);
-                let relevance_score = 1.0 - distance;
 
                 search_results.push(KnowledgeSearchResult {
                     chunk,
