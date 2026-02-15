@@ -160,19 +160,19 @@ bidirectional_links = true
 [knowledge]
 # Size of each text chunk in characters
 # Default: 800
-chunk_size = 800
+chunk_size = 2000
 
 # Overlap between chunks in characters (~20% of chunk_size)
 # Maintains context across chunk boundaries
 # Default: 150
-chunk_overlap = 150
+chunk_overlap = 200
 
 # Days after which indexed content is considered outdated
 # Outdated content will be reindexed on next search
 # Default: 90
-outdating_days = 90
+outdating_days = 15
 
 # Maximum number of results to return from knowledge search
-# Default: 10
-max_results = 10
+# Default: 5
+max_results = 5
 
