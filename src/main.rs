@@ -21,6 +21,7 @@ mod commands;
 mod config;
 mod constants;
 mod embedding;
+mod knowledge;
 mod mcp;
 mod memory;
 mod storage;

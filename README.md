@@ -8,7 +8,8 @@ Standalone memory management system for AI context and conversation state.
 - **Vector Storage**: LanceDB for efficient vector similarity search
 - **Git Integration**: Automatic context tracking with Git commits
 - **Memory Commands**: Complete memory lifecycle management under `memory` subcommand
-- **MCP Server**: Model Context Protocol server exposing memory tools
+- **Knowledge Base**: Web content indexing and semantic search for persistent knowledge
+- **MCP Server**: Model Context Protocol server exposing memory and knowledge tools
 - **Platform-Specific Storage**: Uses standard XDG data directories per OS
 
 ## Installation
@@ -59,7 +60,8 @@ model = "voyage:voyage-3.5-lite"  # or "openai:text-embedding-3-small", etc.
 Octobrain has three top-level commands:
 
 - `memory` - Memory management for storing and retrieving information
-- `mcp` - Start MCP server (Model Context Protocol) exposing memory tools
+- `knowledge` - Knowledge base management for web content indexing and search
+- `mcp` - Start MCP server (Model Context Protocol) exposing memory and knowledge tools
 - `help` - Print this message or help of the given subcommand(s)
 
 ### Memory Commands
@@ -113,18 +115,49 @@ octobrain memory relationships <memory-id>
 octobrain memory related <memory-id>
 ```
 
+### Knowledge Commands
+
+Knowledge base commands for web content indexing and semantic search:
+
+```bash
+# Index a URL into knowledge base (fetches and chunks content)
+octobrain knowledge index https://example.com/docs
+
+# Search knowledge base
+octobrain knowledge search "how to configure authentication"
+
+# Search within a specific URL (auto-indexes if needed)
+octobrain knowledge search "authentication" --url https://example.com/docs
+
+# Delete a URL and all its chunks from knowledge base
+octobrain knowledge delete https://example.com/docs
+
+# Show knowledge base statistics
+octobrain knowledge stats
+
+# List indexed sources
+octobrain knowledge list --limit 20
+```
+
 ### MCP Server
 
-Start the MCP server to expose memory tools via Model Context Protocol:
+Start the MCP server to expose memory and knowledge tools via Model Context Protocol:
 
 ```bash
 octobrain mcp
 ```
 
-The server exposes three tools:
-- `memorize`: Store new memories
-- `remember`: Semantic search with multi-query support
-- `forget`: Delete memories by ID or query
+The server exposes six tools:
+
+**Memory Tools:**
+- `memorize`: Store new memories with metadata (title, content, type, tags, importance)
+- `remember`: Semantic search with multi-query support and filters
+- `forget`: Delete memories by ID or query (requires confirmation)
+- `auto_link`: Find and connect related memories based on semantic similarity
+- `memory_graph`: Explore memory relationships with multi-hop graph traversal
+
+**Knowledge Tools:**
+- `knowledge_search`: Search indexed web knowledge with optional auto-indexing. Provide a URL to search within that source (auto-indexes if outdated), or omit URL to search across all indexed knowledge.
 
 ## Configuration
 

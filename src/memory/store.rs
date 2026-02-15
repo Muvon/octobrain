@@ -145,8 +145,11 @@ impl MemoryStore {
             ));
         }
 
-        let embedding =
-            crate::embedding::generate_embeddings(&searchable_text, &self.main_config).await?;
+        let embedding = crate::embedding::generate_embedding(
+            &searchable_text,
+            self.embedding_provider.as_ref(),
+        )
+        .await?;
 
         self.store_memory_with_embedding(memory, embedding).await
     }
