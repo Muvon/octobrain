@@ -101,12 +101,33 @@ impl Default for HybridSearchConfig {
     }
 }
 
+/// Knowledge base configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeConfig {
+    pub chunk_size: usize,
+    pub chunk_overlap: usize,
+    pub outdating_days: u64,
+    pub max_results: usize,
+}
+
+impl Default for KnowledgeConfig {
+    fn default() -> Self {
+        Self {
+            chunk_size: 800,
+            chunk_overlap: 150,
+            outdating_days: 90,
+            max_results: 10,
+        }
+    }
+}
+
 /// Main configuration for octobrain
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub embedding: EmbeddingConfig,
     pub search: SearchConfig,
     pub memory: MemoryConfig,
+    pub knowledge: KnowledgeConfig,
 }
 impl Config {
     /// Load configuration from config.toml file
@@ -137,6 +158,15 @@ impl Config {
                     config_path.display()
                 )
             })?;
+
+            // Validate knowledge config
+            if config.knowledge.chunk_overlap >= config.knowledge.chunk_size {
+                anyhow::bail!(
+                    "Invalid knowledge configuration: chunk_overlap ({}) must be less than chunk_size ({})",
+                    config.knowledge.chunk_overlap,
+                    config.knowledge.chunk_size
+                );
+            }
 
             Ok(config)
         } else {

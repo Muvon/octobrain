@@ -30,6 +30,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: MemoryCommand,
     },
+    /// Knowledge base management for web content indexing and search
+    Knowledge {
+        #[command(subcommand)]
+        command: KnowledgeCommand,
+    },
     /// Start MCP server (Model Context Protocol) exposing memory tools
     Mcp,
 }
@@ -295,5 +300,40 @@ pub enum MemoryCommand {
         /// Output format: text, json, or compact
         #[arg(short, long, default_value = "text")]
         format: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum KnowledgeCommand {
+    /// Manually index a URL into knowledge base
+    Index {
+        /// URL to index
+        url: String,
+    },
+
+    /// Search knowledge base semantically
+    Search {
+        /// Search query
+        query: String,
+
+        /// Filter by specific URL (auto-indexes if needed)
+        #[arg(long)]
+        url: Option<String>,
+    },
+
+    /// Delete indexed URL and all its chunks
+    Delete {
+        /// URL to delete
+        url: String,
+    },
+
+    /// Show knowledge base statistics
+    Stats,
+
+    /// List indexed sources with metadata
+    List {
+        /// Maximum number of sources to list
+        #[arg(long, default_value = "20")]
+        limit: usize,
     },
 }

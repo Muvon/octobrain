@@ -50,6 +50,10 @@ dirs = "6.0.0"
 dotenvy = "0.15"
 toml = "0.9.0"
 sha2 = "0.10"
+hex = "0.4"
+html2text = "0.12"
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls"] }
+colored = "2.1"
 
 # Local dep for testing
 # octolib = { path = "../octolib", default-features = false }

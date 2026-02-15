@@ -20,6 +20,7 @@
 pub mod config;
 pub mod constants;
 pub mod embedding;
+pub mod knowledge;
 pub mod mcp;
 pub mod memory;
 pub mod storage;
