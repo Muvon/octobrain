@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.2.0] - 2026-02-16
+
+### 📋 Release Summary
+
+This release introduces hybrid BM25 search for more accurate knowledge retrieval and adds live URL indexing for real-time content extraction (0dda1e5e, f10cfea5). Performance and stability improvements include optimized search relevance scoring, refined knowledge base defaults, and updated core dependencies (b04079e8, f7f8b22d, 1771be34, 754e8ec2).
+
+
+### ✨ New Features & Enhancements
+
+- **knowledge**: add bm25 hybrid search to knowledge retrieval `0dda1e5e`
+- **knowledge**: add URL indexing with live extraction `f10cfea5`
+
+### 🔧 Improvements & Optimizations
+
+- **octolib**: upgrade to 0.8.1 and update embedding interface `6a650b6f`
+
+### 🐛 Bug Fixes & Stability
+
+- **knowledge**: resolve hybrid search relevance scoring and crash `b04079e8`
+- **config**: adjust knowledge base defaults for better performance `f7f8b22d`
+
+### 🔄 Other Changes
+
+- **deps**: bump octolib to 0.9.0 `1771be34`
+- **deps**: update tokio chrono uuid clap versions `754e8ec2`
+
+### 📊 Release Summary
+
+**Total commits**: 7 across 4 categories
+
+✨ **2** new features - *Enhanced functionality*
+🔧 **1** improvement - *Better performance & code quality*
+🐛 **2** bug fixes - *Improved stability*
+🔄 **2** other changes - *Maintenance & tooling*
+
 All notable changes to this project will be documented in this file.
 
 ## [0.1.0] - 2026-02-04
