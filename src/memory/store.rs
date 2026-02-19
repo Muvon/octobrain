@@ -356,36 +356,53 @@ impl MemoryStore {
         Ok(None)
     }
 
-    /// Search memories using vector similarity and optional filters
-    /// Uses hybrid search when enabled (vector + keyword + recency + importance)
+    /// Search memories using vector similarity and optional filters.
+    /// Uses hybrid search when enabled (vector + keyword + recency + importance).
+    /// If reranker is enabled, it is applied as a final post-processing step on
+    /// whichever search path ran (hybrid or vector).
     pub async fn search_memories(&self, query: &MemoryQuery) -> Result<Vec<MemorySearchResult>> {
-        // Use hybrid search if enabled and we have a text query
-        if self.main_config.search.hybrid.enabled && query.query_text.is_some() {
-            return self
-                .hybrid_search(&self.convert_to_hybrid_query(query))
-                .await;
-        }
+        // Determine if reranker should run (needs non-empty query text)
+        let reranker_query_text = self
+            .reranker_integration
+            .as_ref()
+            .filter(|r| r.config.enabled)
+            .and(query.query_text.as_deref())
+            .filter(|t| !t.trim().is_empty())
+            .map(|t| t.to_string());
 
-        // Use reranker if enabled, we have a query text, and enough candidates
-        if let Some(ref reranker) = self.reranker_integration {
-            if let Some(ref query_text) = query.query_text {
-                // Only use reranker if we have actual query text (not empty)
-                if !query_text.trim().is_empty() {
-                    let candidates_count = self.main_config.search.reranker.top_k_candidates;
-
-                    // Only rerank if we have more candidates than final_top_k
-                    if candidates_count > 1 {
-                        let mut extended_query = query.clone();
-                        extended_query.limit = Some(candidates_count);
-
-                        let candidates = self.vector_search(&extended_query).await?;
-                        return reranker.rerank_memories(query_text, candidates).await;
-                    }
+        // Fetch candidates from the appropriate search path
+        let candidates = if self.main_config.search.hybrid.enabled && query.query_text.is_some() {
+            // Hybrid path: when reranker is active, fetch more candidates so it has
+            // enough material to rerank; otherwise use the normal hybrid limit.
+            let mut hybrid_query = self.convert_to_hybrid_query(query);
+            if reranker_query_text.is_some() {
+                let top_k = self.main_config.search.reranker.top_k_candidates;
+                if top_k > 1 {
+                    hybrid_query.filters.limit = Some(top_k);
                 }
             }
+            self.hybrid_search(&hybrid_query).await?
+        } else if reranker_query_text.is_some() {
+            // Vector-only path with reranker: fetch extended candidate set
+            let top_k = self.main_config.search.reranker.top_k_candidates;
+            let mut extended_query = query.clone();
+            if top_k > 1 {
+                extended_query.limit = Some(top_k);
+            }
+            self.vector_search(&extended_query).await?
+        } else {
+            // Standard vector search, no reranker
+            return self.vector_search(query).await;
+        };
+
+        // Apply reranker as a post-processing step if enabled
+        if let (Some(ref query_text), Some(ref reranker)) =
+            (reranker_query_text, &self.reranker_integration)
+        {
+            return reranker.rerank_memories(query_text, candidates).await;
         }
-        // Fall back to standard vector search
-        self.vector_search(query).await
+
+        Ok(candidates)
     }
 
     /// Standard vector search with temporal decay
