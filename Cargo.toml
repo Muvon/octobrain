@@ -58,5 +58,6 @@ reqwest = { version = "0.12", features = ["blocking", "rustls-tls"] }
 colored = "2.1"
 
 # Local dep for testing
-octolib = { path = "../octolib", default-features = false }
-# octolib = { version = "0.9.3", default-features = false }
+# octolib = { path = "../octolib", default-features = false }
+octolib = { version = "0.10.0", default-features = false }
+
