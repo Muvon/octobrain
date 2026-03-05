@@ -158,14 +158,16 @@ max_auto_links_per_memory = 5
 bidirectional_links = true
 
 [knowledge]
-# Size of each text chunk in characters
-# Default: 800
-chunk_size = 2000
+# Size of each child chunk in characters — what gets embedded and matched.
+# Parent sections larger than this are split into children; the full section
+# is stored as parent_content and returned to the user for richer context.
+# Default: 1200
+chunk_size = 1200
 
-# Overlap between chunks in characters (~20% of chunk_size)
+# Overlap between child chunks in characters (~25% of chunk_size)
 # Maintains context across chunk boundaries
-# Default: 150
-chunk_overlap = 200
+# Default: 300
+chunk_overlap = 300
 
 # Days after which indexed content is considered outdated
 # Outdated content will be reindexed on next search
@@ -175,4 +177,3 @@ outdating_days = 15
 # Maximum number of results to return from knowledge search
 # Default: 5
 max_results = 5
-

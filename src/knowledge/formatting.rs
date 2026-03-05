@@ -28,11 +28,17 @@ pub fn format_search_results(results: &[KnowledgeSearchResult]) -> String {
             output.push('\n');
         }
 
-        // Content preview (first 200 chars)
-        let content = if result.chunk.content.chars().count() > 200 {
-            format!("{}...", truncate_chars(&result.chunk.content, 200))
+        // Show parent_content (full section) when available, else fall back to child content.
+        // Truncate at 500 chars — enough context without flooding the terminal.
+        let display_text = result
+            .chunk
+            .parent_content
+            .as_deref()
+            .unwrap_or(&result.chunk.content);
+        let content = if display_text.chars().count() > 500 {
+            format!("{}...", truncate_chars(display_text, 500))
         } else {
-            result.chunk.content.clone()
+            display_text.to_string()
         };
         output.push_str(&content);
         output.push('\n');

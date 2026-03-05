@@ -217,6 +217,7 @@ impl HtmlChunker {
             source_title: title.to_string(),
             chunk_index,
             content: full_content,
+            parent_content: None,
             section_path: section_path.to_vec(),
             char_start: char_range.0,
             char_end: char_range.1,
@@ -232,24 +233,32 @@ impl HtmlChunker {
             let content_without_header = self.extract_content_without_header(&chunk.content);
 
             if content_without_header.len() <= self.config.chunk_size {
-                // Chunk is small enough, keep as is
+                // Section fits in one child — no parent needed
                 let mut new_chunk = chunk;
                 new_chunk.chunk_index = global_index;
                 result.push(new_chunk);
                 global_index += 1;
             } else {
-                // Split into smaller chunks with overlap
+                // Section is large: split into children, attach full section as parent.
+                // Cap parent at 4× chunk_size so absurdly long sections don't bloat results.
                 let header = self.extract_header(&chunk.content);
+                let parent_text = {
+                    let max = self.config.chunk_size * 4;
+                    let cap =
+                        self.floor_char_boundary(&chunk.content, chunk.content.len().min(max));
+                    chunk.content[..cap].to_string()
+                };
                 let splits = self.split_text_with_overlap(&content_without_header);
 
                 for (i, split) in splits.into_iter().enumerate() {
-                    let full_content = format!("{}\n\n{}", header, split);
+                    let child_content = format!("{}\n\n{}", header, split);
                     result.push(KnowledgeChunk {
                         id: uuid::Uuid::new_v4().to_string(),
                         source_url: chunk.source_url.clone(),
                         source_title: chunk.source_title.clone(),
                         chunk_index: global_index,
-                        content: full_content,
+                        content: child_content,
+                        parent_content: Some(parent_text.clone()),
                         section_path: chunk.section_path.clone(),
                         char_start: chunk.char_start
                             + i * (self.config.chunk_size - self.config.chunk_overlap),

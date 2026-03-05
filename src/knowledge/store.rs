@@ -48,62 +48,77 @@ impl KnowledgeStore {
     async fn initialize_table(&self) -> Result<()> {
         let table_names = self.db.table_names().execute().await?;
 
-        if !table_names.contains(&"knowledge_chunks".to_string()) {
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("id", DataType::Utf8, false),
-                Field::new("source_url", DataType::Utf8, false),
-                Field::new("source_title", DataType::Utf8, false),
-                Field::new("chunk_index", DataType::Int32, false),
-                Field::new("content", DataType::Utf8, false),
-                Field::new(
-                    "section_path",
-                    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-                    true,
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("source_url", DataType::Utf8, false),
+            Field::new("source_title", DataType::Utf8, false),
+            Field::new("chunk_index", DataType::Int32, false),
+            Field::new("content", DataType::Utf8, false),
+            Field::new("parent_content", DataType::Utf8, false),
+            Field::new(
+                "section_path",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
+            Field::new("char_start", DataType::Int32, false),
+            Field::new("char_end", DataType::Int32, false),
+            Field::new("content_hash", DataType::Utf8, false),
+            Field::new(
+                "indexed_at",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "last_checked",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(
+                    Arc::new(Field::new("item", DataType::Float32, true)),
+                    self.vector_dim as i32,
                 ),
-                Field::new("char_start", DataType::Int32, false),
-                Field::new("char_end", DataType::Int32, false),
-                Field::new("content_hash", DataType::Utf8, false),
-                Field::new(
-                    "indexed_at",
-                    DataType::Timestamp(TimeUnit::Millisecond, None),
-                    false,
-                ),
-                Field::new(
-                    "last_checked",
-                    DataType::Timestamp(TimeUnit::Millisecond, None),
-                    false,
-                ),
-                Field::new(
-                    "embedding",
-                    DataType::FixedSizeList(
-                        Arc::new(Field::new("item", DataType::Float32, true)),
-                        self.vector_dim as i32,
-                    ),
-                    false,
-                ),
-            ]));
+                false,
+            ),
+        ]));
 
-            // Create empty table
-            use arrow::record_batch::RecordBatchIterator;
-            use std::iter::once;
-            let empty_batch = RecordBatch::new_empty(schema.clone());
-            let batches = once(Ok(empty_batch));
-            let batch_reader = RecordBatchIterator::new(batches, schema);
-            self.db
-                .create_table("knowledge_chunks", batch_reader)
-                .execute()
-                .await?;
-
-            // Create FTS index on content column for hybrid search (BM25 + Vector)
+        // Drop table if schema is outdated (missing columns)
+        if table_names.contains(&"knowledge_chunks".to_string()) {
             let table = self.db.open_table("knowledge_chunks").execute().await?;
-            table
-                .create_index(&["content"], Index::FTS(Default::default()))
-                .execute()
-                .await
-                .context("Failed to create FTS index on content column")?;
-
-            tracing::info!("Created FTS index on knowledge_chunks.content for hybrid search");
+            let existing_schema = table.schema().await?;
+            let needs_recreate = schema
+                .fields()
+                .iter()
+                .any(|f| existing_schema.field_with_name(f.name()).is_err());
+            if needs_recreate {
+                tracing::info!("knowledge_chunks schema outdated, dropping and recreating");
+                self.db.drop_table("knowledge_chunks", &[]).await?;
+            } else {
+                return Ok(());
+            }
         }
+
+        // Create table
+        use arrow::record_batch::RecordBatchIterator;
+        use std::iter::once;
+        let empty_batch = RecordBatch::new_empty(schema.clone());
+        let batches = once(Ok(empty_batch));
+        let batch_reader = RecordBatchIterator::new(batches, schema);
+        self.db
+            .create_table("knowledge_chunks", batch_reader)
+            .execute()
+            .await?;
+
+        // Create FTS index on content column for hybrid search (BM25 + Vector)
+        let table = self.db.open_table("knowledge_chunks").execute().await?;
+        table
+            .create_index(&["content"], Index::FTS(Default::default()))
+            .execute()
+            .await
+            .context("Failed to create FTS index on content column")?;
+
+        tracing::info!("Created FTS index on knowledge_chunks.content for hybrid search");
 
         Ok(())
     }
@@ -132,6 +147,10 @@ impl KnowledgeStore {
         let source_titles: Vec<&str> = chunks.iter().map(|_| source_title).collect();
         let chunk_indices: Vec<i32> = chunks.iter().map(|c| c.chunk_index).collect();
         let contents: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
+        let parent_contents: Vec<&str> = chunks
+            .iter()
+            .map(|c| c.parent_content.as_deref().unwrap_or(""))
+            .collect();
         let char_starts: Vec<i32> = chunks.iter().map(|c| c.char_start as i32).collect();
         let char_ends: Vec<i32> = chunks.iter().map(|c| c.char_end as i32).collect();
         let content_hashes: Vec<&str> = chunks.iter().map(|_| content_hash).collect();
@@ -165,6 +184,7 @@ impl KnowledgeStore {
             Field::new("source_title", DataType::Utf8, false),
             Field::new("chunk_index", DataType::Int32, false),
             Field::new("content", DataType::Utf8, false),
+            Field::new("parent_content", DataType::Utf8, false),
             Field::new(
                 "section_path",
                 DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
@@ -201,6 +221,7 @@ impl KnowledgeStore {
                 Arc::new(StringArray::from(source_titles)),
                 Arc::new(Int32Array::from(chunk_indices)),
                 Arc::new(StringArray::from(contents)),
+                Arc::new(StringArray::from(parent_contents)),
                 Arc::new(section_path_array),
                 Arc::new(Int32Array::from(char_starts)),
                 Arc::new(Int32Array::from(char_ends)),
@@ -293,6 +314,12 @@ impl KnowledgeStore {
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .unwrap();
+            let parent_contents = batch
+                .column_by_name("parent_content")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
             let section_paths = batch
                 .column_by_name("section_path")
                 .unwrap()
@@ -363,6 +390,14 @@ impl KnowledgeStore {
                     source_title: source_titles.value(i).to_string(),
                     chunk_index: chunk_indices.value(i),
                     content: contents.value(i).to_string(),
+                    parent_content: {
+                        let p = parent_contents.value(i);
+                        if p.is_empty() {
+                            None
+                        } else {
+                            Some(p.to_string())
+                        }
+                    },
                     section_path,
                     char_start: char_starts.value(i) as usize,
                     char_end: char_ends.value(i) as usize,
