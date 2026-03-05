@@ -376,7 +376,7 @@ mod tests {
         let config = KnowledgeConfig::default();
         let chunker = HtmlChunker::new(config);
         let html = "<html><head><title>Test Page</title></head><body></body></html>";
-        let title = chunker.extract_title(html);
+        let title = chunker.extract_title_from_html(html);
         assert_eq!(title, "Test Page");
     }
 
@@ -385,7 +385,7 @@ mod tests {
         let config = KnowledgeConfig::default();
         let chunker = HtmlChunker::new(config);
         let html = "<html><body><h1>Main Heading</h1></body></html>";
-        let title = chunker.extract_title(html);
+        let title = chunker.extract_title_from_html(html);
         assert_eq!(title, "Main Heading");
     }
 
@@ -394,7 +394,7 @@ mod tests {
         let config = KnowledgeConfig::default();
         let chunker = HtmlChunker::new(config);
         let html = "<html><body><p>No title</p></body></html>";
-        let title = chunker.extract_title(html);
+        let title = chunker.extract_title_from_html(html);
         assert_eq!(title, "Untitled");
     }
 
@@ -477,6 +477,7 @@ mod tests {
             section_path: vec!["Section 1".to_string()],
             char_start: 0,
             char_end: 12,
+            parent_content: None,
         };
 
         assert_eq!(chunk.id, "test-id");
