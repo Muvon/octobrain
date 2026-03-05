@@ -20,13 +20,16 @@ impl HtmlChunker {
         url: &str,
         html: &str,
     ) -> Result<(String, String, Vec<KnowledgeChunk>)> {
-        // Extract title from HTML
-        let title = self.extract_title(html);
+        // Try readability extraction first to strip nav/ads/boilerplate.
+        // Falls back to raw HTML for pages that aren't article-like (API refs, indexes, etc.)
+        let (title, clean_html) = self
+            .extract_readable_content(html)
+            .unwrap_or_else(|| (self.extract_title_from_html(html), html.to_string()));
 
-        // Convert HTML to markdown
-        let markdown = html2text::from_read(html.as_bytes(), 120);
+        // Convert clean HTML to markdown
+        let markdown = html2text::from_read(clean_html.as_bytes(), 120);
 
-        // Compute content hash
+        // Hash the clean content so cache is stable across nav/sidebar changes
         let content_hash = self.compute_hash(&markdown);
 
         // Parse markdown to detect section hierarchy and chunk
@@ -35,16 +38,37 @@ impl HtmlChunker {
         Ok((title, content_hash, chunks))
     }
 
-    /// Extract title from HTML
-    fn extract_title(&self, html: &str) -> String {
+    /// Extract main article content using Mozilla Readability algorithm.
+    /// Returns (title, clean_html) or None if the page isn't article-like.
+    fn extract_readable_content(&self, html: &str) -> Option<(String, String)> {
+        let mut readability = dom_smoothie::Readability::new(html, None, None).ok()?;
+        let article = readability.parse().ok()?;
+
+        let title = article.title.trim().to_string();
+        let title = if title.is_empty() {
+            return None;
+        } else {
+            title
+        };
+
+        let clean_html = article.content.to_string();
+        if clean_html.trim().is_empty() {
+            return None;
+        }
+
+        Some((title, clean_html))
+    }
+
+    /// Fallback title extraction from raw HTML when readability fails
+    fn extract_title_from_html(&self, html: &str) -> String {
         // Try <title> tag first
         if let Some(start) = html.find("<title>") {
             if let Some(end) = html[start..].find("</title>") {
                 let title = &html[start + 7..start + end];
                 let title = html2text::from_read(title.as_bytes(), 120);
-                let title = title.trim();
+                let title = title.trim().to_string();
                 if !title.is_empty() {
-                    return title.to_string();
+                    return title;
                 }
             }
         }
@@ -56,15 +80,14 @@ impl HtmlChunker {
                 if let Some(end) = html[content_start..].find("</h1>") {
                     let title = &html[content_start..content_start + end];
                     let title = html2text::from_read(title.as_bytes(), 120);
-                    let title = title.trim();
+                    let title = title.trim().to_string();
                     if !title.is_empty() {
-                        return title.to_string();
+                        return title;
                     }
                 }
             }
         }
 
-        // Fallback to "Untitled"
         "Untitled".to_string()
     }
 
