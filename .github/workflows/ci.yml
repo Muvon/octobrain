@@ -38,7 +38,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run cargo check
-        run: cargo check --no-default-features --all-targets
+        run: cargo check --all-targets
 
   fmt:
     name: Rustfmt
@@ -91,7 +91,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run cargo clippy
-        run: cargo clippy --no-default-features --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
   test:
     name: Test Suite
@@ -134,9 +134,11 @@ jobs:
 
       - name: Run tests
         shell: bash
-        run: |
-          # We have issue with onnx runtime so we use no default features
-          cargo test --verbose --no-default-features
+        env:
+          # esaxx-rs hardcodes static_crt(true) in build.rs; force Rust to also use static CRT
+          # so all deps agree on /MT instead of mixing /MT (esaxx-rs) with /MD (ort-sys).
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        run: cargo test --verbose
 
   feature-matrix:
     name: Feature Matrix (Linux)
@@ -184,20 +186,20 @@ jobs:
         run: |
           if [ -z "${{ matrix.features }}" ]; then
             echo "Checking with no features..."
-            cargo check --no-default-features --all-targets
+            cargo check --all-targets
           else
             echo "Checking with features: ${{ matrix.features }}"
-            cargo check --no-default-features --features "${{ matrix.features }}" --all-targets
+            cargo check --features "${{ matrix.features }}" --all-targets
           fi
 
       - name: Test with features
         run: |
           if [ -z "${{ matrix.features }}" ]; then
             echo "Testing with no features..."
-            cargo test --verbose --no-default-features
+            cargo test --verbose
           else
             echo "Testing with features: ${{ matrix.features }}"
-            cargo test --verbose --no-default-features --features "${{ matrix.features }}"
+            cargo test --verbose --features "${{ matrix.features }}"
           fi
 
   security:
@@ -250,7 +252,7 @@ jobs:
             ${{ runner.os }}-cargo-coverage-
 
       - name: Generate code coverage
-        run: cargo tarpaulin --verbose --no-default-features --workspace --timeout 120 --out xml
+        run: cargo tarpaulin --no-default-features --verbose --workspace --timeout 120 --out xml
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
