@@ -27,20 +27,15 @@ similarity_threshold = 0.3
 max_results = 50
 
 [search.hybrid]
-# Enable hybrid search combining multiple signals
-# When enabled, searches use vector similarity + keyword matching + recency + importance
+# Enable hybrid search (native BM25 + vector RRF fusion via LanceDB)
+# When enabled, searches use LanceDB's execute_hybrid() which fuses vector and
+# full-text search (BM25/Tantivy) using Reciprocal Rank Fusion (k=60).
 # Default: true
 enabled = true
 
-# Default weight for vector similarity signal (0.0-1.0)
-# Higher = more emphasis on semantic similarity
-# Default: 0.6
-default_vector_weight = 0.6
-
-# Default weight for keyword matching signal (0.0-1.0)
-# Higher = more emphasis on exact keyword matches
-# Default: 0.2
-default_keyword_weight = 0.2
+# Weight applied to the RRF-fused score (vector + BM25 combined) (0.0-1.0)
+# Default: 0.8
+default_vector_weight = 0.8
 
 # Default weight for recency signal (0.0-1.0)
 # Higher = more emphasis on recently created memories
@@ -56,12 +51,6 @@ default_importance_weight = 0.1
 # Memories decay to ~37% relevance after this many days
 # Default: 30
 recency_decay_days = 30
-
-# Keyword field weights (relative importance of matches in different fields)
-# Title matches are weighted highest, then tags, then content
-keyword_title_weight = 3.0
-keyword_content_weight = 1.0
-keyword_tags_weight = 2.0
 
 [search.reranker]
 # Enable reranking for improved search accuracy

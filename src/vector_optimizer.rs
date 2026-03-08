@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use lancedb::{query::VectorQuery, DistanceType, Table};
+use lancedb::DistanceType;
 
 /// Parameters for vector index optimization
 pub struct IndexParams {
@@ -64,16 +64,5 @@ impl VectorOptimizer {
         // For simplicity, don't auto-optimize in octobrain
         // Users can manually recreate index if needed
         false
-    }
-
-    /// Optimize query parameters
-    pub async fn optimize_query(
-        query: VectorQuery,
-        _table: &Table,
-        _table_name: &str,
-    ) -> Result<VectorQuery, anyhow::Error> {
-        // Return query as-is for now
-        // Could add query optimization logic here if needed
-        Ok(query)
     }
 }

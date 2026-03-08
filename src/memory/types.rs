@@ -344,17 +344,17 @@ pub struct MemoryQuery {
     pub sort_order: Option<SortOrder>,
 }
 
-/// Hybrid search query combining multiple retrieval signals
+/// Hybrid search query combining vector RRF fusion with recency and importance signals.
+///
+/// LanceDB's `execute_hybrid()` fuses vector search and BM25 full-text search internally
+/// using Reciprocal Rank Fusion. The `vector_query` drives both signals — no separate
+/// keyword list is needed.
 #[derive(Debug, Clone)]
 pub struct HybridSearchQuery {
-    /// Vector semantic search query
+    /// Query text used for both vector embedding and BM25 full-text search
     pub vector_query: Option<String>,
-    /// Keywords for exact/fuzzy matching
-    pub keywords: Option<Vec<String>>,
-    /// Weight for vector similarity signal (0.0-1.0)
+    /// Weight applied to the RRF-fused score (vector + BM25 combined)
     pub vector_weight: f32,
-    /// Weight for keyword matching signal (0.0-1.0)
-    pub keyword_weight: f32,
     /// Weight for recency signal (0.0-1.0)
     pub recency_weight: f32,
     /// Weight for importance signal (0.0-1.0)
@@ -367,9 +367,7 @@ impl Default for HybridSearchQuery {
     fn default() -> Self {
         Self {
             vector_query: None,
-            keywords: None,
-            vector_weight: 0.6,
-            keyword_weight: 0.2,
+            vector_weight: 0.8,
             recency_weight: 0.1,
             importance_weight: 0.1,
             filters: MemoryQuery::default(),
@@ -378,18 +376,12 @@ impl Default for HybridSearchQuery {
 }
 
 impl HybridSearchQuery {
-    /// Validate that weights are in valid ranges
+    /// Validate that weights are in valid ranges and a query is provided
     pub fn validate(&self) -> Result<(), String> {
         if self.vector_weight < 0.0 || self.vector_weight > 1.0 {
             return Err(format!(
                 "vector_weight must be in [0.0, 1.0], got {}",
                 self.vector_weight
-            ));
-        }
-        if self.keyword_weight < 0.0 || self.keyword_weight > 1.0 {
-            return Err(format!(
-                "keyword_weight must be in [0.0, 1.0], got {}",
-                self.keyword_weight
             ));
         }
         if self.recency_weight < 0.0 || self.recency_weight > 1.0 {
@@ -405,9 +397,8 @@ impl HybridSearchQuery {
             ));
         }
 
-        // Check if at least one signal is enabled
-        if self.vector_query.is_none() && self.keywords.is_none() {
-            return Err("At least one of vector_query or keywords must be provided".to_string());
+        if self.vector_query.is_none() {
+            return Err("vector_query must be provided for hybrid search".to_string());
         }
 
         Ok(())

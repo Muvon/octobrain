@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use std::sync::Arc;
 
@@ -22,16 +22,69 @@ use arrow_schema::{DataType, Field, Schema};
 
 // LanceDB imports
 use futures::TryStreamExt;
+use lance_index::scalar::FullTextSearchQuery;
 use lancedb::{
     connect,
     index::Index,
-    query::{ExecutableQuery, QueryBase},
+    query::{ExecutableQuery, QueryBase, QueryExecutionOptions},
     Connection, DistanceType,
 };
+
+/// RRF (Reciprocal Rank Fusion) constant k — same value used by knowledge store.
+/// Based on: https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf
+/// "Experiments indicate that k = 60 was near-optimal"
+const RRF_K: f32 = 60.0;
 
 use super::reranker_integration::RerankerIntegration;
 use super::types::{Memory, MemoryConfig, MemoryQuery, MemoryRelationship, MemorySearchResult};
 use crate::embedding::EmbeddingProvider;
+
+/// Build a SQL predicate string for scalar fields that LanceDB can filter at the storage layer.
+///
+/// Tags and related_files are excluded here because they are stored as JSON-serialized strings
+/// and cannot be queried with simple SQL equality — those are handled post-fetch in Rust.
+fn build_scalar_predicate(query: &MemoryQuery) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(ref memory_types) = query.memory_types {
+        if !memory_types.is_empty() {
+            let list = memory_types
+                .iter()
+                .map(|t| format!("'{}'", t))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("memory_type IN ({})", list));
+        }
+    }
+
+    if let Some(min_importance) = query.min_importance {
+        parts.push(format!("importance >= {}", min_importance));
+    }
+
+    if let Some(min_confidence) = query.min_confidence {
+        parts.push(format!("confidence >= {}", min_confidence));
+    }
+
+    if let Some(ref git_commit) = query.git_commit {
+        // Escape single quotes in the commit hash (defensive, hashes won't have them)
+        let escaped = git_commit.replace('\'', "''");
+        parts.push(format!("git_commit = '{}'", escaped));
+    }
+
+    if let Some(created_after) = query.created_after {
+        parts.push(format!("created_at >= '{}'", created_after.to_rfc3339()));
+    }
+
+    if let Some(created_before) = query.created_before {
+        parts.push(format!("created_at <= '{}'", created_before.to_rfc3339()));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" AND "))
+    }
+}
 
 /// LanceDB-based storage for memories with vector search capabilities
 pub struct MemoryStore {
@@ -109,6 +162,23 @@ impl MemoryStore {
                 .create_empty_table("memories", schema)
                 .execute()
                 .await?;
+
+            // Create FTS index on content and title for native BM25 hybrid search
+            let table = self.db.open_table("memories").execute().await?;
+            table
+                .create_index(&["content"], Index::FTS(Default::default()))
+                .execute()
+                .await
+                .context("Failed to create FTS index on memories.content")?;
+            table
+                .create_index(&["title"], Index::FTS(Default::default()))
+                .execute()
+                .await
+                .context("Failed to create FTS index on memories.title")?;
+
+            tracing::info!(
+                "Created FTS indexes on memories.content and memories.title for hybrid search"
+            );
         }
 
         // Create relationships table if it doesn't exist
@@ -405,7 +475,10 @@ impl MemoryStore {
         Ok(candidates)
     }
 
-    /// Standard vector search with temporal decay
+    /// Standard vector search with temporal importance decay.
+    /// Scalar filters (memory_type, importance, confidence, git_commit, created_at) are
+    /// pushed down to LanceDB via `only_if()`. JSON-serialized fields (tags, related_files)
+    /// are filtered in Rust after fetch since they can't be queried natively.
     async fn vector_search(&self, query: &MemoryQuery) -> Result<Vec<MemorySearchResult>> {
         let table = self.db.open_table("memories").execute().await?;
 
@@ -417,25 +490,23 @@ impl MemoryStore {
 
         let mut results = Vec::new();
 
-        // If we have a text query, use semantic search
+        // Build scalar filter predicate for pushdown (tags/related_files stay in Rust)
+        let predicate = build_scalar_predicate(query);
+
         if let Some(ref query_text) = query.query_text {
             let query_embedding = self
                 .embedding_provider
                 .generate_embedding(query_text)
                 .await?;
 
-            // Start with optimized vector search
             let mut db_query = table
                 .vector_search(query_embedding.as_slice())?
                 .distance_type(DistanceType::Cosine)
-                .limit(limit * 2); // Get more results to filter
+                .limit(limit * 2); // over-fetch to absorb post-filter losses
 
-            // Apply intelligent search optimization
-            db_query = crate::vector_optimizer::VectorOptimizer::optimize_query(
-                db_query, &table, "memories",
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to optimize query: {}", e))?;
+            if let Some(ref pred) = predicate {
+                db_query = db_query.only_if(pred.clone());
+            }
 
             let mut db_results = db_query.execute().await?;
 
@@ -444,7 +515,6 @@ impl MemoryStore {
                     continue;
                 }
 
-                // Extract distance column
                 let distance_array = batch
                     .column_by_name("_distance")
                     .and_then(|col| col.as_any().downcast_ref::<Float32Array>())
@@ -454,22 +524,17 @@ impl MemoryStore {
                 let memories = self.batch_to_memories(&batch)?;
 
                 for (memory, distance) in memories.into_iter().zip(distance_array.into_iter()) {
-                    // Apply filters
-                    if !self.matches_filters(&memory, query) {
+                    // Only JSON-field filters remain here
+                    if !self.matches_json_filters(&memory, query) {
                         continue;
                     }
 
-                    // Convert distance to similarity (cosine distance is 1 - similarity)
+                    // Cosine distance → similarity, weighted by temporal importance
                     let vector_similarity = 1.0 - distance;
-
-                    // Calculate current importance with decay
                     let current_importance = memory.get_current_importance(
                         self.config.decay_enabled,
                         self.config.min_importance_threshold,
                     );
-
-                    // Combine vector similarity with temporal importance
-                    // Final score = vector_similarity * current_importance
                     let final_score = vector_similarity * current_importance;
 
                     if final_score >= min_relevance {
@@ -482,8 +547,12 @@ impl MemoryStore {
                 }
             }
         } else {
-            // No text query, just apply filters
-            let mut db_results = table.query().execute().await?;
+            // No text query — filter-only scan
+            let mut db_query = table.query();
+            if let Some(ref pred) = predicate {
+                db_query = db_query.only_if(pred.clone());
+            }
+            let mut db_results = db_query.execute().await?;
 
             while let Some(batch) = db_results.try_next().await? {
                 if batch.num_rows() == 0 {
@@ -493,27 +562,28 @@ impl MemoryStore {
                 let memories = self.batch_to_memories(&batch)?;
 
                 for memory in memories {
-                    if self.matches_filters(&memory, query) {
-                        // Use current importance with decay
-                        let relevance_score = memory.get_current_importance(
-                            self.config.decay_enabled,
-                            self.config.min_importance_threshold,
-                        );
+                    if !self.matches_json_filters(&memory, query) {
+                        continue;
+                    }
 
-                        if relevance_score >= min_relevance {
-                            results.push(MemorySearchResult {
-                                memory,
-                                relevance_score,
-                                selection_reason: self
-                                    .generate_selection_reason(query, relevance_score),
-                            });
-                        }
+                    let relevance_score = memory.get_current_importance(
+                        self.config.decay_enabled,
+                        self.config.min_importance_threshold,
+                    );
+
+                    if relevance_score >= min_relevance {
+                        results.push(MemorySearchResult {
+                            memory,
+                            relevance_score,
+                            selection_reason: self
+                                .generate_selection_reason(query, relevance_score),
+                        });
                     }
                 }
             }
         }
 
-        // Apply sorting based on query parameters
+        // Sort
         if let Some(sort_by) = &query.sort_by {
             let sort_order = query
                 .sort_order
@@ -526,17 +596,16 @@ impl MemoryStore {
                         a.memory.created_at.cmp(&b.memory.created_at)
                     }
                     super::types::MemorySortBy::Importance => {
-                        // Use current importance with decay for sorting
-                        let a_importance = a.memory.get_current_importance(
+                        let a_imp = a.memory.get_current_importance(
                             self.config.decay_enabled,
                             self.config.min_importance_threshold,
                         );
-                        let b_importance = b.memory.get_current_importance(
+                        let b_imp = b.memory.get_current_importance(
                             self.config.decay_enabled,
                             self.config.min_importance_threshold,
                         );
-                        a_importance
-                            .partial_cmp(&b_importance)
+                        a_imp
+                            .partial_cmp(&b_imp)
                             .unwrap_or(std::cmp::Ordering::Equal)
                     }
                 };
@@ -547,7 +616,6 @@ impl MemoryStore {
                 }
             });
         } else {
-            // Default: Sort by relevance score (highest first)
             results.sort_by(|a, b| {
                 b.relevance_score
                     .partial_cmp(&a.relevance_score)
@@ -555,115 +623,11 @@ impl MemoryStore {
             });
         }
 
-        // Apply final limit
         results.truncate(limit);
-
         Ok(results)
     }
 
-    // ===== Keyword Search Methods =====
-
-    /// Tokenize text into lowercase words, removing punctuation
-    pub(crate) fn tokenize(text: &str) -> Vec<String> {
-        text.to_lowercase()
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect()
-    }
-
-    /// Calculate term frequency for a keyword in text
-    pub(crate) fn calculate_tf(keyword: &str, text: &str) -> f32 {
-        let tokens = Self::tokenize(text);
-        if tokens.is_empty() {
-            return 0.0;
-        }
-
-        let keyword_lower = keyword.to_lowercase();
-        let count = tokens.iter().filter(|t| *t == &keyword_lower).count();
-        count as f32 / tokens.len() as f32
-    }
-
-    /// Score a field (title/content/tags) for keyword matches
-    pub(crate) fn score_field(keywords: &[String], text: &str, field_weight: f32) -> f32 {
-        if keywords.is_empty() || text.is_empty() {
-            return 0.0;
-        }
-
-        let mut total_score = 0.0;
-        for keyword in keywords {
-            let tf = Self::calculate_tf(keyword, text);
-            total_score += tf * field_weight;
-        }
-
-        total_score
-    }
-
-    /// Perform keyword-based search on memories
-    /// Returns memories with keyword match scores
-    pub async fn keyword_search(
-        &self,
-        keywords: &[String],
-        filters: &super::types::MemoryQuery,
-    ) -> Result<Vec<(Memory, f32)>> {
-        if keywords.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let table = self.db.open_table("memories").execute().await?;
-        let mut results = Vec::new();
-
-        // Get all memories (we'll score them)
-        let mut db_results = table.query().execute().await?;
-
-        while let Some(batch) = db_results.try_next().await? {
-            if batch.num_rows() == 0 {
-                continue;
-            }
-
-            let memories = self.batch_to_memories(&batch)?;
-
-            for memory in memories {
-                // Apply filters
-                if !self.matches_filters(&memory, filters) {
-                    continue;
-                }
-
-                // Calculate keyword score for each field
-                let title_score = Self::score_field(keywords, &memory.title, 3.0);
-                let content_score = Self::score_field(keywords, &memory.content, 1.0);
-                let tags_score = Self::score_field(keywords, &memory.metadata.tags.join(" "), 2.0);
-
-                let total_score = title_score + content_score + tags_score;
-
-                // Only include if there's a match
-                if total_score > 0.0 {
-                    results.push((memory, total_score));
-                }
-            }
-        }
-
-        // Normalize scores to [0.0, 1.0]
-        if !results.is_empty() {
-            let max_score = results
-                .iter()
-                .map(|(_, score)| *score)
-                .fold(0.0f32, f32::max);
-
-            if max_score > 0.0 {
-                for (_, score) in &mut results {
-                    *score /= max_score;
-                }
-            }
-        }
-
-        // Sort by score descending
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        Ok(results)
-    }
-
-    // ===== Recency Scoring Methods =====
+    // ===== Recency Scoring =====
 
     /// Calculate days since memory creation
     fn days_since_creation(memory: &Memory) -> f32 {
@@ -672,18 +636,13 @@ impl MemoryStore {
         duration.num_days() as f32
     }
 
-    /// Calculate recency score using exponential decay
-    /// Score = exp(-days_old / decay_days)
-    /// Returns value in [0.0, 1.0] where 1.0 = created today
+    /// Exponential recency decay: score = exp(-days_old / decay_days)
+    /// Returns [0.0, 1.0] where 1.0 = created today.
     pub(crate) fn calculate_recency_score(memory: &Memory, recency_decay_days: u32) -> f32 {
         let days_old = Self::days_since_creation(memory);
-
-        // Handle future timestamps (shouldn't happen, but be safe)
         if days_old < 0.0 {
-            return 1.0;
+            return 1.0; // future timestamp — treat as brand new
         }
-
-        // Exponential decay: e^(-days / decay_period)
         let decay_rate = days_old / recency_decay_days as f32;
         (-decay_rate).exp()
     }
@@ -694,26 +653,30 @@ impl MemoryStore {
 
         super::types::HybridSearchQuery {
             vector_query: query.query_text.clone(),
-            keywords: None, // Could be extracted from query_text in future
             vector_weight: hybrid_config.default_vector_weight,
-            keyword_weight: hybrid_config.default_keyword_weight,
             recency_weight: hybrid_config.default_recency_weight,
             importance_weight: hybrid_config.default_importance_weight,
             filters: query.clone(),
         }
     }
 
-    // ===== Hybrid Search Methods =====
+    // ===== Hybrid Search =====
 
-    /// Perform hybrid search combining multiple signals
+    /// Hybrid search using LanceDB native BM25 + vector RRF fusion.
+    ///
+    /// LanceDB's `execute_hybrid()` runs vector search and full-text search (BM25/Tantivy)
+    /// in parallel and fuses their ranked lists with Reciprocal Rank Fusion (k=60).
+    /// The resulting `_relevance_score` is then weighted with recency and importance signals.
     pub async fn hybrid_search(
         &self,
         query: &super::types::HybridSearchQuery,
     ) -> Result<Vec<super::types::MemorySearchResult>> {
-        // Validate query
         query
             .validate()
             .map_err(|e| anyhow::anyhow!("Invalid hybrid query: {}", e))?;
+
+        // query_text is guaranteed Some by validate()
+        let query_text = query.vector_query.as_deref().unwrap();
 
         let limit = query
             .filters
@@ -721,111 +684,96 @@ impl MemoryStore {
             .unwrap_or(self.config.max_search_results);
         let min_relevance = query.filters.min_relevance.unwrap_or(0.0);
 
-        // Step 1: Get candidate memories from vector search or keyword search
-        let mut candidates: std::collections::HashMap<String, (Memory, f32, f32, f32, f32)> =
-            std::collections::HashMap::new();
+        let table = self.db.open_table("memories").execute().await?;
 
-        // Perform vector search if query provided
-        if let Some(ref vector_query) = query.vector_query {
-            let vector_results = self
-                .vector_search(&super::types::MemoryQuery {
-                    query_text: Some(vector_query.clone()),
-                    limit: Some(limit * 2), // Get more candidates for filtering
-                    ..query.filters.clone()
+        let query_embedding = self
+            .embedding_provider
+            .generate_embedding(query_text)
+            .await?;
+
+        // Build scalar predicate for pushdown
+        let predicate = build_scalar_predicate(&query.filters);
+
+        let mut db_query = table
+            .vector_search(query_embedding.as_slice())?
+            .distance_type(DistanceType::Cosine)
+            .limit(limit)
+            .full_text_search(FullTextSearchQuery::new(query_text.to_string()));
+
+        if let Some(ref pred) = predicate {
+            db_query = db_query.only_if(pred.clone());
+        }
+
+        // RRF fusion: LanceDB combines vector ranks + BM25 ranks internally
+        let mut db_results = db_query
+            .execute_hybrid(QueryExecutionOptions::default())
+            .await?;
+
+        // Max possible RRF score = 2/k (rank 0 in both vector and FTS)
+        let max_rrf_score = 2.0 / RRF_K;
+
+        let recency_decay_days = self.main_config.search.hybrid.recency_decay_days;
+        let mut results = Vec::new();
+
+        while let Some(batch) = db_results.try_next().await? {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+
+            // Hybrid search returns _relevance_score (raw RRF), not _distance
+            let rrf_scores: Vec<f32> = batch
+                .column_by_name("_relevance_score")
+                .and_then(|col| col.as_any().downcast_ref::<Float32Array>())
+                .map(|arr| {
+                    (0..arr.len())
+                        .map(|i| (arr.value(i) / max_rrf_score).min(1.0))
+                        .collect()
                 })
-                .await?;
+                .unwrap_or_else(|| vec![0.5; batch.num_rows()]);
 
-            for result in vector_results {
-                let memory_id = result.memory.id.clone();
-                candidates.insert(
-                    memory_id,
-                    (result.memory, result.relevance_score, 0.0, 0.0, 0.0),
-                );
-            }
-        }
+            let memories = self.batch_to_memories(&batch)?;
 
-        // Perform keyword search if keywords provided
-        if let Some(ref keywords) = query.keywords {
-            let keyword_results = self.keyword_search(keywords, &query.filters).await?;
-
-            for (memory, kw_score) in keyword_results {
-                let memory_id = memory.id.clone();
-                candidates
-                    .entry(memory_id)
-                    .and_modify(|(_, _vec_score, kw, _, _)| *kw = kw_score)
-                    .or_insert((memory, 0.0, kw_score, 0.0, 0.0));
-            }
-        }
-
-        // If no candidates yet, get all memories (for recency/importance only queries)
-        if candidates.is_empty() {
-            let table = self.db.open_table("memories").execute().await?;
-            let mut db_results = table.query().execute().await?;
-
-            while let Some(batch) = db_results.try_next().await? {
-                if batch.num_rows() == 0 {
+            for (memory, rrf_score) in memories.into_iter().zip(rrf_scores.into_iter()) {
+                // JSON-field filters (tags, related_files) applied post-fetch
+                if !self.matches_json_filters(&memory, &query.filters) {
                     continue;
                 }
 
-                let memories = self.batch_to_memories(&batch)?;
-                for memory in memories {
-                    if self.matches_filters(&memory, &query.filters) {
-                        let memory_id = memory.id.clone();
-                        candidates.insert(memory_id, (memory, 0.0, 0.0, 0.0, 0.0));
-                    }
+                let recency_score = Self::calculate_recency_score(&memory, recency_decay_days);
+                let importance_score = memory.get_current_importance(
+                    self.config.decay_enabled,
+                    self.config.min_importance_threshold,
+                );
+
+                // RRF already fuses vector + BM25; recency and importance are additive signals
+                let final_score = query.vector_weight * rrf_score
+                    + query.recency_weight * recency_score
+                    + query.importance_weight * importance_score;
+
+                if final_score >= min_relevance {
+                    let selection_reason = format!(
+                        "Hybrid: rrf={:.2}, recency={:.2}, importance={:.2}, final={:.2}",
+                        rrf_score, recency_score, importance_score, final_score
+                    );
+                    results.push(super::types::MemorySearchResult {
+                        memory,
+                        relevance_score: final_score,
+                        selection_reason,
+                    });
                 }
             }
         }
 
-        // Step 2: Calculate recency and importance scores for all candidates
-        let recency_decay_days = self.main_config.search.hybrid.recency_decay_days;
-        for (_memory_id, (memory, _vec_score, _kw_score, rec_score, imp_score)) in
-            candidates.iter_mut()
-        {
-            *rec_score = Self::calculate_recency_score(memory, recency_decay_days);
-            *imp_score = memory.get_current_importance(
-                self.config.decay_enabled,
-                self.config.min_importance_threshold,
-            );
-        }
-
-        // Step 3: Combine scores with weights
-        let mut results: Vec<super::types::MemorySearchResult> = candidates
-            .into_iter()
-            .map(|(_, (memory, vec_score, kw_score, rec_score, imp_score))| {
-                // Calculate weighted final score
-                let final_score = query.vector_weight * vec_score
-                    + query.keyword_weight * kw_score
-                    + query.recency_weight * rec_score
-                    + query.importance_weight * imp_score;
-
-                // Generate selection reason with signal breakdown
-                let selection_reason = format!(
-                    "Hybrid: vector={:.2}, keyword={:.2}, recency={:.2}, importance={:.2}, final={:.2}",
-                    vec_score, kw_score, rec_score, imp_score, final_score
-                );
-
-                super::types::MemorySearchResult {
-                    memory,
-                    relevance_score: final_score,
-                    selection_reason,
-                }
-            })
-            .filter(|result| result.relevance_score >= min_relevance)
-            .collect();
-
-        // Step 4: Sort by final score descending
         results.sort_by(|a, b| {
             b.relevance_score
                 .partial_cmp(&a.relevance_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-
-        // Step 5: Apply limit
         results.truncate(limit);
 
         Ok(results)
     }
+
     /// Store a memory relationship
     pub async fn store_relationship(&mut self, relationship: &MemoryRelationship) -> Result<()> {
         let table = self.db.open_table("memory_relationships").execute().await?;
@@ -1131,62 +1079,23 @@ impl MemoryStore {
         Ok(relationships)
     }
 
-    /// Check if memory matches the query filters
-    fn matches_filters(&self, memory: &Memory, query: &MemoryQuery) -> bool {
-        // Filter by memory types
-        if let Some(ref memory_types) = query.memory_types {
-            if !memory_types.contains(&memory.memory_type) {
-                return false;
-            }
-        }
-
-        // Filter by tags (any of these tags)
+    /// Filter on JSON-serialized fields that cannot be pushed to LanceDB as SQL predicates.
+    /// Scalar fields (memory_type, importance, confidence, git_commit, created_at) are
+    /// handled by `build_scalar_predicate()` and pushed down via `only_if()`.
+    fn matches_json_filters(&self, memory: &Memory, query: &MemoryQuery) -> bool {
+        // tags is stored as a JSON array string — must filter in Rust
         if let Some(ref tags) = query.tags {
             if !tags.iter().any(|tag| memory.metadata.tags.contains(tag)) {
                 return false;
             }
         }
 
-        // Filter by related files
+        // related_files is stored as a JSON array string — must filter in Rust
         if let Some(ref files) = query.related_files {
             if !files
                 .iter()
                 .any(|file| memory.metadata.related_files.contains(file))
             {
-                return false;
-            }
-        }
-
-        // Filter by git commit
-        if let Some(ref git_commit) = query.git_commit {
-            if memory.metadata.git_commit.as_ref() != Some(git_commit) {
-                return false;
-            }
-        }
-
-        // Filter by minimum importance
-        if let Some(min_importance) = query.min_importance {
-            if memory.metadata.importance < min_importance {
-                return false;
-            }
-        }
-
-        // Filter by minimum confidence
-        if let Some(min_confidence) = query.min_confidence {
-            if memory.metadata.confidence < min_confidence {
-                return false;
-            }
-        }
-
-        // Filter by creation date range
-        if let Some(created_after) = query.created_after {
-            if memory.created_at < created_after {
-                return false;
-            }
-        }
-
-        if let Some(created_before) = query.created_before {
-            if memory.created_at > created_before {
                 return false;
             }
         }

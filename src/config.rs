@@ -65,38 +65,26 @@ impl Default for SearchConfig {
 /// Hybrid search configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HybridSearchConfig {
-    /// Enable hybrid search (vector + keyword + recency + importance)
+    /// Enable hybrid search (native BM25 + vector RRF fusion via LanceDB)
     pub enabled: bool,
-    /// Default weight for vector similarity signal
+    /// Weight applied to the RRF-fused score (vector + BM25 combined)
     pub default_vector_weight: f32,
-    /// Default weight for keyword matching signal
-    pub default_keyword_weight: f32,
     /// Default weight for recency signal
     pub default_recency_weight: f32,
     /// Default weight for importance signal
     pub default_importance_weight: f32,
     /// Recency decay period in days
     pub recency_decay_days: u32,
-    /// Weight for keyword matches in title
-    pub keyword_title_weight: f32,
-    /// Weight for keyword matches in content
-    pub keyword_content_weight: f32,
-    /// Weight for keyword matches in tags
-    pub keyword_tags_weight: f32,
 }
 
 impl Default for HybridSearchConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            default_vector_weight: 0.6,
-            default_keyword_weight: 0.2,
+            default_vector_weight: 0.8,
             default_recency_weight: 0.1,
             default_importance_weight: 0.1,
             recency_decay_days: 30,
-            keyword_title_weight: 3.0,
-            keyword_content_weight: 1.0,
-            keyword_tags_weight: 2.0,
         }
     }
 }
