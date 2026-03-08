@@ -194,6 +194,9 @@ jobs:
               rustup target add ${{ matrix.target }} && \
               cargo build --release --target ${{ matrix.target }}
             "
+        elif [ "${{ runner.os }}" = "Windows" ]; then
+          # Windows: fastembed/huggingface (esaxx-rs/ort) don't link cleanly on MSVC
+          cargo build --release --target ${{ matrix.target }} --no-default-features
         else
           # macOS: build with default features (fastembed + huggingface work fine)
           cargo build --release --target ${{ matrix.target }}
