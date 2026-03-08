@@ -134,11 +134,12 @@ jobs:
 
       - name: Run tests
         shell: bash
-        env:
-          # esaxx-rs hardcodes static_crt(true) in build.rs; force Rust to also use static CRT
-          # so all deps agree on /MT instead of mixing /MT (esaxx-rs) with /MD (ort-sys).
-          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
-        run: cargo test --verbose
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cargo test --verbose --no-default-features
+          else
+            cargo test --verbose
+          fi
 
   feature-matrix:
     name: Feature Matrix (Linux)
