@@ -267,16 +267,12 @@ mod tests {
     fn test_hybrid_query_default_weights() {
         let query = HybridSearchQuery::default();
 
-        assert_eq!(query.vector_weight, 0.6);
-        assert_eq!(query.keyword_weight, 0.2);
+        assert_eq!(query.vector_weight, 0.8);
         assert_eq!(query.recency_weight, 0.1);
         assert_eq!(query.importance_weight, 0.1);
 
         // Weights should sum to 1.0
-        let sum = query.vector_weight
-            + query.keyword_weight
-            + query.recency_weight
-            + query.importance_weight;
+        let sum = query.vector_weight + query.recency_weight + query.importance_weight;
         assert!(
             (sum - 1.0).abs() < 0.001,
             "Weights should sum to 1.0, got {}",
@@ -288,9 +284,7 @@ mod tests {
     fn test_weight_validation() {
         let valid_query = HybridSearchQuery {
             vector_query: Some("test".to_string()),
-            keywords: None,
-            vector_weight: 0.5,
-            keyword_weight: 0.3,
+            vector_weight: 0.8,
             recency_weight: 0.1,
             importance_weight: 0.1,
             filters: Default::default(),
@@ -300,9 +294,7 @@ mod tests {
         // Invalid: weight > 1.0
         let invalid_query = HybridSearchQuery {
             vector_query: Some("test".to_string()),
-            keywords: None,
             vector_weight: 1.5,
-            keyword_weight: 0.2,
             recency_weight: 0.1,
             importance_weight: 0.1,
             filters: Default::default(),
@@ -312,21 +304,17 @@ mod tests {
         // Invalid: weight < 0.0
         let invalid_query2 = HybridSearchQuery {
             vector_query: Some("test".to_string()),
-            keywords: None,
             vector_weight: 0.5,
-            keyword_weight: -0.1,
-            recency_weight: 0.1,
+            recency_weight: -0.1,
             importance_weight: 0.1,
             filters: Default::default(),
         };
         assert!(invalid_query2.validate().is_err());
 
-        // Invalid: no query or keywords
+        // Invalid: no vector_query
         let invalid_query3 = HybridSearchQuery {
             vector_query: None,
-            keywords: None,
-            vector_weight: 0.5,
-            keyword_weight: 0.3,
+            vector_weight: 0.8,
             recency_weight: 0.1,
             importance_weight: 0.1,
             filters: Default::default(),
