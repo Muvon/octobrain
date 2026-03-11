@@ -2,7 +2,7 @@
 name = "octobrain"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.88"
 authors = ["Muvon Un Limited <opensource@muvon.io>"]
 description = "Standalone memory management system for AI context and conversation state"
 homepage = "https://github.com/muvon/octobrain"
@@ -31,33 +31,32 @@ fastembed = ["octolib/fastembed"]
 huggingface = ["octolib/huggingface"]
 
 [dependencies]
-lancedb = { version = "0.23.1", default-features = false }
-lance-index = "1.0.1"
-tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "time", "sync", "io-util", "io-std", "process"] }
-arrow = { version = "56.2.0", default-features = false, features = ["prettyprint"] }
-arrow-array = { version = "56.2.0", default-features = false }
-arrow-schema = { version = "56.2.0", default-features = false }
+lancedb = { version = "0.26.2", default-features = false }
+lance-index = "2.0.0"
+tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "time", "sync", "io-util", "io-std", "process"] }
+arrow = { version = "57.3.0", default-features = false, features = ["prettyprint"] }
+arrow-array = { version = "57.3.0", default-features = false }
+arrow-schema = { version = "57.3.0", default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
-chrono = { version = "0.4.43", default-features = false, features = ["serde", "clock"] }
-anyhow = "1.0.100"
-uuid = { version = "1.20", default-features = false, features = ["v4"] }
-clap = { version = "4.5.57", features = ["derive"] }
-futures = { version = "0.3.31", default-features = false, features = ["std"] }
-tracing = "0.1.43"
+serde_json = "1.0.149"
+chrono = { version = "0.4.44", default-features = false, features = ["serde", "clock"] }
+anyhow = "1.0.102"
+uuid = { version = "1.22", default-features = false, features = ["v4"] }
+clap = { version = "4.5.60", features = ["derive"] }
+futures = { version = "0.3.32", default-features = false, features = ["std"] }
+tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
-tracing-appender = "0.2.3"
+tracing-appender = "0.2.4"
 dirs = "6.0.0"
 dotenvy = "0.15"
-toml = "0.9.0"
+toml = "0.9.12"
 sha2 = "0.10"
 hex = "0.4"
 html2text = "0.12"
 dom_smoothie = "0.15"
-reqwest = { version = "0.12", features = ["blocking", "rustls-tls"] }
-colored = "2.1"
+reqwest = { version = "0.13", features = ["rustls"], default-features = false }
+colored = "2.2"
 
 # Local dep for testing
 # octolib = { path = "../octolib", default-features = false }
-octolib = { version = "0.10.2", default-features = false }
-
+octolib = { version = "0.10.3", default-features = false }
