@@ -36,7 +36,11 @@ pub enum Commands {
         command: KnowledgeCommand,
     },
     /// Start MCP server (Model Context Protocol) exposing memory tools
-    Mcp,
+    Mcp {
+        /// Bind to HTTP server on host:port instead of using stdin/stdout (e.g., "0.0.0.0:12345")
+        #[arg(long, value_name = "HOST:PORT")]
+        bind: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

@@ -15,9 +15,12 @@
 use anyhow::Result;
 use serde_json::json;
 use tokio::io::{stdin, stdout, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use tracing::debug;
 
 use crate::config::Config;
+use crate::mcp::http::{handle_http_connection, HttpServerState};
 use crate::mcp::knowledge::KnowledgeProvider;
 use crate::mcp::memory::MemoryProvider;
 use crate::mcp::types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
@@ -109,12 +112,16 @@ impl McpServer {
                 result: Some(json!({
                     "protocolVersion": "2024-11-05",
                     "capabilities": {
-                        "tools": {}
+                        "tools": {
+                            "listChanged": false
+                        }
                     },
                     "serverInfo": {
                         "name": "octobrain",
-                        "version": env!("CARGO_PKG_VERSION")
-                    }
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "description": "Standalone memory management system for AI context and conversation state"
+                    },
+                    "instructions": "This server provides memory tools for storing and retrieving AI context. Use 'memorize' to store information, 'remember' for semantic search, 'forget' to delete memories, 'auto_link' to find related memories, 'memory_graph' to explore memory connections, and 'knowledge_search' to search indexed web content."
                 })),
                 error: None,
             }),
@@ -291,5 +298,40 @@ impl McpServer {
         let provider = KnowledgeProvider::new(&self.config).await?;
         *guard = Some(provider.clone());
         Ok(provider)
+    }
+
+    /// Run the MCP server over HTTP instead of stdin/stdout
+    pub async fn run_http(&self, bind_addr: &str) -> Result<()> {
+        let addr = bind_addr
+            .parse::<std::net::SocketAddr>()
+            .map_err(|e| anyhow::anyhow!("Invalid bind address '{}': {}", bind_addr, e))?;
+
+        let listener = TcpListener::bind(&addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to bind to {}: {}", addr, e))?;
+
+        debug!("MCP HTTP server listening on {}", addr);
+
+        // Pre-initialize providers so HTTP connections don't race on first request
+        let memory = self.get_or_init_memory().await.ok();
+        let knowledge = self.get_or_init_knowledge().await.ok();
+
+        let state = std::sync::Arc::new(Mutex::new(HttpServerState { memory, knowledge }));
+
+        loop {
+            match listener.accept().await {
+                Ok((stream, peer_addr)) => {
+                    let state = state.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_http_connection(stream, state).await {
+                            debug!("HTTP connection error from {}: {}", peer_addr, e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!("HTTP server accept error: {}", e));
+                }
+            }
+        }
     }
 }

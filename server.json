@@ -1,0 +1,151 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Muvon/octobrain",
+  "description": "Standalone memory management system for AI context and conversation state",
+  "name_for_human": "Octobrain",
+  "name_for_model": "octobrain",
+  "version": "0.2.0",
+  "repositories": [
+    {
+      "type": "github",
+      "owner": "Muvon",
+      "repo": "octobrain"
+    }
+  ],
+  "homepage": "https://github.com/muvon/octobrain",
+  "pricing": "free",
+  "modes": {
+    "stdio": {
+      "command": "octobrain",
+      "args": ["mcp"],
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "memorize",
+      "description": "Store important information, insights, or context in memory for future reference.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Short, descriptive title for the memory"
+          },
+          "content": {
+            "type": "string",
+            "description": "Detailed content to remember - explanations, code snippets, insights, decisions, etc."
+          },
+          "memory_type": {
+            "type": "string",
+            "enum": ["code", "architecture", "bug_fix", "feature", "documentation", "user_preference", "decision", "learning", "configuration", "testing", "performance", "security", "insight"],
+            "default": "code",
+            "description": "Category of memory for better organization"
+          },
+          "tags": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Optional tags for categorization and easier searching"
+          },
+          "related_files": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Optional file paths related to this memory"
+          },
+          "importance": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "default": 0.5,
+            "description": "Importance score from 0.0 to 1.0 (higher = more important for retention)"
+          }
+        },
+        "required": ["title", "content"]
+      }
+    },
+    {
+      "name": "remember",
+      "description": "Search and retrieve stored memories using semantic search. Find relevant past information, decisions, patterns, or context based on your query.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "oneOf": [
+              {
+                "type": "string",
+                "description": "Single search query - use for specific searches"
+              },
+              {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Array of related search terms for comprehensive results"
+              }
+            ],
+            "description": "Search query(s) - prefer array of related terms for better results"
+          },
+          "memory_types": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["code", "architecture", "bug_fix", "feature", "documentation", "user_preference", "decision", "learning", "configuration", "testing", "performance", "security", "insight"]
+            },
+            "description": "Optional filter by memory types"
+          },
+          "tags": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Optional filter by tags"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 5,
+            "description": "Maximum number of memories to return"
+          }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "forget",
+      "description": "Permanently remove specific memories by ID or forget multiple memories matching certain criteria.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "memory_id": {
+            "type": "string",
+            "description": "Specific memory ID to forget"
+          },
+          "query": {
+            "type": "string",
+            "description": "Query to find memories to forget (alternative to memory_id)"
+          },
+          "memory_types": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["code", "architecture", "bug_fix", "feature", "documentation", "user_preference", "decision", "learning", "configuration", "testing", "performance", "security", "insight"]
+            },
+            "description": "Filter by memory types when using query"
+          },
+          "tags": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Filter by tags when using query"
+          },
+          "confirm": {
+            "type": "boolean",
+            "const": true,
+            "description": "Must be true to confirm deletion"
+          }
+        },
+        "required": ["confirm"]
+      }
+    }
+  ],
+  "categories": ["memory", "ai-context", "knowledge-management"],
+  "tags": ["memory", "semantic-search", "ai-context", "knowledge-graph", "mcp", "lancedb"]
+}
