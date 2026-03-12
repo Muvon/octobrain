@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.3.0] - 2026-03-12
+
+### 📋 Release Summary
+
+This release introduces enhanced memory management with auto-linking capabilities and improved search functionality through hybrid vector search with reranking (f201c7d4, 98c7e2f8, 502cbe62). The system now supports HTTP transport for broader integration options and features consolidated database architecture for improved performance (d7787b76, 3e0b1b8d). Multiple bug fixes enhance data integrity, project scoping, and cross-platform compatibility (54b426c1, 84dc6854, 0b1df7ee).
+
+
+### ✨ New Features & Enhancements
+
+- **mcp**: add auto_link and memory_graph tools with enhanced schema `f201c7d4`
+- **mcp**: add HTTP transport option `d7787b76`
+- **knowledge**: add parent content tracking for search context `502cbe62`
+- **memory**: activate reranker for hybrid and vector search `98c7e2f8`
+
+### 🔧 Improvements & Optimizations
+
+- **storage**: consolidate to shared memory database `3e0b1b8d`
+- **hybrid**: switch to native lancedb rrf fusion `df9497d7`
+- **knowledge**: improve HTML extraction with readability `090670c1`
+
+### 🐛 Bug Fixes & Stability
+
+- **memory**: add missing id field to relationships table `54b426c1`
+- **memory**: scope delete operations to project key `84dc6854`
+- **memory**: remove keyword search from hybrid query `8e68099b`
+- **ci**: enable default features and fix Windows static CRT build `0b1df7ee`
+
+### 🔄 Other Changes
+
+- **deps**: upgrade datafusion to 51.0.0 and arrow to 57.3.0 `ec4f322e`
+- disable fastembed on Windows builds `1b263d44`
+- **ci**: install protoc using setup-protoc action `8cac4795`
+- **chunker**: fix extract_title method name in tests `f8664956`
+- **deps**: upgrade octolib to 0.10.0 `c86805f1`
+- **deps**: bump octolib to 0.9.3 `d24505c8`
+
+### 📊 Release Summary
+
+**Total commits**: 17 across 4 categories
+
+✨ **4** new features - *Enhanced functionality*
+🔧 **3** improvements - *Better performance & code quality*
+🐛 **4** bug fixes - *Improved stability*
+🔄 **6** other changes - *Maintenance & tooling*
+
 ## [0.2.0] - 2026-02-16
 
 ### 📋 Release Summary

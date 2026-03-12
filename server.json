@@ -3,7 +3,7 @@
   "name": "io.github.Muvon/octobrain",
   "title": "Octobrain",
   "description": "Standalone memory management system for AI context and conversation state. Provides semantic search, knowledge graph relationships, and persistent memory across sessions.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "repository": {
     "url": "https://github.com/muvon/octobrain",
     "source": "github"
