@@ -184,7 +184,7 @@ jobs:
       run: |
         if [ "${{ runner.os }}" = "Linux" ]; then
           # Use official Rust Docker image for Linux builds
-          # Disable default features to avoid ONNX Runtime issues
+          # Disable default features: ort-sys has no prebuilt binaries for musl targets
           docker run --rm \
             -v "$(pwd):/workspace" \
             -w /workspace \
@@ -192,7 +192,7 @@ jobs:
             sh -c "
               apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig gcc g++ protobuf-dev && \
               rustup target add ${{ matrix.target }} && \
-              cargo build --release --target ${{ matrix.target }}
+              cargo build --release --target ${{ matrix.target }} --no-default-features
             "
         elif [ "${{ runner.os }}" = "Windows" ]; then
           # Windows: fastembed/huggingface (esaxx-rs/ort) don't link cleanly on MSVC
