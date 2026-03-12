@@ -46,9 +46,13 @@ impl MemoryManager {
             None
         };
 
-        // Use to same storage system as to main application
+        // Use shared memory database path (single DB for all projects)
         let current_dir = std::env::current_dir()?;
-        let db_path = crate::storage::get_project_database_path(&current_dir)?;
+        let db_path = crate::storage::get_memory_database_path()?;
+
+        // Compute project key from current directory's Git remote URL hash
+        let project_key = crate::storage::get_project_identifier(&current_dir)
+            .unwrap_or_else(|_| "default".to_string());
 
         // Create embedding provider using model from config
         let model_string = &config.embedding.model;
@@ -57,6 +61,7 @@ impl MemoryManager {
 
         let store = MemoryStore::new(
             db_path.to_string_lossy().as_ref(),
+            project_key,
             embedding_provider,
             memory_config.clone(),
             config.clone(),

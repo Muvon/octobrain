@@ -43,8 +43,9 @@ use crate::embedding::EmbeddingProvider;
 ///
 /// Tags and related_files are excluded here because they are stored as JSON-serialized strings
 /// and cannot be queried with simple SQL equality — those are handled post-fetch in Rust.
-fn build_scalar_predicate(query: &MemoryQuery) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
+fn build_scalar_predicate(project_key: &str, query: &MemoryQuery) -> String {
+    // project_key is always the first condition to scope all queries to the current project
+    let mut parts: Vec<String> = vec![format!("project_key = '{}'", project_key)];
 
     if let Some(ref memory_types) = query.memory_types {
         if !memory_types.is_empty() {
@@ -79,11 +80,7 @@ fn build_scalar_predicate(query: &MemoryQuery) -> Option<String> {
         parts.push(format!("created_at <= '{}'", created_before.to_rfc3339()));
     }
 
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" AND "))
-    }
+    parts.join(" AND ")
 }
 
 /// LanceDB-based storage for memories with vector search capabilities
@@ -94,13 +91,14 @@ pub struct MemoryStore {
     main_config: crate::config::Config,
     vector_dim: usize,
     reranker_integration: Option<RerankerIntegration>,
+    project_key: String,
 }
 
 impl MemoryStore {
     /// Create a new memory store
-    /// Create a new memory store
     pub async fn new(
         db_path: &str,
+        project_key: String,
         embedding_provider: Box<dyn EmbeddingProvider>,
         config: MemoryConfig,
         main_config: crate::config::Config,
@@ -119,6 +117,7 @@ impl MemoryStore {
             main_config,
             vector_dim,
             reranker_integration,
+            project_key,
         };
 
         // Initialize tables
@@ -138,6 +137,7 @@ impl MemoryStore {
         if !table_names.contains(&"memories".to_string()) {
             let schema = Arc::new(Schema::new(vec![
                 Field::new("id", DataType::Utf8, false),
+                Field::new("project_key", DataType::Utf8, false), // project scoping
                 Field::new("memory_type", DataType::Utf8, false),
                 Field::new("title", DataType::Utf8, false),
                 Field::new("content", DataType::Utf8, false),
@@ -182,10 +182,12 @@ impl MemoryStore {
         }
 
         // Create relationships table if it doesn't exist
+        // Create relationships table if it doesn't exist
         if !table_names.contains(&"memory_relationships".to_string()) {
             let schema = Arc::new(Schema::new(vec![
                 Field::new("source_id", DataType::Utf8, false),
                 Field::new("target_id", DataType::Utf8, false),
+                Field::new("project_key", DataType::Utf8, false), // project scoping
                 Field::new("relationship_type", DataType::Utf8, false),
                 Field::new("strength", DataType::Float32, false),
                 Field::new("description", DataType::Utf8, false),
@@ -233,6 +235,7 @@ impl MemoryStore {
         // Create record batch
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
+            Field::new("project_key", DataType::Utf8, false),
             Field::new("memory_type", DataType::Utf8, false),
             Field::new("title", DataType::Utf8, false),
             Field::new("content", DataType::Utf8, false),
@@ -269,6 +272,7 @@ impl MemoryStore {
             schema.clone(),
             vec![
                 Arc::new(StringArray::from(vec![memory.id.clone()])),
+                Arc::new(StringArray::from(vec![self.project_key.clone()])),
                 Arc::new(StringArray::from(vec![memory.memory_type.to_string()])),
                 Arc::new(StringArray::from(vec![memory.title.clone()])),
                 Arc::new(StringArray::from(vec![memory.content.clone()])),
@@ -310,14 +314,19 @@ impl MemoryStore {
     /// Delete a memory by ID
     pub async fn delete_memory(&mut self, memory_id: &str) -> Result<()> {
         let table = self.db.open_table("memories").execute().await?;
-        table.delete(&format!("id = '{}'", memory_id)).await?;
+        table
+            .delete(&format!(
+                "id = '{}' AND project_key = '{}'",
+                memory_id, self.project_key
+            ))
+            .await?;
 
-        // Also delete any relationships involving this memory
+        // Also delete any relationships involving this memory (scoped to project)
         let rel_table = self.db.open_table("memory_relationships").execute().await?;
         rel_table
             .delete(&format!(
-                "source_id = '{}' OR target_id = '{}'",
-                memory_id, memory_id
+                "(source_id = '{}' OR target_id = '{}') AND project_key = '{}'",
+                memory_id, memory_id, self.project_key
             ))
             .await
             .ok();
@@ -411,7 +420,10 @@ impl MemoryStore {
 
         let mut results = table
             .query()
-            .only_if(format!("id = '{}'", memory_id))
+            .only_if(format!(
+                "id = '{}' AND project_key = '{}'",
+                memory_id, self.project_key
+            ))
             .limit(1)
             .execute()
             .await?;
@@ -491,7 +503,7 @@ impl MemoryStore {
         let mut results = Vec::new();
 
         // Build scalar filter predicate for pushdown (tags/related_files stay in Rust)
-        let predicate = build_scalar_predicate(query);
+        let predicate = build_scalar_predicate(&self.project_key, query);
 
         if let Some(ref query_text) = query.query_text {
             let query_embedding = self
@@ -499,14 +511,11 @@ impl MemoryStore {
                 .generate_embedding(query_text)
                 .await?;
 
-            let mut db_query = table
+            let db_query = table
                 .vector_search(query_embedding.as_slice())?
                 .distance_type(DistanceType::Cosine)
-                .limit(limit * 2); // over-fetch to absorb post-filter losses
-
-            if let Some(ref pred) = predicate {
-                db_query = db_query.only_if(pred.clone());
-            }
+                .limit(limit * 2) // over-fetch to absorb post-filter losses
+                .only_if(predicate.clone());
 
             let mut db_results = db_query.execute().await?;
 
@@ -547,12 +556,8 @@ impl MemoryStore {
                 }
             }
         } else {
-            // No text query — filter-only scan
-            let mut db_query = table.query();
-            if let Some(ref pred) = predicate {
-                db_query = db_query.only_if(pred.clone());
-            }
-            let mut db_results = db_query.execute().await?;
+            // No text query — filter-only scan (predicate always includes project_key)
+            let mut db_results = table.query().only_if(predicate).execute().await?;
 
             while let Some(batch) = db_results.try_next().await? {
                 if batch.num_rows() == 0 {
@@ -691,18 +696,15 @@ impl MemoryStore {
             .generate_embedding(query_text)
             .await?;
 
-        // Build scalar predicate for pushdown
-        let predicate = build_scalar_predicate(&query.filters);
+        // Build scalar predicate for pushdown (always includes project_key)
+        let predicate = build_scalar_predicate(&self.project_key, &query.filters);
 
-        let mut db_query = table
+        let db_query = table
             .vector_search(query_embedding.as_slice())?
             .distance_type(DistanceType::Cosine)
             .limit(limit)
-            .full_text_search(FullTextSearchQuery::new(query_text.to_string()));
-
-        if let Some(ref pred) = predicate {
-            db_query = db_query.only_if(pred.clone());
-        }
+            .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
+            .only_if(predicate);
 
         // RRF fusion: LanceDB combines vector ranks + BM25 ranks internally
         let mut db_results = db_query
@@ -782,6 +784,7 @@ impl MemoryStore {
             Field::new("id", DataType::Utf8, false),
             Field::new("source_id", DataType::Utf8, false),
             Field::new("target_id", DataType::Utf8, false),
+            Field::new("project_key", DataType::Utf8, false),
             Field::new("relationship_type", DataType::Utf8, false),
             Field::new("strength", DataType::Float32, false),
             Field::new("description", DataType::Utf8, false),
@@ -794,6 +797,7 @@ impl MemoryStore {
                 Arc::new(StringArray::from(vec![relationship.id.clone()])),
                 Arc::new(StringArray::from(vec![relationship.source_id.clone()])),
                 Arc::new(StringArray::from(vec![relationship.target_id.clone()])),
+                Arc::new(StringArray::from(vec![self.project_key.clone()])),
                 Arc::new(StringArray::from(vec![relationship
                     .relationship_type
                     .to_string()])),
@@ -831,8 +835,8 @@ impl MemoryStore {
         let mut results = table
             .query()
             .only_if(format!(
-                "source_id = '{}' OR target_id = '{}'",
-                memory_id, memory_id
+                "(source_id = '{}' OR target_id = '{}') AND project_key = '{}'",
+                memory_id, memory_id, self.project_key
             ))
             .execute()
             .await?;
@@ -851,10 +855,12 @@ impl MemoryStore {
         Ok(relationships)
     }
 
-    /// Get total count of memories
+    /// Get total count of memories for the current project
     pub async fn get_memory_count(&self) -> Result<usize> {
         let table = self.db.open_table("memories").execute().await?;
-        Ok(table.count_rows(None).await?)
+        Ok(table
+            .count_rows(Some(format!("project_key = '{}'", self.project_key)))
+            .await?)
     }
 
     /// Clean up old memories based on configuration
@@ -865,15 +871,13 @@ impl MemoryStore {
 
             let table = self.db.open_table("memories").execute().await?;
 
+            let filter = format!(
+                "project_key = '{}' AND created_at < '{}' AND importance < {}",
+                self.project_key, cutoff_str, self.config.cleanup_min_importance
+            );
+
             // Count memories to be deleted
-            let mut count_results = table
-                .query()
-                .only_if(format!(
-                    "created_at < '{}' AND importance < {}",
-                    cutoff_str, self.config.cleanup_min_importance
-                ))
-                .execute()
-                .await?;
+            let mut count_results = table.query().only_if(filter.clone()).execute().await?;
 
             let mut count = 0;
             while let Some(batch) = count_results.try_next().await? {
@@ -881,12 +885,7 @@ impl MemoryStore {
             }
 
             // Delete old memories
-            table
-                .delete(&format!(
-                    "created_at < '{}' AND importance < {}",
-                    cutoff_str, self.config.cleanup_min_importance
-                ))
-                .await?;
+            table.delete(&filter).await?;
 
             Ok(count)
         } else {
@@ -1103,41 +1102,29 @@ impl MemoryStore {
         true
     }
 
-    /// Clear all memory data (memories and relationships)
+    /// Clear all memory data for the current project
     pub async fn clear_all_memory_data(&mut self) -> Result<usize> {
-        // Get current counts before deletion
+        // Get current counts before deletion (scoped to project)
         let memory_count = self.get_memory_count().await.unwrap_or(0);
 
-        // Count relationships
+        // Count relationships for this project
         let rel_table = self.db.open_table("memory_relationships").execute().await?;
-        let relationship_count = rel_table.count_rows(None).await.unwrap_or(0);
+        let relationship_count = rel_table
+            .count_rows(Some(format!("project_key = '{}'", self.project_key)))
+            .await
+            .unwrap_or(0);
 
         let total_deleted = memory_count + relationship_count;
 
-        // Drop and recreate memories table
-        if self
-            .db
-            .table_names()
-            .execute()
-            .await?
-            .contains(&"memories".to_string())
-        {
-            self.db.drop_table("memories", &[]).await?;
-        }
+        // Delete only this project's memories and relationships
+        let mem_table = self.db.open_table("memories").execute().await?;
+        mem_table
+            .delete(&format!("project_key = '{}'", self.project_key))
+            .await?;
 
-        // Drop and recreate relationships table
-        if self
-            .db
-            .table_names()
-            .execute()
-            .await?
-            .contains(&"memory_relationships".to_string())
-        {
-            self.db.drop_table("memory_relationships", &[]).await?;
-        }
-
-        // Recreate tables
-        self.initialize_tables().await?;
+        rel_table
+            .delete(&format!("project_key = '{}'", self.project_key))
+            .await?;
 
         Ok(total_deleted)
     }

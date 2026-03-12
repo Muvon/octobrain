@@ -220,7 +220,7 @@ async fn handle_tools_call(
 
     let result = if is_memory_tool {
         let provider = {
-            let mut guard = state.lock().await;
+            let guard = state.lock().await;
             guard.memory.clone()
         };
         let provider = match provider {

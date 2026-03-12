@@ -139,18 +139,11 @@ fn normalize_git_url(url: &str) -> String {
     url.to_string()
 }
 
-/// Get the storage path for a specific project
-pub fn get_project_storage_path(project_path: &Path) -> Result<PathBuf> {
+/// Get the shared memory database path.
+/// All projects share a single LanceDB at this location; rows are scoped by project_key.
+pub fn get_memory_database_path() -> Result<PathBuf> {
     let system_dir = get_system_storage_dir()?;
-    let project_id = get_project_identifier(project_path)?;
-
-    Ok(system_dir.join(project_id))
-}
-
-/// Get database path for a specific project
-pub fn get_project_database_path(project_path: &Path) -> Result<PathBuf> {
-    let project_storage = get_project_storage_path(project_path)?;
-    Ok(project_storage.join("storage"))
+    Ok(system_dir.join("memory"))
 }
 
 /// Get the system config file path

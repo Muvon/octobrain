@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize tracing subscriber for logging (skip for MCP command which uses file-only logging)
-    if !matches!(cli.command, Commands::Mcp) {
+    if !matches!(cli.command, Commands::Mcp { .. }) {
         let filter =
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("octobrain=info"));
 
