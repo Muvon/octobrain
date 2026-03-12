@@ -182,9 +182,9 @@ impl MemoryStore {
         }
 
         // Create relationships table if it doesn't exist
-        // Create relationships table if it doesn't exist
         if !table_names.contains(&"memory_relationships".to_string()) {
             let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Utf8, false),
                 Field::new("source_id", DataType::Utf8, false),
                 Field::new("target_id", DataType::Utf8, false),
                 Field::new("project_key", DataType::Utf8, false), // project scoping
