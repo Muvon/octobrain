@@ -1,44 +1,28 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Muvon/octobrain",
-  "title": "Octobrain",
   "description": "Persistent memory for AI assistants with semantic search and knowledge graph relationships.",
+  "name_for_human": "Octobrain",
+  "name_for_model": "octobrain",
   "version": "0.3.0",
-  "repository": {
-    "url": "https://github.com/muvon/octobrain",
-    "source": "github"
-  },
-  "websiteUrl": "https://github.com/muvon/octobrain",
-  "packages": [
+  "repositories": [
     {
-      "registryType": "mcpb",
-      "identifier": "octobrain",
-      "version": "0.2.0",
-      "transport": {
-        "type": "stdio"
-      },
-      "packageArguments": [
-        {
-          "type": "positional",
-          "value": "mcp"
-        }
-      ],
-      "environmentVariables": [
-        {
-          "name": "VOYAGE_API_KEY",
-          "description": "Voyage AI API key for embedding generation (required when using voyage embedding model)",
-          "isRequired": false,
-          "isSecret": true
-        },
-        {
-          "name": "OPENAI_API_KEY",
-          "description": "OpenAI API key for embedding generation (required when using openai embedding model)",
-          "isRequired": false,
-          "isSecret": true
-        }
-      ]
+      "type": "github",
+      "owner": "Muvon",
+      "repo": "octobrain"
     }
   ],
+  "homepage": "https://github.com/muvon/octobrain",
+  "pricing": "free",
+  "modes": {
+    "stdio": {
+      "command": "octobrain",
+      "args": ["mcp"],
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  },
   "tools": [
     {
       "name": "memorize",
@@ -84,8 +68,7 @@
             "maxItems": 20
           }
         },
-        "required": ["title", "content"],
-        "additionalProperties": false
+        "required": ["title", "content"]
       }
     },
     {
@@ -104,7 +87,7 @@
               },
               {
                 "type": "array",
-                "description": "RECOMMENDED: Array of related search terms for comprehensive results. Example: ['authentication patterns', 'login implementation', 'user session management'] finds all auth-related memories in one search",
+                "description": "RECOMMENDED: Array of related search terms for comprehensive results.",
                 "items": {
                   "type": "string",
                   "minLength": 3,
@@ -148,8 +131,7 @@
             "default": 2000
           }
         },
-        "required": ["query"],
-        "additionalProperties": false
+        "required": ["query"]
       }
     },
     {
@@ -185,8 +167,7 @@
             "const": true
           }
         },
-        "required": ["confirm"],
-        "additionalProperties": false
+        "required": ["confirm"]
       }
     },
     {
@@ -200,8 +181,7 @@
             "description": "Memory ID to auto-link with similar memories"
           }
         },
-        "required": ["memory_id"],
-        "additionalProperties": false
+        "required": ["memory_id"]
       }
     },
     {
@@ -228,9 +208,10 @@
             "default": 2000
           }
         },
-        "required": ["memory_id"],
-        "additionalProperties": false
+        "required": ["memory_id"]
       }
     }
-  ]
+  ],
+  "categories": ["memory", "knowledge-management", "ai-assistant"],
+  "tags": ["memory", "semantic-search", "knowledge-graph", "ai-assistant", "persistent-memory"]
 }
