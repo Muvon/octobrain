@@ -291,7 +291,13 @@ impl MemoryStore {
         let table = self.db.open_table("memories").execute().await?;
 
         // Delete existing memory with same ID if it exists
-        table.delete(&format!("id = '{}'", memory.id)).await.ok();
+        table
+            .delete(&format!(
+                "id = '{}' AND project_key = '{}'",
+                memory.id, self.project_key
+            ))
+            .await
+            .ok();
 
         // Add new memory
         use arrow::record_batch::RecordBatchIterator;
@@ -811,7 +817,10 @@ impl MemoryStore {
 
         // Delete existing relationship with same ID if it exists
         table
-            .delete(&format!("id = '{}'", relationship.id))
+            .delete(&format!(
+                "id = '{}' AND project_key = '{}'",
+                relationship.id, self.project_key
+            ))
             .await
             .ok();
 
