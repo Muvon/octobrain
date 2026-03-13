@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.3.0] - 2026-03-13
+
+### 📋 Release Summary
+
+This release introduces confidence scoring and relationship tools for smarter memory management, plus enhanced search with parent content tracking and reranker support (ab2d791b, 502cbe62, 98c7e2f8). The MCP server gains auto-link and memory-graph capabilities with optional HTTP transport (f201c7d4, d7787b76). Multiple fixes improve search accuracy, data isolation, and cross-platform stability (b1524de0, 84dc6854, 0b1df7ee).
+
+
+### ✨ New Features & Enhancements
+
+- **memory**: add confidence scoring and relationship tools `ab2d791b`
+- **mcp**: add auto_link and memory_graph tools with enhanced schema `f201c7d4`
+- **mcp**: add HTTP transport option `d7787b76`
+- **knowledge**: add parent content tracking for search context `502cbe62`
+- **memory**: activate reranker for hybrid and vector search `98c7e2f8`
+
+### 🔧 Improvements & Optimizations
+
+- **storage**: consolidate to shared memory database `3e0b1b8d`
+- **hybrid**: switch to native lancedb rrf fusion `df9497d7`
+- **knowledge**: improve HTML extraction with readability `090670c1`
+
+### 🐛 Bug Fixes & Stability
+
+- **server**: align MCP server manifest with latest schema `b1524de0`
+- **server**: shorten description in server manifest `f3ff987d`
+- **memory**: add missing id field to relationships table `54b426c1`
+- **memory**: scope delete operations to project key `84dc6854`
+- **memory**: remove keyword search from hybrid query `8e68099b`
+- **ci**: enable default features and fix Windows static CRT build `0b1df7ee`
+
+### 🔄 Other Changes
+
+- **deps**: upgrade html parsing and text extraction libraries `19352773`
+- **deps**: bump octolib to 0.10.4 `80de4030`
+- **release**: fix musl builds by disabling default features `a37aacb6`
+- **release**: 0.3.0 `bb3f9b98`
+- **deps**: upgrade datafusion to 51.0.0 and arrow to 57.3.0 `ec4f322e`
+- disable fastembed on Windows builds `1b263d44`
+- **ci**: install protoc using setup-protoc action `8cac4795`
+- **chunker**: fix extract_title method name in tests `f8664956`
+- **deps**: upgrade octolib to 0.10.0 `c86805f1`
+- **deps**: bump octolib to 0.9.3 `d24505c8`
+
+### 📊 Release Summary
+
+**Total commits**: 24 across 4 categories
+
+✨ **5** new features - *Enhanced functionality*
+🔧 **3** improvements - *Better performance & code quality*
+🐛 **6** bug fixes - *Improved stability*
+🔄 **10** other changes - *Maintenance & tooling*
+
 ## [0.3.0] - 2026-03-12
 
 ### 📋 Release Summary
