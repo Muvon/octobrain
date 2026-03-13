@@ -104,38 +104,34 @@ impl MemoryProvider {
         vec![
 			crate::mcp::types::McpTool {
 				name: "memorize".to_string(),
-				description: "Store important information, insights, or context in memory for future reference. WHEN TO USE: call remember first to avoid duplicates, then memorize if nothing relevant exists. Store: user-stated facts/preferences (source=user_confirmed, importance 0.8-1.0), architectural decisions, bug fixes with root cause, non-obvious patterns. Skip: transient state, info already in code, things you can re-derive cheaply. Set source='user_confirmed' whenever the user explicitly states, approves, or corrects something — those memories rank higher in retrieval. Use source='agent_inferred' (default) for your own conclusions that may be wrong.".to_string(),
+				description: "Store information, insights, or context in memory. Call remember first to avoid duplicates. Set source='user_confirmed' for user-stated facts (importance 0.8-1.0), 'agent_inferred' for AI conclusions (0.3-0.6). Skip transient state or things easily re-derived.".to_string(),
 				input_schema: json!({
 					"type": "object",
 					"properties": {
 						"title": {
 							"type": "string",
-							"description": "Short, descriptive title for the memory",
-							"minLength": 5,
-							"maxLength": 200
+							"description": "Short descriptive title",
 						},
 						"content": {
 							"type": "string",
-							"description": "Detailed content to remember - explanations, code snippets, insights, decisions, etc.",
-							"minLength": 10,
-							"maxLength": 10000
+							"description": "Full content — explanations, code snippets, decisions, etc.",
 						},
 						"memory_type": {
 							"type": "string",
-							"description": "Category of memory for better organization",
+							"description": "Memory category",
 							"enum": ["code", "architecture", "bug_fix", "feature", "documentation", "user_preference", "decision", "learning", "configuration", "testing", "performance", "security", "insight"],
 							"default": "code"
 						},
 						"importance": {
 							"type": "number",
-							"description": "Importance score 0.0-1.0. user_confirmed facts: 0.8-1.0. Architecture/decisions: 0.7-0.9. Bug fixes: 0.6-0.8. Agent inferences: 0.3-0.6. Routine observations: 0.1-0.4.",
+							"description": "Importance 0.0-1.0: user facts 0.8-1.0, decisions 0.7-0.9, bug fixes 0.6-0.8, inferences 0.3-0.6",
 							"minimum": 0.0,
 							"maximum": 1.0,
 							"default": 0.5
 						},
 						"tags": {
 							"type": "array",
-							"description": "Optional tags for categorization and easier searching",
+							"description": "Tags for categorization and filtering",
 							"items": {
 								"type": "string"
 							},
@@ -143,7 +139,7 @@ impl MemoryProvider {
 						},
 						"related_files": {
 							"type": "array",
-							"description": "Optional file paths related to this memory",
+							"description": "File paths related to this memory",
 							"items": {
 								"type": "string"
 							},
@@ -151,7 +147,7 @@ impl MemoryProvider {
 						},
 						"source": {
 							"type": "string",
-							"description": "Trust tier of this memory. Use 'user_confirmed' when the user explicitly stated, approved, or corrected this — it ranks higher in retrieval. Use 'agent_inferred' (default) for AI conclusions that may be wrong.",
+							"description": "Trust tier: 'user_confirmed' (user explicitly stated/approved) ranks higher in retrieval; 'agent_inferred' for AI conclusions",
 							"enum": ["user_confirmed", "agent_inferred"],
 							"default": "agent_inferred"
 						}
@@ -162,7 +158,7 @@ impl MemoryProvider {
 			},
 			crate::mcp::types::McpTool {
 				name: "remember".to_string(),
-				description: "Search and retrieve stored memories using semantic search. ALWAYS call this before memorize to avoid duplicates, and at the start of any task to load relevant context. Results automatically include 1-hop graph neighbors — you do NOT need to call memory_graph for routine lookups. STRATEGY: prefer arrays of 2-5 related terms over a single query for comprehensive coverage, e.g. ['database connection pooling', 'query caching', 'ORM patterns']. Use memory_types filter when you know the category. Results show [CONFIRMED] or [INFERRED] trust labels — weight confirmed memories more heavily.".to_string(),
+					description: "Semantic search over stored memories. Call before memorize to avoid duplicates, and at task start to load context. Results include 1-hop graph neighbors automatically. Prefer 2-5 related query terms for broader coverage. Results show [CONFIRMED]/[INFERRED] trust labels.".to_string(),
 				input_schema: json!({
 					"type": "object",
 					"properties": {
@@ -170,7 +166,7 @@ impl MemoryProvider {
 							"oneOf": [
 								{
 									"type": "string",
-									"description": "Single search query - use for specific searches. Express in human terms for semantic search",
+									"description": "Single semantic search query",
 									"minLength": 3,
 									"maxLength": 500
 								},
@@ -183,14 +179,14 @@ impl MemoryProvider {
 									},
 									"minItems": 1,
 									"maxItems": 5,
-									"description": "RECOMMENDED: Array of related search terms for comprehensive results. Example: ['authentication patterns', 'login implementation', 'user session management'] finds all auth-related memories in one search"
+									"description": "2-5 related terms for comprehensive coverage — preferred over single query"
 								}
 							],
-							"description": "PREFER ARRAY OF RELATED TERMS: ['user authentication patterns', 'login session management', 'password validation'] for comprehensive search. Single string only for very specific searches. Use multi-term for: Feature exploration: ['database patterns', 'query optimization', 'data persistence'], Related concepts: ['error handling', 'exception recovery', 'failure patterns'], System understanding: ['architecture decisions', 'design patterns', 'implementation choices']. Use descriptive phrases for semantic search."
+							"description": "String or array of 2-5 related terms. Array preferred for broader semantic coverage."
 						},
 						"memory_types": {
 							"type": "array",
-							"description": "Optional filter by memory types. Use when you know the category to narrow results.",
+							"description": "Narrow results to specific memory categories",
 							"items": {
 								"type": "string",
 								"enum": ["code", "architecture", "bug_fix", "feature", "documentation", "user_preference", "decision", "learning", "configuration", "testing", "performance", "security", "insight"]
@@ -198,28 +194,28 @@ impl MemoryProvider {
 						},
 						"tags": {
 							"type": "array",
-							"description": "Optional filter by tags",
+							"description": "Filter by tags",
 							"items": {
 								"type": "string"
 							}
 						},
 						"related_files": {
 							"type": "array",
-							"description": "Optional filter by related files",
+							"description": "Filter by related file paths",
 							"items": {
 								"type": "string"
 							}
 						},
 						"limit": {
 							"type": "integer",
-							"description": "Maximum number of memories to return",
+							"description": "Max memories to return",
 							"minimum": 1,
 							"maximum": 5,
 							"default": 5
 						},
 						"max_tokens": {
 							"type": "integer",
-							"description": "Maximum tokens allowed in output before truncation (default: 2000, set to 0 for unlimited)",
+							"description": "Output token limit (0 = unlimited)",
 							"minimum": 0,
 							"default": 2000
 						}
@@ -230,17 +226,17 @@ impl MemoryProvider {
 			},
 			crate::mcp::types::McpTool {
 				name: "forget".to_string(),
-				description: "Permanently remove memories. REQUIRES confirm=true — this is irreversible. Use memory_id (from remember results) for precise single-memory deletion. Use query+memory_types+tags for bulk removal of a category. Do NOT forget memories just because they seem old — importance decay handles that automatically. Only forget when information is actively wrong or superseded.".to_string(),
+					description: "Permanently delete memories. Irreversible — requires confirm=true. Use memory_id for single deletion, or query+filters for bulk removal. Don't forget memories just because they're old — importance decay handles that. Only delete when information is wrong or superseded.".to_string(),
 				input_schema: json!({
 					"type": "object",
 					"properties": {
 						"memory_id": {
 							"type": "string",
-							"description": "Specific memory ID to forget (get this from remember results)"
+							"description": "ID of memory to delete (from remember results)"
 						},
 						"query": {
 							"type": "string",
-							"description": "Query to find memories to forget (alternative to memory_id)"
+							"description": "Semantic query to find memories to delete (alternative to memory_id)"
 						},
 						"memory_types": {
 							"type": "array",
@@ -259,7 +255,7 @@ impl MemoryProvider {
 						},
 						"confirm": {
 							"type": "boolean",
-							"description": "Must be true to confirm deletion — deletion is permanent and cannot be undone",
+							"description": "Must be true — deletion is permanent",
 							"const": true
 						}
 					},
@@ -269,13 +265,13 @@ impl MemoryProvider {
 			},
 			crate::mcp::types::McpTool {
 				name: "auto_link".to_string(),
-				description: "Manually trigger automatic linking for a memory to find and connect related memories based on semantic similarity and shared files. WHEN TO USE: after discovering that two existing memories are related but were stored before auto-linking ran; when you want to refresh links for a memory after its content was updated; for memories imported or created outside the normal memorize flow. Auto-linking runs automatically on new memories — only call this manually for existing ones.".to_string(),
+					description: "Find and connect semantically similar memories for a given memory ID. Auto-linking runs on new memories automatically — call this manually to refresh links after content updates or for memories created outside normal flow.".to_string(),
 				input_schema: json!({
 					"type": "object",
 					"properties": {
 						"memory_id": {
 							"type": "string",
-							"description": "Memory ID to auto-link with similar memories"
+							"description": "Memory ID to auto-link"
 						}
 					},
 					"required": ["memory_id"],
@@ -284,24 +280,24 @@ impl MemoryProvider {
 			},
 			crate::mcp::types::McpTool {
 				name: "memory_graph".to_string(),
-				description: "Retrieve a memory and all its connected memories as a relationship graph for deep context exploration. NOTE: remember already includes 1-hop neighbors automatically — use memory_graph only when you need deeper traversal (depth > 1) or want to see the full relationship structure. USE CASES: tracing a chain of decisions, understanding how a bug fix relates to architecture choices, exploring all memories connected to a core concept. Prefer depth=2 for most cases; depth=3+ for very broad exploration.".to_string(),
+					description: "Retrieve a memory and its connected neighbors as a graph. remember already includes 1-hop neighbors — use this only for deeper traversal (depth > 1) or to see the full relationship structure.".to_string(),
 				input_schema: json!({
 					"type": "object",
 					"properties": {
 						"memory_id": {
 							"type": "string",
-							"description": "Root memory ID to build graph from"
+							"description": "Root memory ID"
 						},
 						"depth": {
 							"type": "integer",
-							"description": "Depth of graph traversal (1-3 recommended, higher = more memories)",
+							"description": "Traversal depth (default 2; use 3+ for broad exploration)",
 							"minimum": 1,
 							"maximum": 5,
 							"default": 2
 						},
 						"max_tokens": {
 							"type": "integer",
-							"description": "Maximum tokens allowed in output before truncation (default: 2000, set to 0 for unlimited)",
+							"description": "Output token limit (0 = unlimited)",
 							"minimum": 0,
 							"default": 2000
 						}
@@ -312,33 +308,33 @@ impl MemoryProvider {
 			},
 			crate::mcp::types::McpTool {
 				name: "relate".to_string(),
-				description: "Manually create a typed relationship between two memories. Use when you discover a meaningful connection that auto-linking missed or when you want a specific relationship type. Relationship types: related_to (general association), depends_on (A requires B to make sense), supersedes (A replaces/corrects B — mark B as outdated), similar (near-duplicate, consider forgetting one), conflicts (A and B contradict each other — flag for resolution), implements (A is the concrete implementation of abstract B), extends (A builds on B). Strength 0.0-1.0: use 0.9+ for strong direct relationships, 0.5-0.8 for moderate, below 0.5 for weak hints.".to_string(),
+					description: "Create a typed relationship between two memories. Use when auto-linking missed a meaningful connection or you need a specific type. Types: related_to, depends_on, supersedes, similar, conflicts, implements, extends. Strength 0.9+ = strong, 0.5-0.8 = moderate, <0.5 = weak.".to_string(),
 				input_schema: json!({
 					"type": "object",
 					"properties": {
 						"source_id": {
 							"type": "string",
-							"description": "ID of the source memory (get from remember results)"
+							"description": "Source memory ID"
 						},
 						"target_id": {
 							"type": "string",
-							"description": "ID of the target memory (get from remember results)"
+							"description": "Target memory ID"
 						},
 						"relationship_type": {
 							"type": "string",
-							"description": "Type of relationship between the memories",
+							"description": "Relationship type: related_to (general), depends_on (A needs B), supersedes (A replaces B), similar (near-duplicate), conflicts (contradicts), implements (concrete of abstract), extends (builds on)",
 							"enum": ["related_to", "depends_on", "supersedes", "similar", "conflicts", "implements", "extends"]
 						},
 						"strength": {
 							"type": "number",
-							"description": "Strength of the relationship (0.0-1.0). 0.9+ = strong direct link, 0.5-0.8 = moderate, <0.5 = weak hint.",
+							"description": "Relationship strength 0.0-1.0",
 							"minimum": 0.0,
 							"maximum": 1.0,
 							"default": 0.8
 						},
 						"description": {
 							"type": "string",
-							"description": "Human-readable explanation of why these memories are related",
+							"description": "Why these memories are related",
 							"maxLength": 500
 						}
 					},

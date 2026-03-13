@@ -48,19 +48,19 @@ impl KnowledgeProvider {
     pub fn get_tool_definitions() -> Vec<crate::mcp::types::McpTool> {
         vec![crate::mcp::types::McpTool {
             name: "knowledge_search".to_string(),
-            description: "Extract specific information from a webpage URL by searching its content semantically (auto-indexes on-the-fly). PRIMARY USE CASE: When you need to find specific information within a given webpage without reading the entire page - just provide the URL and your search query. The tool will fetch, index, and search the page content automatically. SECONDARY USE CASE: If no source_url provided, searches across all previously indexed webpages in the knowledge base. This is NOT for general web search - use this when you have a specific webpage URL and want to extract relevant information from it efficiently.".to_string(),
+            description: "Search indexed web knowledge semantically. Provide source_url to fetch and index a page on-the-fly, then search its content. Omit source_url to search across all previously indexed pages. Not for general web search — use when you have a specific URL or want to query already-indexed content.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "What information are you looking for? Describe in natural language (e.g., 'installation instructions', 'API authentication methods', 'pricing tiers')",
+                        "description": "What to search for, in natural language",
                         "minLength": 3,
                         "maxLength": 500
                     },
                     "source_url": {
                         "type": "string",
-                        "description": "RECOMMENDED: The specific webpage URL to search within (e.g., 'https://docs.example.com/api'). If provided, the page will be automatically fetched and indexed if not already cached. If omitted, searches across all previously indexed pages.",
+                        "description": "Webpage URL to fetch, index, and search. If omitted, searches all previously indexed pages.",
                         "pattern": "^https?://"
                     }
                 },
