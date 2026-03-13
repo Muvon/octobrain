@@ -1,17 +1,3 @@
-// Copyright 2026 Muvon Un Limited
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 use lancedb::DistanceType;
 
 /// Parameters for vector index optimization
@@ -27,7 +13,9 @@ pub struct IndexParams {
 pub struct VectorOptimizer;
 
 impl VectorOptimizer {
-    /// Calculate optimal index parameters based on dataset size
+    /// Calculate optimal index parameters based on dataset size.
+    /// Uses Dot distance for normalized embeddings (Voyage, OpenAI) —
+    /// mathematically equivalent to Cosine but skips normalization at query time.
     pub fn calculate_index_params(row_count: usize, vector_dim: usize) -> IndexParams {
         // Don't create index for small datasets (< 1000 rows)
         if row_count < 1000 {
@@ -55,14 +43,23 @@ impl VectorOptimizer {
         }
     }
 
-    /// Check if index should be optimized due to dataset growth
+    /// Check if index should be optimized due to dataset growth.
+    /// Check if index should be optimized due to dataset growth.
+    /// Returns true when row_count crosses meaningful thresholds:
+    /// - Every 500 rows when has_index is true (index may be stale)
+    /// - Every 1000 rows when has_index is false (should have index)
     pub fn should_optimize_for_growth(
-        _row_count: usize,
+        row_count: usize,
         _vector_dim: usize,
-        _has_index: bool,
+        has_index: bool,
     ) -> bool {
-        // For simplicity, don't auto-optimize in octobrain
-        // Users can manually recreate index if needed
-        false
+        if has_index {
+            // Index exists — recommend re-optimization every 500 new rows
+            // to keep partition counts aligned with data size
+            row_count.is_multiple_of(500) && row_count >= 1000
+        } else {
+            // No index yet — recommend creating one once we hit threshold
+            row_count >= 1000 && row_count.is_multiple_of(1000)
+        }
     }
 }

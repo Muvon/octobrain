@@ -27,7 +27,8 @@ use lancedb::{
     connect,
     index::Index,
     query::{ExecutableQuery, QueryBase, QueryExecutionOptions},
-    Connection, DistanceType,
+    table::OptimizeAction,
+    Connection, DistanceType, Table,
 };
 
 /// RRF (Reciprocal Rank Fusion) constant k — same value used by knowledge store.
@@ -85,7 +86,9 @@ fn build_scalar_predicate(project_key: &str, query: &MemoryQuery) -> String {
 
 /// LanceDB-based storage for memories with vector search capabilities
 pub struct MemoryStore {
-    db: Connection,
+    memories_table: Table,
+    relationships_table: Table,
+    schema: Arc<Schema>,
     embedding_provider: Box<dyn EmbeddingProvider>,
     config: MemoryConfig,
     main_config: crate::config::Config,
@@ -110,8 +113,42 @@ impl MemoryStore {
         let test_embedding = embedding_provider.generate_embedding("test").await?;
         let vector_dim = test_embedding.len();
 
+        // Build the memories schema once — reused for every write
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("project_key", DataType::Utf8, false),
+            Field::new("memory_type", DataType::Utf8, false),
+            Field::new("title", DataType::Utf8, false),
+            Field::new("content", DataType::Utf8, false),
+            Field::new("created_at", DataType::Utf8, false),
+            Field::new("updated_at", DataType::Utf8, false),
+            Field::new("importance", DataType::Float32, false),
+            Field::new("confidence", DataType::Float32, false),
+            Field::new("tags", DataType::Utf8, true),
+            Field::new("related_files", DataType::Utf8, true),
+            Field::new("git_commit", DataType::Utf8, true),
+            Field::new("source", DataType::Utf8, false),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(
+                    Arc::new(Field::new("item", DataType::Float32, true)),
+                    vector_dim as i32,
+                ),
+                true,
+            ),
+        ]));
+
+        // Initialize tables (creates them if missing, adds scalar + FTS indexes)
+        Self::init_tables(&db, &schema).await?;
+
+        // Cache table handles — opened once, reused for the lifetime of this store
+        let memories_table = db.open_table("memories").execute().await?;
+        let relationships_table = db.open_table("memory_relationships").execute().await?;
+
         let store = Self {
-            db,
+            memories_table,
+            relationships_table,
+            schema,
             embedding_provider,
             config,
             main_config,
@@ -120,52 +157,60 @@ impl MemoryStore {
             project_key,
         };
 
-        // Initialize tables
-        store.initialize_tables().await?;
-
         // Ensure optimal vector index (only during initialization, not on every store)
         store.ensure_optimal_index().await?;
 
         Ok(store)
     }
 
-    /// Initialize memory and relationship tables
-    async fn initialize_tables(&self) -> Result<()> {
-        let table_names = self.db.table_names().execute().await?;
+    /// Initialize memory and relationship tables (static — called once from new())
+    async fn init_tables(db: &Connection, schema: &Arc<Schema>) -> Result<()> {
+        let table_names = db.table_names().execute().await?;
 
         // Create memories table if it doesn't exist
         if !table_names.contains(&"memories".to_string()) {
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("id", DataType::Utf8, false),
-                Field::new("project_key", DataType::Utf8, false), // project scoping
-                Field::new("memory_type", DataType::Utf8, false),
-                Field::new("title", DataType::Utf8, false),
-                Field::new("content", DataType::Utf8, false),
-                Field::new("created_at", DataType::Utf8, false),
-                Field::new("updated_at", DataType::Utf8, false),
-                Field::new("importance", DataType::Float32, false),
-                Field::new("confidence", DataType::Float32, false),
-                Field::new("tags", DataType::Utf8, true), // JSON serialized
-                Field::new("related_files", DataType::Utf8, true), // JSON serialized
-                Field::new("git_commit", DataType::Utf8, true), // Git commit hash
-                Field::new("source", DataType::Utf8, false), // Trust tier
-                Field::new(
-                    "embedding",
-                    DataType::FixedSizeList(
-                        Arc::new(Field::new("item", DataType::Float32, true)),
-                        self.vector_dim as i32,
-                    ),
-                    true,
-                ),
-            ]));
-
-            self.db
-                .create_empty_table("memories", schema)
+            db.create_empty_table("memories", schema.clone())
                 .execute()
                 .await?;
 
-            // Create FTS index on content and title for native BM25 hybrid search
-            let table = self.db.open_table("memories").execute().await?;
+            let table = db.open_table("memories").execute().await?;
+
+            // Scalar indexes for pushdown filtering — created once at table birth
+            // Bitmap: low-cardinality string columns (project_key, memory_type, source)
+            table
+                .create_index(&["project_key"], Index::Bitmap(Default::default()))
+                .execute()
+                .await
+                .context("Failed to create Bitmap index on memories.project_key")?;
+            table
+                .create_index(&["memory_type"], Index::Bitmap(Default::default()))
+                .execute()
+                .await
+                .context("Failed to create Bitmap index on memories.memory_type")?;
+            table
+                .create_index(&["source"], Index::Bitmap(Default::default()))
+                .execute()
+                .await
+                .context("Failed to create Bitmap index on memories.source")?;
+
+            // BTree: range-query columns (importance, confidence, created_at)
+            table
+                .create_index(&["importance"], Index::BTree(Default::default()))
+                .execute()
+                .await
+                .context("Failed to create BTree index on memories.importance")?;
+            table
+                .create_index(&["confidence"], Index::BTree(Default::default()))
+                .execute()
+                .await
+                .context("Failed to create BTree index on memories.confidence")?;
+            table
+                .create_index(&["created_at"], Index::BTree(Default::default()))
+                .execute()
+                .await
+                .context("Failed to create BTree index on memories.created_at")?;
+
+            // FTS indexes for native BM25 hybrid search
             table
                 .create_index(&["content"], Index::FTS(Default::default()))
                 .execute()
@@ -177,28 +222,53 @@ impl MemoryStore {
                 .await
                 .context("Failed to create FTS index on memories.title")?;
 
-            tracing::info!(
-                "Created FTS indexes on memories.content and memories.title for hybrid search"
-            );
+            tracing::info!("Created scalar (Bitmap/BTree) and FTS indexes on memories table");
         }
 
         // Create relationships table if it doesn't exist
         if !table_names.contains(&"memory_relationships".to_string()) {
-            let schema = Arc::new(Schema::new(vec![
+            let rel_schema = Arc::new(Schema::new(vec![
                 Field::new("id", DataType::Utf8, false),
                 Field::new("source_id", DataType::Utf8, false),
                 Field::new("target_id", DataType::Utf8, false),
-                Field::new("project_key", DataType::Utf8, false), // project scoping
+                Field::new("project_key", DataType::Utf8, false),
                 Field::new("relationship_type", DataType::Utf8, false),
                 Field::new("strength", DataType::Float32, false),
                 Field::new("description", DataType::Utf8, false),
                 Field::new("created_at", DataType::Utf8, false),
             ]));
 
-            self.db
-                .create_empty_table("memory_relationships", schema)
+            db.create_empty_table("memory_relationships", rel_schema)
                 .execute()
                 .await?;
+
+            let rel_table = db.open_table("memory_relationships").execute().await?;
+
+            // Scalar indexes for relationships — enable fast lookups by source/target/project
+            rel_table
+                .create_index(&["source_id"], Index::Bitmap(Default::default()))
+                .execute()
+                .await
+                .context("Failed to create Bitmap index on memory_relationships.source_id")?;
+            rel_table
+                .create_index(&["target_id"], Index::Bitmap(Default::default()))
+                .execute()
+                .await
+                .context("Failed to create Bitmap index on memory_relationships.target_id")?;
+            rel_table
+                .create_index(&["project_key"], Index::Bitmap(Default::default()))
+                .execute()
+                .await
+                .context("Failed to create Bitmap index on memory_relationships.project_key")?;
+            rel_table
+                .create_index(&["relationship_type"], Index::Bitmap(Default::default()))
+                .execute()
+                .await
+                .context(
+                    "Failed to create Bitmap index on memory_relationships.relationship_type",
+                )?;
+
+            tracing::info!("Created Bitmap indexes on memory_relationships table");
         }
 
         Ok(())
@@ -233,31 +303,6 @@ impl MemoryStore {
         memory: &Memory,
         embedding: Vec<f32>,
     ) -> Result<()> {
-        // Create record batch
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("project_key", DataType::Utf8, false),
-            Field::new("memory_type", DataType::Utf8, false),
-            Field::new("title", DataType::Utf8, false),
-            Field::new("content", DataType::Utf8, false),
-            Field::new("created_at", DataType::Utf8, false),
-            Field::new("updated_at", DataType::Utf8, false),
-            Field::new("importance", DataType::Float32, false),
-            Field::new("confidence", DataType::Float32, false),
-            Field::new("tags", DataType::Utf8, true),
-            Field::new("related_files", DataType::Utf8, true),
-            Field::new("git_commit", DataType::Utf8, true),
-            Field::new("source", DataType::Utf8, false), // Trust tier
-            Field::new(
-                "embedding",
-                DataType::FixedSizeList(
-                    Arc::new(Field::new("item", DataType::Float32, true)),
-                    self.vector_dim as i32,
-                ),
-                true,
-            ),
-        ]));
-
         // Prepare data
         let tags_json = serde_json::to_string(&memory.metadata.tags)?;
         let files_json = serde_json::to_string(&memory.metadata.related_files)?;
@@ -271,7 +316,7 @@ impl MemoryStore {
         );
 
         let batch = RecordBatch::try_new(
-            schema.clone(),
+            self.schema.clone(),
             vec![
                 Arc::new(StringArray::from(vec![memory.id.clone()])),
                 Arc::new(StringArray::from(vec![self.project_key.clone()])),
@@ -290,11 +335,8 @@ impl MemoryStore {
             ],
         )?;
 
-        // Open table and add the batch
-        let table = self.db.open_table("memories").execute().await?;
-
         // Delete existing memory with same ID if it exists
-        table
+        self.memories_table
             .delete(&format!(
                 "id = '{}' AND project_key = '{}'",
                 memory.id, self.project_key
@@ -305,11 +347,8 @@ impl MemoryStore {
         // Add new memory
         use arrow::record_batch::RecordBatchIterator;
         use std::iter::once;
-        let batches = once(Ok(batch));
-        let batch_reader = RecordBatchIterator::new(batches, schema);
-        table.add(batch_reader).execute().await?;
-
-        // Index management moved to separate method for performance
+        let batch_reader = RecordBatchIterator::new(once(Ok(batch)), self.schema.clone());
+        self.memories_table.add(batch_reader).execute().await?;
 
         Ok(())
     }
@@ -322,8 +361,7 @@ impl MemoryStore {
 
     /// Delete a memory by ID
     pub async fn delete_memory(&mut self, memory_id: &str) -> Result<()> {
-        let table = self.db.open_table("memories").execute().await?;
-        table
+        self.memories_table
             .delete(&format!(
                 "id = '{}' AND project_key = '{}'",
                 memory_id, self.project_key
@@ -331,8 +369,7 @@ impl MemoryStore {
             .await?;
 
         // Also delete any relationships involving this memory (scoped to project)
-        let rel_table = self.db.open_table("memory_relationships").execute().await?;
-        rel_table
+        self.relationships_table
             .delete(&format!(
                 "(source_id = '{}' OR target_id = '{}') AND project_key = '{}'",
                 memory_id, memory_id, self.project_key
@@ -345,11 +382,9 @@ impl MemoryStore {
 
     /// Ensure optimal vector index for memories table (call periodically, not on every store)
     pub async fn ensure_optimal_index(&self) -> Result<()> {
-        let table = self.db.open_table("memories").execute().await?;
-
-        // Get current dataset statistics
-        let row_count = table.count_rows(None).await?;
-        let has_index = table
+        let row_count = self.memories_table.count_rows(None).await?;
+        let has_index = self
+            .memories_table
             .list_indices()
             .await?
             .iter()
@@ -368,7 +403,7 @@ impl MemoryStore {
 					row_count, index_params.num_partitions, index_params.num_sub_vectors
 				);
 
-                table
+                self.memories_table
                     .create_index(
                         &["embedding"],
                         Index::IvfPq(
@@ -403,7 +438,7 @@ impl MemoryStore {
                 );
 
                 if index_params.should_create_index {
-                    table
+                    self.memories_table
                         .create_index(
                             &["embedding"],
                             Index::IvfPq(
@@ -425,9 +460,8 @@ impl MemoryStore {
 
     /// Get a memory by ID
     pub async fn get_memory(&self, memory_id: &str) -> Result<Option<Memory>> {
-        let table = self.db.open_table("memories").execute().await?;
-
-        let mut results = table
+        let mut results = self
+            .memories_table
             .query()
             .only_if(format!(
                 "id = '{}' AND project_key = '{}'",
@@ -501,8 +535,6 @@ impl MemoryStore {
     /// pushed down to LanceDB via `only_if()`. JSON-serialized fields (tags, related_files)
     /// are filtered in Rust after fetch since they can't be queried natively.
     async fn vector_search(&self, query: &MemoryQuery) -> Result<Vec<MemorySearchResult>> {
-        let table = self.db.open_table("memories").execute().await?;
-
         let limit = query
             .limit
             .unwrap_or(self.config.max_search_results)
@@ -520,7 +552,8 @@ impl MemoryStore {
                 .generate_embedding(query_text)
                 .await?;
 
-            let db_query = table
+            let db_query = self
+                .memories_table
                 .vector_search(query_embedding.as_slice())?
                 .distance_type(DistanceType::Cosine)
                 .limit(limit * 2) // over-fetch to absorb post-filter losses
@@ -567,7 +600,12 @@ impl MemoryStore {
             }
         } else {
             // No text query — filter-only scan (predicate always includes project_key)
-            let mut db_results = table.query().only_if(predicate).execute().await?;
+            let mut db_results = self
+                .memories_table
+                .query()
+                .only_if(predicate)
+                .execute()
+                .await?;
 
             while let Some(batch) = db_results.try_next().await? {
                 if batch.num_rows() == 0 {
@@ -699,8 +737,6 @@ impl MemoryStore {
             .unwrap_or(self.config.max_search_results);
         let min_relevance = query.filters.min_relevance.unwrap_or(0.0);
 
-        let table = self.db.open_table("memories").execute().await?;
-
         let query_embedding = self
             .embedding_provider
             .generate_embedding(query_text)
@@ -709,7 +745,8 @@ impl MemoryStore {
         // Build scalar predicate for pushdown (always includes project_key)
         let predicate = build_scalar_predicate(&self.project_key, &query.filters);
 
-        let db_query = table
+        let db_query = self
+            .memories_table
             .vector_search(query_embedding.as_slice())?
             .distance_type(DistanceType::Cosine)
             .limit(limit)
@@ -791,8 +828,6 @@ impl MemoryStore {
 
     /// Store a memory relationship
     pub async fn store_relationship(&mut self, relationship: &MemoryRelationship) -> Result<()> {
-        let table = self.db.open_table("memory_relationships").execute().await?;
-
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("source_id", DataType::Utf8, false),
@@ -823,7 +858,7 @@ impl MemoryStore {
         )?;
 
         // Delete existing relationship with same ID if it exists
-        table
+        self.relationships_table
             .delete(&format!(
                 "id = '{}' AND project_key = '{}'",
                 relationship.id, self.project_key
@@ -836,7 +871,7 @@ impl MemoryStore {
         use std::iter::once;
         let batches = once(Ok(batch));
         let batch_reader = RecordBatchIterator::new(batches, schema);
-        table.add(batch_reader).execute().await?;
+        self.relationships_table.add(batch_reader).execute().await?;
 
         Ok(())
     }
@@ -846,9 +881,8 @@ impl MemoryStore {
         &self,
         memory_id: &str,
     ) -> Result<Vec<MemoryRelationship>> {
-        let table = self.db.open_table("memory_relationships").execute().await?;
-
-        let mut results = table
+        let mut results = self
+            .relationships_table
             .query()
             .only_if(format!(
                 "(source_id = '{}' OR target_id = '{}') AND project_key = '{}'",
@@ -873,8 +907,7 @@ impl MemoryStore {
 
     /// Delete all AutoLinked relationships for a memory (used before re-linking on update)
     pub async fn delete_auto_linked_relationships(&mut self, memory_id: &str) -> Result<()> {
-        let rel_table = self.db.open_table("memory_relationships").execute().await?;
-        rel_table
+        self.relationships_table
             .delete(&format!(
                 "(source_id = '{}' OR target_id = '{}') AND relationship_type = 'auto_linked' AND project_key = '{}'",
                 memory_id, memory_id, self.project_key
@@ -886,8 +919,8 @@ impl MemoryStore {
 
     /// Get total count of memories for the current project
     pub async fn get_memory_count(&self) -> Result<usize> {
-        let table = self.db.open_table("memories").execute().await?;
-        Ok(table
+        Ok(self
+            .memories_table
             .count_rows(Some(format!("project_key = '{}'", self.project_key)))
             .await?)
     }
@@ -898,15 +931,18 @@ impl MemoryStore {
             let cutoff_date = Utc::now() - chrono::Duration::days(cleanup_days as i64);
             let cutoff_str = cutoff_date.to_rfc3339();
 
-            let table = self.db.open_table("memories").execute().await?;
-
             let filter = format!(
                 "project_key = '{}' AND created_at < '{}' AND importance < {}",
                 self.project_key, cutoff_str, self.config.cleanup_min_importance
             );
 
             // Count memories to be deleted
-            let mut count_results = table.query().only_if(filter.clone()).execute().await?;
+            let mut count_results = self
+                .memories_table
+                .query()
+                .only_if(filter.clone())
+                .execute()
+                .await?;
 
             let mut count = 0;
             while let Some(batch) = count_results.try_next().await? {
@@ -914,7 +950,10 @@ impl MemoryStore {
             }
 
             // Delete old memories
-            table.delete(&filter).await?;
+            self.memories_table.delete(&filter).await?;
+
+            // Optimize table after deletion (compact files, prune deleted rows)
+            self.memories_table.optimize(OptimizeAction::All).await?;
 
             Ok(count)
         } else {
@@ -1146,8 +1185,8 @@ impl MemoryStore {
         let memory_count = self.get_memory_count().await.unwrap_or(0);
 
         // Count relationships for this project
-        let rel_table = self.db.open_table("memory_relationships").execute().await?;
-        let relationship_count = rel_table
+        let relationship_count = self
+            .relationships_table
             .count_rows(Some(format!("project_key = '{}'", self.project_key)))
             .await
             .unwrap_or(0);
@@ -1155,13 +1194,18 @@ impl MemoryStore {
         let total_deleted = memory_count + relationship_count;
 
         // Delete only this project's memories and relationships
-        let mem_table = self.db.open_table("memories").execute().await?;
-        mem_table
+        self.memories_table
             .delete(&format!("project_key = '{}'", self.project_key))
             .await?;
 
-        rel_table
+        self.relationships_table
             .delete(&format!("project_key = '{}'", self.project_key))
+            .await?;
+
+        // Optimize tables after deletion
+        self.memories_table.optimize(OptimizeAction::All).await?;
+        self.relationships_table
+            .optimize(OptimizeAction::All)
             .await?;
 
         Ok(total_deleted)
