@@ -37,6 +37,8 @@ impl MemoryProvider {
     pub async fn new(
         config: &Config,
         working_directory: std::path::PathBuf,
+        project_key: Option<String>,
+        role: Option<String>,
     ) -> Result<Self, McpError> {
         let original_dir = std::env::current_dir().ok();
         if let Err(e) = std::env::set_current_dir(&working_directory) {
@@ -46,12 +48,14 @@ impl MemoryProvider {
             );
         }
 
-        let manager = MemoryManager::new(config).await.map_err(|e| {
-            McpError::internal_error(
-                format!("Failed to initialize memory manager: {}", e),
-                "memory_init",
-            )
-        })?;
+        let manager = MemoryManager::new(config, project_key.clone(), role.clone())
+            .await
+            .map_err(|e| {
+                McpError::internal_error(
+                    format!("Failed to initialize memory manager: {}", e),
+                    "memory_init",
+                )
+            })?;
 
         if let Some(original) = original_dir {
             let _ = std::env::set_current_dir(&original);
@@ -63,8 +67,40 @@ impl MemoryProvider {
         })
     }
 
-    /// Get all tool definitions for memory operations
-    pub fn get_tool_definitions() -> Vec<crate::mcp::types::McpTool> {
+    /// Get all tool definitions for memory operations.
+    /// When `locked` is true, project/role are fixed server-side and hidden from tool schemas.
+    /// When `locked` is false, project/role are exposed as optional tool parameters.
+    pub fn get_tool_definitions(locked: bool) -> Vec<crate::mcp::types::McpTool> {
+        // Extra properties injected into write tools (memorize, forget, relate) when not locked
+        let scope_props_write = if locked {
+            json!({})
+        } else {
+            json!({
+                "project": {
+                    "type": "string",
+                    "description": "Project key to scope this memory to. Defaults to auto-detected Git remote hash."
+                },
+                "role": {
+                    "type": "string",
+                    "description": "Role tag to attach to this memory (e.g. 'developer', 'reviewer')."
+                }
+            })
+        };
+        // Extra properties injected into read tools (remember, auto_link, memory_graph) when not locked
+        let scope_props_read = if locked {
+            json!({})
+        } else {
+            json!({
+                "project": {
+                    "type": "string",
+                    "description": "Filter by project key. If omitted, returns memories from all projects."
+                },
+                "role": {
+                    "type": "string",
+                    "description": "Filter by role. If omitted, returns memories for all roles."
+                }
+            })
+        };
         vec![
 			crate::mcp::types::McpTool {
 				name: "memorize".to_string(),
@@ -311,6 +347,29 @@ impl MemoryProvider {
 				}),
 			}
 		]
+        .into_iter()
+        .map(|mut tool| {
+            // Merge scope props into each tool's input_schema.properties
+            let extra = if matches!(tool.name.as_str(), "memorize" | "forget" | "relate") {
+                &scope_props_write
+            } else {
+                &scope_props_read
+            };
+            if let Some(obj) = extra.as_object() {
+                if !obj.is_empty() {
+                    if let Some(props) = tool.input_schema
+                        .get_mut("properties")
+                        .and_then(|p| p.as_object_mut())
+                    {
+                        for (k, v) in obj {
+                            props.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+            }
+            tool
+        })
+        .collect()
     }
 
     /// Execute the memorize tool with enhanced error handling
@@ -1080,6 +1139,119 @@ impl MemoryProvider {
                 format!("Failed to create relationship: {}", e),
                 "relate",
             )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryProvider;
+
+    #[test]
+    fn test_tool_definitions_unlocked_has_scope_props() {
+        let tools = MemoryProvider::get_tool_definitions(false);
+
+        // memorize, forget, relate are write tools — must expose project + role
+        for write_tool in &["memorize", "forget", "relate"] {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == *write_tool)
+                .unwrap_or_else(|| panic!("Tool '{}' not found in definitions", write_tool));
+            let props = tool.input_schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("Tool '{}' has no properties object", write_tool));
+            assert!(
+                props.contains_key("project"),
+                "Unlocked write tool '{}' must expose 'project' param",
+                write_tool
+            );
+            assert!(
+                props.contains_key("role"),
+                "Unlocked write tool '{}' must expose 'role' param",
+                write_tool
+            );
+        }
+
+        // remember, auto_link, memory_graph are read tools — must expose project + role
+        for read_tool in &["remember", "auto_link", "memory_graph"] {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == *read_tool)
+                .unwrap_or_else(|| panic!("Tool '{}' not found in definitions", read_tool));
+            let props = tool.input_schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("Tool '{}' has no properties object", read_tool));
+            assert!(
+                props.contains_key("project"),
+                "Unlocked read tool '{}' must expose 'project' param",
+                read_tool
+            );
+            assert!(
+                props.contains_key("role"),
+                "Unlocked read tool '{}' must expose 'role' param",
+                read_tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_tool_definitions_locked_hides_scope_props() {
+        let tools = MemoryProvider::get_tool_definitions(true);
+
+        for tool_name in &[
+            "memorize",
+            "forget",
+            "relate",
+            "remember",
+            "auto_link",
+            "memory_graph",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == *tool_name)
+                .unwrap_or_else(|| panic!("Tool '{}' not found in definitions", tool_name));
+            let props = tool.input_schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("Tool '{}' has no properties object", tool_name));
+            assert!(
+                !props.contains_key("project"),
+                "Locked tool '{}' must NOT expose 'project' param",
+                tool_name
+            );
+            assert!(
+                !props.contains_key("role"),
+                "Locked tool '{}' must NOT expose 'role' param",
+                tool_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_tool_definitions_count() {
+        // Ensure we always have exactly 6 memory tools
+        let tools = MemoryProvider::get_tool_definitions(false);
+        assert_eq!(
+            tools.len(),
+            6,
+            "Expected 6 memory tools, got {}",
+            tools.len()
+        );
+    }
+
+    #[test]
+    fn test_tool_definitions_required_fields_unchanged_when_locked() {
+        // Locking must not affect required fields — only hides optional scope params
+        let locked = MemoryProvider::get_tool_definitions(true);
+        let unlocked = MemoryProvider::get_tool_definitions(false);
+
+        for tool_name in &["memorize", "remember", "forget"] {
+            let t_locked = locked.iter().find(|t| t.name == *tool_name).unwrap();
+            let t_unlocked = unlocked.iter().find(|t| t.name == *tool_name).unwrap();
+            assert_eq!(
+                t_locked.input_schema["required"], t_unlocked.input_schema["required"],
+                "Required fields for '{}' must be identical regardless of locked state",
+                tool_name
+            );
         }
     }
 }

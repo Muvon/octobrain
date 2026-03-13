@@ -27,6 +27,14 @@ pub struct Cli {
 pub enum Commands {
     /// Memory management for storing and retrieving information
     Memory {
+        /// Scope memories to a specific project key (default: auto-detected from Git remote)
+        #[arg(long, global = true)]
+        project: Option<String>,
+
+        /// Filter memories by role (e.g. "developer", "reviewer"). No filter = all memories.
+        #[arg(long, global = true)]
+        role: Option<String>,
+
         #[command(subcommand)]
         command: MemoryCommand,
     },

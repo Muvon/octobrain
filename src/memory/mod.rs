@@ -30,6 +30,9 @@ mod hybrid_tests;
 #[cfg(test)]
 mod auto_link_tests;
 
+#[cfg(test)]
+mod role_tests;
+
 // Re-export the main types and interfaces
 pub use formatting::{format_memories_as_text, format_memories_for_cli};
 pub use manager::MemoryManager;

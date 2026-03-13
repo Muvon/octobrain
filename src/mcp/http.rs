@@ -139,7 +139,8 @@ fn handle_initialize(request: &JsonRpcRequest) -> JsonRpcResponse {
 }
 
 fn handle_tools_list(request: &JsonRpcRequest) -> JsonRpcResponse {
-    let mut tools = MemoryProvider::get_tool_definitions();
+    // HTTP mode has no capabilities negotiation — expose full unlocked schema
+    let mut tools = MemoryProvider::get_tool_definitions(false);
     tools.extend(KnowledgeProvider::get_tool_definitions());
     JsonRpcResponse {
         jsonrpc: "2.0".to_string(),

@@ -43,7 +43,11 @@ pub struct MemoryManager {
 
 impl MemoryManager {
     /// Create a new memory manager
-    pub async fn new(config: &Config) -> Result<Self> {
+    pub async fn new(
+        config: &Config,
+        project_key: Option<String>,
+        role: Option<String>,
+    ) -> Result<Self> {
         // Use memory config from main config (loaded from config file)
         let memory_config = config.memory.clone();
 
@@ -59,12 +63,17 @@ impl MemoryManager {
         };
 
         // Use shared memory database path (single DB for all projects)
-        let current_dir = std::env::current_dir()?;
         let db_path = crate::storage::get_memory_database_path()?;
 
-        // Compute project key from current directory's Git remote URL hash
-        let project_key = crate::storage::get_project_identifier(&current_dir)
-            .unwrap_or_else(|_| "default".to_string());
+        // Resolve project key: use provided value, or auto-detect from current dir's Git remote
+        let project_key = match project_key {
+            Some(k) => k,
+            None => {
+                let current_dir = std::env::current_dir()?;
+                crate::storage::get_project_identifier(&current_dir)
+                    .unwrap_or_else(|_| "default".to_string())
+            }
+        };
 
         // Create embedding provider using model from config
         let model_string = &config.embedding.model;
@@ -74,6 +83,7 @@ impl MemoryManager {
         let store = MemoryStore::new(
             db_path.to_string_lossy().as_ref(),
             project_key,
+            role,
             embedding_provider,
             memory_config.clone(),
             config.clone(),

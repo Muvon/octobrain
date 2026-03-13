@@ -44,9 +44,14 @@ use crate::embedding::EmbeddingProvider;
 ///
 /// Tags and related_files are excluded here because they are stored as JSON-serialized strings
 /// and cannot be queried with simple SQL equality — those are handled post-fetch in Rust.
-fn build_scalar_predicate(project_key: &str, query: &MemoryQuery) -> String {
+fn build_scalar_predicate(project_key: &str, role: Option<&str>, query: &MemoryQuery) -> String {
     // project_key is always the first condition to scope all queries to the current project
     let mut parts: Vec<String> = vec![format!("project_key = '{}'", project_key)];
+
+    // role filter — only applied when a role is set (None = no filter)
+    if let Some(role) = role {
+        parts.push(format!("role = '{}'", role));
+    }
 
     if let Some(ref memory_types) = query.memory_types {
         if !memory_types.is_empty() {
@@ -95,6 +100,7 @@ pub struct MemoryStore {
     vector_dim: usize,
     reranker_integration: Option<RerankerIntegration>,
     project_key: String,
+    role: Option<String>,
 }
 
 impl MemoryStore {
@@ -102,6 +108,7 @@ impl MemoryStore {
     pub async fn new(
         db_path: &str,
         project_key: String,
+        role: Option<String>,
         embedding_provider: Box<dyn EmbeddingProvider>,
         config: MemoryConfig,
         main_config: crate::config::Config,
@@ -117,6 +124,7 @@ impl MemoryStore {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("project_key", DataType::Utf8, false),
+            Field::new("role", DataType::Utf8, true),
             Field::new("memory_type", DataType::Utf8, false),
             Field::new("title", DataType::Utf8, false),
             Field::new("content", DataType::Utf8, false),
@@ -155,8 +163,8 @@ impl MemoryStore {
             vector_dim,
             reranker_integration,
             project_key,
+            role,
         };
-
         // Ensure optimal vector index (only during initialization, not on every store)
         store.ensure_optimal_index().await?;
 
@@ -192,6 +200,11 @@ impl MemoryStore {
                 .execute()
                 .await
                 .context("Failed to create Bitmap index on memories.source")?;
+            table
+                .create_index(&["role"], Index::Bitmap(Default::default()))
+                .execute()
+                .await
+                .context("Failed to create Bitmap index on memories.role")?;
 
             // BTree: range-query columns (importance, confidence, created_at)
             table
@@ -320,6 +333,10 @@ impl MemoryStore {
             vec![
                 Arc::new(StringArray::from(vec![memory.id.clone()])),
                 Arc::new(StringArray::from(vec![self.project_key.clone()])),
+                Arc::new(StringArray::from(vec![self
+                    .role
+                    .clone()
+                    .unwrap_or_default()])),
                 Arc::new(StringArray::from(vec![memory.memory_type.to_string()])),
                 Arc::new(StringArray::from(vec![memory.title.clone()])),
                 Arc::new(StringArray::from(vec![memory.content.clone()])),
@@ -544,7 +561,7 @@ impl MemoryStore {
         let mut results = Vec::new();
 
         // Build scalar filter predicate for pushdown (tags/related_files stay in Rust)
-        let predicate = build_scalar_predicate(&self.project_key, query);
+        let predicate = build_scalar_predicate(&self.project_key, self.role.as_deref(), query);
 
         if let Some(ref query_text) = query.query_text {
             let query_embedding = self
@@ -743,7 +760,8 @@ impl MemoryStore {
             .await?;
 
         // Build scalar predicate for pushdown (always includes project_key)
-        let predicate = build_scalar_predicate(&self.project_key, &query.filters);
+        let predicate =
+            build_scalar_predicate(&self.project_key, self.role.as_deref(), &query.filters);
 
         let db_query = self
             .memories_table
@@ -1267,4 +1285,14 @@ impl MemoryStore {
             reranker.config.enabled = false;
         }
     }
+}
+
+/// Test-only re-export of the private `build_scalar_predicate` function.
+#[cfg(test)]
+pub fn build_scalar_predicate_test(
+    project_key: &str,
+    role: Option<&str>,
+    query: &crate::memory::types::MemoryQuery,
+) -> String {
+    build_scalar_predicate(project_key, role, query)
 }

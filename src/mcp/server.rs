@@ -31,6 +31,12 @@ pub struct McpServer {
     knowledge: tokio::sync::Mutex<Option<KnowledgeProvider>>,
     config: Config,
     working_directory: std::path::PathBuf,
+    /// Project key locked from MCP capabilities on initialize (None = auto-detect)
+    session_project: tokio::sync::Mutex<Option<String>>,
+    /// Role locked from MCP capabilities on initialize (None = no filter)
+    session_role: tokio::sync::Mutex<Option<String>>,
+    /// True once capabilities were provided in initialize — locks project/role for the session
+    capabilities_locked: tokio::sync::Mutex<bool>,
 }
 
 impl McpServer {
@@ -40,6 +46,9 @@ impl McpServer {
             knowledge: tokio::sync::Mutex::new(None),
             config,
             working_directory,
+            session_project: tokio::sync::Mutex::new(None),
+            session_role: tokio::sync::Mutex::new(None),
+            capabilities_locked: tokio::sync::Mutex::new(false),
         })
     }
     /// Run the MCP server on stdio
@@ -106,28 +115,54 @@ impl McpServer {
         let has_id = id.is_some();
 
         match request.method.as_str() {
-            "initialize" => Some(JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                id,
-                result: Some(json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {
-                        "tools": {
-                            "listChanged": false
-                        }
-                    },
-                    "serverInfo": {
-                        "name": "octobrain",
-                        "version": env!("CARGO_PKG_VERSION"),
-                        "description": "Standalone memory management system for AI context and conversation state"
-                    },
-                    "instructions": "This server provides memory tools for storing and retrieving AI context. Use 'memorize' to store information, 'remember' for semantic search, 'forget' to delete memories, 'auto_link' to find related memories, 'memory_graph' to explore memory connections, and 'knowledge_search' to search indexed web content."
-                })),
-                error: None,
-            }),
+            "initialize" => {
+                // Extract optional project/role from experimental capabilities
+                // e.g. params.capabilities.experimental.session.project
+                let session = request
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("capabilities"))
+                    .and_then(|c| c.get("experimental"))
+                    .and_then(|e| e.get("session"));
+
+                if let Some(sess) = session {
+                    let project = sess
+                        .get("project")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let role = sess
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    *self.session_project.lock().await = project;
+                    *self.session_role.lock().await = role;
+                    *self.capabilities_locked.lock().await = true;
+                }
+
+                Some(JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id,
+                    result: Some(json!({
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {
+                            "tools": {
+                                "listChanged": false
+                            }
+                        },
+                        "serverInfo": {
+                            "name": "octobrain",
+                            "version": env!("CARGO_PKG_VERSION"),
+                            "description": "Standalone memory management system for AI context and conversation state"
+                        },
+                        "instructions": "This server provides memory tools for storing and retrieving AI context. Use 'memorize' to store information, 'remember' for semantic search, 'forget' to delete memories, 'auto_link' to find related memories, 'memory_graph' to explore memory connections, and 'knowledge_search' to search indexed web content."
+                    })),
+                    error: None,
+                })
+            }
 
             "tools/list" => {
-                let mut tools = MemoryProvider::get_tool_definitions();
+                let locked = *self.capabilities_locked.lock().await;
+                let mut tools = MemoryProvider::get_tool_definitions(locked);
                 tools.extend(KnowledgeProvider::get_tool_definitions());
                 Some(JsonRpcResponse {
                     jsonrpc: "2.0".to_string(),
@@ -276,7 +311,11 @@ impl McpServer {
             return Ok(provider.clone());
         }
 
-        let provider = MemoryProvider::new(&self.config, self.working_directory.clone()).await?;
+        let project = self.session_project.lock().await.clone();
+        let role = self.session_role.lock().await.clone();
+        let provider =
+            MemoryProvider::new(&self.config, self.working_directory.clone(), project, role)
+                .await?;
         *guard = Some(provider.clone());
         Ok(provider)
     }
@@ -334,5 +373,148 @@ impl McpServer {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::McpServer;
+    use crate::config::Config;
+    use crate::mcp::types::{JsonRpcRequest, JsonRpcResponse};
+    use serde_json::json;
+
+    fn make_server() -> McpServer {
+        let config: Config = toml::from_str(include_str!("../../config-templates/default.toml"))
+            .expect("default.toml must be valid");
+        let working_directory = std::env::current_dir().unwrap();
+        McpServer {
+            memory: tokio::sync::Mutex::new(None),
+            knowledge: tokio::sync::Mutex::new(None),
+            config,
+            working_directory,
+            session_project: tokio::sync::Mutex::new(None),
+            session_role: tokio::sync::Mutex::new(None),
+            capabilities_locked: tokio::sync::Mutex::new(false),
+        }
+    }
+
+    fn make_initialize_request(params: serde_json::Value) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "initialize".to_string(),
+            params: Some(params),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_initialize_without_capabilities_stays_unlocked() {
+        let server = make_server();
+        let req = make_initialize_request(json!({
+            "protocolVersion": "2024-11-05",
+            "clientInfo": { "name": "test", "version": "1.0" }
+        }));
+
+        let _resp = server.handle_request(req).await;
+
+        assert!(
+            !*server.capabilities_locked.lock().await,
+            "No session caps → should stay unlocked"
+        );
+        assert!(server.session_project.lock().await.is_none());
+        assert!(server.session_role.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_initialize_with_project_and_role_locks_session() {
+        let server = make_server();
+        let req = make_initialize_request(json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "experimental": {
+                    "session": {
+                        "project": "abc123",
+                        "role": "developer"
+                    }
+                }
+            }
+        }));
+
+        let _resp = server.handle_request(req).await;
+
+        assert!(
+            *server.capabilities_locked.lock().await,
+            "Session caps provided → must be locked"
+        );
+        assert_eq!(
+            server.session_project.lock().await.as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(
+            server.session_role.lock().await.as_deref(),
+            Some("developer")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_initialize_with_project_only_locks_session() {
+        let server = make_server();
+        let req = make_initialize_request(json!({
+            "capabilities": {
+                "experimental": {
+                    "session": { "project": "myproject" }
+                }
+            }
+        }));
+
+        let _resp = server.handle_request(req).await;
+
+        assert!(*server.capabilities_locked.lock().await);
+        assert_eq!(
+            server.session_project.lock().await.as_deref(),
+            Some("myproject")
+        );
+        assert!(
+            server.session_role.lock().await.is_none(),
+            "Role not provided → must be None"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_initialize_with_role_only_locks_session() {
+        let server = make_server();
+        let req = make_initialize_request(json!({
+            "capabilities": {
+                "experimental": {
+                    "session": { "role": "reviewer" }
+                }
+            }
+        }));
+
+        let _resp = server.handle_request(req).await;
+
+        assert!(*server.capabilities_locked.lock().await);
+        assert!(
+            server.session_project.lock().await.is_none(),
+            "Project not provided → must be None"
+        );
+        assert_eq!(
+            server.session_role.lock().await.as_deref(),
+            Some("reviewer")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_initialize_returns_valid_jsonrpc_response() {
+        let server = make_server();
+        let req = make_initialize_request(json!({}));
+        let resp: Option<JsonRpcResponse> = server.handle_request(req).await;
+
+        let resp = resp.expect("initialize must return a response");
+        assert_eq!(resp.jsonrpc, "2.0");
+        assert!(resp.error.is_none(), "initialize must not return an error");
+        let result = resp.result.expect("initialize must have a result");
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert!(result["serverInfo"]["name"].as_str().is_some());
     }
 }
