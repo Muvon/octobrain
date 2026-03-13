@@ -27,7 +27,7 @@ impl HtmlChunker {
             .unwrap_or_else(|| (self.extract_title_from_html(html), html.to_string()));
 
         // Convert clean HTML to markdown
-        let markdown = html2text::from_read(clean_html.as_bytes(), 120);
+        let markdown = html2text::from_read(clean_html.as_bytes(), 120).unwrap_or_default();
 
         // Hash the clean content so cache is stable across nav/sidebar changes
         let content_hash = self.compute_hash(&markdown);
@@ -65,7 +65,7 @@ impl HtmlChunker {
         if let Some(start) = html.find("<title>") {
             if let Some(end) = html[start..].find("</title>") {
                 let title = &html[start + 7..start + end];
-                let title = html2text::from_read(title.as_bytes(), 120);
+                let title = html2text::from_read(title.as_bytes(), 120).unwrap_or_default();
                 let title = title.trim().to_string();
                 if !title.is_empty() {
                     return title;
@@ -79,7 +79,7 @@ impl HtmlChunker {
                 let content_start = start + content_start + 1;
                 if let Some(end) = html[content_start..].find("</h1>") {
                     let title = &html[content_start..content_start + end];
-                    let title = html2text::from_read(title.as_bytes(), 120);
+                    let title = html2text::from_read(title.as_bytes(), 120).unwrap_or_default();
                     let title = title.trim().to_string();
                     if !title.is_empty() {
                         return title;

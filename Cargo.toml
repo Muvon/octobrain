@@ -42,20 +42,20 @@ serde_json = "1.0.149"
 chrono = { version = "0.4.44", default-features = false, features = ["serde", "clock"] }
 anyhow = "1.0.102"
 uuid = { version = "1.22", default-features = false, features = ["v4"] }
-clap = { version = "4.5.60", features = ["derive"] }
+clap = { version = "4.6.0", features = ["derive"] }
 futures = { version = "0.3.32", default-features = false, features = ["std"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
 tracing-appender = "0.2.4"
 dirs = "6.0.0"
 dotenvy = "0.15"
-toml = "0.9.12"
+toml = "1.0"
 sha2 = "0.10"
 hex = "0.4"
-html2text = "0.12"
-dom_smoothie = "0.15"
+html2text = "0.16"
+dom_smoothie = "0.16"
 reqwest = { version = "0.13", features = ["rustls"], default-features = false }
-colored = "2.2"
+colored = "3.1"
 
 # Local dep for testing
 # octolib = { path = "../octolib", default-features = false }
