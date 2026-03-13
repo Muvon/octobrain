@@ -22,7 +22,6 @@ use tracing::{debug, warn};
 
 use crate::config::Config;
 use crate::constants::MAX_QUERIES;
-use crate::embedding::truncate_output;
 use crate::mcp::types::McpError;
 use crate::memory::{MemoryManager, MemoryQuery, MemoryType};
 
@@ -213,12 +212,6 @@ impl MemoryProvider {
 							"maximum": 5,
 							"default": 5
 						},
-						"max_tokens": {
-							"type": "integer",
-							"description": "Output token limit (0 = unlimited)",
-							"minimum": 0,
-							"default": 2000
-						}
 					},
 					"required": ["query"],
 					"additionalProperties": false
@@ -295,12 +288,6 @@ impl MemoryProvider {
 							"maximum": 5,
 							"default": 2
 						},
-						"max_tokens": {
-							"type": "integer",
-							"description": "Output token limit (0 = unlimited)",
-							"minimum": 0,
-							"default": 2000
-						}
 					},
 					"required": ["memory_id"],
 					"additionalProperties": false
@@ -657,12 +644,6 @@ impl MemoryProvider {
             .map(|v| v as usize)
             .unwrap_or(5);
 
-        // Parse max_tokens parameter
-        let max_tokens = arguments
-            .get("max_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(2000) as usize;
-
         let memory_query = MemoryQuery {
             memory_types,
             tags,
@@ -774,7 +755,7 @@ impl MemoryProvider {
         }
 
         // Apply token truncation if needed
-        Ok(truncate_output(&output, max_tokens))
+        Ok(output)
     }
 
     /// Execute the forget tool
@@ -978,11 +959,6 @@ impl MemoryProvider {
             .unwrap_or(2)
             .clamp(1, 5);
 
-        let max_tokens = arguments
-            .get("max_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(2000) as usize;
-
         debug!(
             memory_id = %memory_id,
             depth = depth,
@@ -1062,7 +1038,7 @@ impl MemoryProvider {
         }
 
         // Apply token truncation
-        Ok(truncate_output(&output, max_tokens))
+        Ok(output)
     }
 
     /// Execute the relate tool — manually create a typed relationship between two memories

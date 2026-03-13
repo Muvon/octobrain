@@ -43,18 +43,3 @@ pub async fn generate_embeddings_batch(
         .generate_embeddings_batch(texts, InputType::None)
         .await
 }
-
-/// Truncate output to a maximum number of tokens (approximate)
-/// Uses simple character-based estimation: ~4 chars per token
-pub fn truncate_output(text: &str, max_tokens: usize) -> String {
-    if max_tokens == 0 {
-        return text.to_string();
-    }
-
-    let max_chars = max_tokens * 4; // Approximate: 4 chars per token
-    if text.len() <= max_chars {
-        text.to_string()
-    } else {
-        format!("{}...[truncated]", &text[..max_chars])
-    }
-}
