@@ -83,14 +83,15 @@ async fn execute_memory_command(
                 .map(|f| f.split(',').map(|s| s.trim().to_string()).collect());
 
             let memory = memory_manager
-                .memorize(
-                    mem_type,
-                    title.clone(),
-                    content.clone(),
+                .memorize(crate::memory::manager::MemorizeParams {
+                    memory_type: mem_type,
+                    title: title.clone(),
+                    content: content.clone(),
                     importance,
-                    tags_vec,
-                    files_vec,
-                )
+                    tags: tags_vec,
+                    related_files: files_vec,
+                    source: None, // defaults to AgentInferred
+                })
                 .await?;
 
             println!("✅ Memory stored successfully!");

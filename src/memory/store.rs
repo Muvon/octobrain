@@ -148,6 +148,7 @@ impl MemoryStore {
                 Field::new("tags", DataType::Utf8, true), // JSON serialized
                 Field::new("related_files", DataType::Utf8, true), // JSON serialized
                 Field::new("git_commit", DataType::Utf8, true), // Git commit hash
+                Field::new("source", DataType::Utf8, false), // Trust tier
                 Field::new(
                     "embedding",
                     DataType::FixedSizeList(
@@ -246,6 +247,7 @@ impl MemoryStore {
             Field::new("tags", DataType::Utf8, true),
             Field::new("related_files", DataType::Utf8, true),
             Field::new("git_commit", DataType::Utf8, true),
+            Field::new("source", DataType::Utf8, false), // Trust tier
             Field::new(
                 "embedding",
                 DataType::FixedSizeList(
@@ -283,6 +285,7 @@ impl MemoryStore {
                 Arc::new(StringArray::from(vec![tags_json])),
                 Arc::new(StringArray::from(vec![files_json])),
                 Arc::new(StringArray::from(vec![memory.metadata.git_commit.clone()])),
+                Arc::new(StringArray::from(vec![memory.metadata.source.to_string()])),
                 Arc::new(embedding_array),
             ],
         )?;
@@ -544,13 +547,14 @@ impl MemoryStore {
                         continue;
                     }
 
-                    // Cosine distance → similarity, weighted by temporal importance
+                    // Cosine distance → similarity, weighted by temporal importance and trust tier
                     let vector_similarity = 1.0 - distance;
                     let current_importance = memory.get_current_importance(
                         self.config.decay_enabled,
                         self.config.min_importance_threshold,
                     );
-                    let final_score = vector_similarity * current_importance;
+                    let trust_multiplier = memory.metadata.source.trust_multiplier();
+                    let final_score = vector_similarity * current_importance * trust_multiplier;
 
                     if final_score >= min_relevance {
                         results.push(MemorySearchResult {
@@ -754,9 +758,12 @@ impl MemoryStore {
                 );
 
                 // RRF already fuses vector + BM25; recency and importance are additive signals
-                let final_score = query.vector_weight * rrf_score
+                // Trust multiplier boosts user-confirmed memories above agent-inferred ones
+                let trust_multiplier = memory.metadata.source.trust_multiplier();
+                let final_score = (query.vector_weight * rrf_score
                     + query.recency_weight * recency_score
-                    + query.importance_weight * importance_score;
+                    + query.importance_weight * importance_score)
+                    * trust_multiplier;
 
                 if final_score >= min_relevance {
                     let selection_reason = format!(
@@ -864,6 +871,19 @@ impl MemoryStore {
         Ok(relationships)
     }
 
+    /// Delete all AutoLinked relationships for a memory (used before re-linking on update)
+    pub async fn delete_auto_linked_relationships(&mut self, memory_id: &str) -> Result<()> {
+        let rel_table = self.db.open_table("memory_relationships").execute().await?;
+        rel_table
+            .delete(&format!(
+                "(source_id = '{}' OR target_id = '{}') AND relationship_type = 'auto_linked' AND project_key = '{}'",
+                memory_id, memory_id, self.project_key
+            ))
+            .await
+            .ok();
+        Ok(())
+    }
+
     /// Get total count of memories for the current project
     pub async fn get_memory_count(&self) -> Result<usize> {
         let table = self.db.open_table("memories").execute().await?;
@@ -965,6 +985,10 @@ impl MemoryStore {
             .and_then(|col| col.as_any().downcast_ref::<StringArray>())
             .ok_or_else(|| anyhow::anyhow!("git_commit column not found or wrong type"))?;
 
+        // source column may be absent in older databases — fall back to AgentInferred
+        let source_array = batch
+            .column_by_name("source")
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
         for i in 0..num_rows {
             let memory_type =
                 super::types::MemoryType::from(memory_type_array.value(i).to_string());
@@ -987,12 +1011,17 @@ impl MemoryStore {
                 Some(git_array.value(i).to_string())
             };
 
+            let source = source_array
+                .map(|arr| super::types::MemorySource::from(arr.value(i).to_string()))
+                .unwrap_or_default();
+
             let metadata = super::types::MemoryMetadata {
                 git_commit,
                 importance: importance_array.value(i),
                 confidence: confidence_array.value(i),
                 tags,
                 related_files,
+                source,
                 ..Default::default()
             };
 

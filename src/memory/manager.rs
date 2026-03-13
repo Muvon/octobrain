@@ -19,10 +19,22 @@ use super::git_utils::GitUtils;
 use super::store::MemoryStore;
 use super::types::{
     Memory, MemoryConfig, MemoryMetadata, MemoryQuery, MemoryRelationship, MemorySearchResult,
-    MemoryType, RelationshipType,
+    MemorySource, MemoryType, RelationshipType,
 };
 use crate::config::Config;
 use crate::embedding::{create_embedding_provider_from_parts, parse_provider_model};
+
+/// Parameters for the memorize() call — groups the optional fields to stay under clippy's arg limit.
+#[derive(Debug)]
+pub struct MemorizeParams {
+    pub memory_type: MemoryType,
+    pub title: String,
+    pub content: String,
+    pub importance: Option<f32>,
+    pub tags: Option<Vec<String>>,
+    pub related_files: Option<Vec<String>>,
+    pub source: Option<MemorySource>,
+}
 /// High-level memory management interface
 pub struct MemoryManager {
     store: MemoryStore,
@@ -76,21 +88,24 @@ impl MemoryManager {
     }
 
     /// Memorize new information with automatic Git context
-    pub async fn memorize(
-        &mut self,
-        memory_type: MemoryType,
-        title: String,
-        content: String,
-        importance: Option<f32>,
-        tags: Option<Vec<String>>,
-        related_files: Option<Vec<String>>,
-    ) -> Result<Memory> {
+    pub async fn memorize(&mut self, params: MemorizeParams) -> Result<Memory> {
+        let MemorizeParams {
+            memory_type,
+            title,
+            content,
+            importance,
+            tags,
+            related_files,
+            source,
+        } = params;
+
         // Initialize metadata with all values at once to satisfy clippy
         let mut metadata = MemoryMetadata {
             git_commit: GitUtils::get_current_commit(),
             importance: importance.unwrap_or(self.config.default_importance),
             tags: tags.unwrap_or_default(),
-            related_files: Vec::new(), // Will be set below
+            related_files: Vec::new(),
+            source: source.unwrap_or_default(),
             ..Default::default()
         };
 
@@ -106,7 +121,6 @@ impl MemoryManager {
         if metadata.related_files.is_empty() {
             if let Ok(modified_files) = GitUtils::get_modified_files() {
                 metadata.related_files = modified_files.into_iter().take(5).collect();
-                // Limit to 5 files
             }
         }
 
@@ -115,12 +129,7 @@ impl MemoryManager {
         // Store the memory
         self.store.store_memory(&memory).await?;
 
-        // Auto-create relationships if enabled
-        if self.config.auto_relationships {
-            self.create_automatic_relationships(&memory).await?;
-        }
-
-        // Auto-link to similar memories if enabled
+        // Auto-link to similar memories and file-sharing memories if enabled
         if self.config.auto_linking_enabled {
             self.auto_link_memory(&memory.id).await?;
         }
@@ -267,9 +276,12 @@ impl MemoryManager {
 
             self.store.update_memory(&memory).await?;
 
-            // Update relationships if auto-relationships is enabled
-            if self.config.auto_relationships {
-                self.update_automatic_relationships(&memory).await?;
+            // Re-link: clear old AutoLinked rels then rebuild with updated content/files
+            if self.config.auto_linking_enabled {
+                self.store
+                    .delete_auto_linked_relationships(memory_id)
+                    .await?;
+                self.auto_link_memory(memory_id).await?;
             }
 
             Ok(Some(memory))
@@ -458,7 +470,7 @@ impl MemoryManager {
 
         let similar = self.store.search_memories(&query).await?;
 
-        // 3. Create bidirectional relationships
+        // 3. Create bidirectional similarity relationships
         let mut relationships = Vec::new();
         let mut link_count = 0;
 
@@ -504,6 +516,40 @@ impl MemoryManager {
             }
 
             link_count += 1;
+        }
+
+        // 4. File-based relationships: link memories that share related files
+        if !memory.metadata.related_files.is_empty() {
+            let file_query = MemoryQuery {
+                related_files: Some(memory.metadata.related_files.clone()),
+                limit: Some(10),
+                ..Default::default()
+            };
+
+            let file_related = self.store.search_memories(&file_query).await?;
+            for result in file_related {
+                if result.memory.id == memory_id {
+                    continue;
+                }
+                // Skip if already linked by similarity pass
+                if relationships.iter().any(|r: &MemoryRelationship| {
+                    r.target_id == result.memory.id || r.source_id == result.memory.id
+                }) {
+                    continue;
+                }
+
+                let file_rel = MemoryRelationship {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    source_id: memory_id.to_string(),
+                    target_id: result.memory.id.clone(),
+                    relationship_type: RelationshipType::RelatedTo,
+                    strength: 0.7,
+                    description: "Shares related files".to_string(),
+                    created_at: Utc::now(),
+                };
+                self.store.store_relationship(&file_rel).await?;
+                relationships.push(file_rel);
+            }
         }
 
         Ok(relationships)
@@ -575,88 +621,6 @@ impl MemoryManager {
     /// Clear all memory data (DANGEROUS: deletes all memories and relationships)
     pub async fn clear_all(&mut self) -> Result<usize> {
         self.store.clear_all_memory_data().await
-    }
-
-    /// Auto-create relationships for a new memory
-    async fn create_automatic_relationships(&mut self, memory: &Memory) -> Result<()> {
-        // Find similar memories based on content similarity
-        let similar_query = MemoryQuery {
-            query_text: Some(memory.get_searchable_text()),
-            memory_types: Some(vec![memory.memory_type.clone()]),
-            limit: Some(5),
-            min_relevance: Some(self.config.relationship_threshold),
-            ..Default::default()
-        };
-
-        let similar_memories = self.store.search_memories(&similar_query).await?;
-
-        for result in similar_memories {
-            if result.memory.id != memory.id
-                && result.relevance_score >= self.config.relationship_threshold
-            {
-                let relationship_type = if result.relevance_score > 0.9 {
-                    RelationshipType::Similar
-                } else {
-                    RelationshipType::RelatedTo
-                };
-
-                let _ = self
-                    .create_relationship(
-                        memory.id.clone(),
-                        result.memory.id,
-                        relationship_type,
-                        result.relevance_score,
-                        format!(
-                            "Auto-detected relationship (similarity: {:.2})",
-                            result.relevance_score
-                        ),
-                    )
-                    .await;
-            }
-        }
-
-        // Create file-based relationships
-        if !memory.metadata.related_files.is_empty() {
-            let file_query = MemoryQuery {
-                related_files: Some(memory.metadata.related_files.clone()),
-                limit: Some(10),
-                ..Default::default()
-            };
-
-            let file_related = self.store.search_memories(&file_query).await?;
-            for result in file_related {
-                if result.memory.id != memory.id {
-                    let _ = self
-                        .create_relationship(
-                            memory.id.clone(),
-                            result.memory.id,
-                            RelationshipType::RelatedTo,
-                            0.7, // File relationship strength
-                            "Shares related files".to_string(),
-                        )
-                        .await;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Update automatic relationships for an updated memory
-    async fn update_automatic_relationships(&mut self, memory: &Memory) -> Result<()> {
-        // Remove existing auto-generated relationships
-        let existing_relationships = self.get_relationships(&memory.id).await?;
-        for rel in existing_relationships {
-            if rel.description.contains("Auto-detected")
-                || rel.description.contains("Shares related files")
-            {
-                // Delete relationship - would need a delete method in store
-                // For now, we'll skip deletion and just create new ones
-            }
-        }
-
-        // Recreate relationships
-        self.create_automatic_relationships(memory).await
     }
 
     /// Add tag to memory

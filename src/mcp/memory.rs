@@ -68,7 +68,7 @@ impl MemoryProvider {
         vec![
 			crate::mcp::types::McpTool {
 				name: "memorize".to_string(),
-				description: "Store important information, insights, or context in memory for future reference.".to_string(),
+				description: "Store important information, insights, or context in memory for future reference. WHEN TO USE: call remember first to avoid duplicates, then memorize if nothing relevant exists. Store: user-stated facts/preferences (source=user_confirmed, importance 0.8-1.0), architectural decisions, bug fixes with root cause, non-obvious patterns. Skip: transient state, info already in code, things you can re-derive cheaply. Set source='user_confirmed' whenever the user explicitly states, approves, or corrects something — those memories rank higher in retrieval. Use source='agent_inferred' (default) for your own conclusions that may be wrong.".to_string(),
 				input_schema: json!({
 					"type": "object",
 					"properties": {
@@ -92,7 +92,7 @@ impl MemoryProvider {
 						},
 						"importance": {
 							"type": "number",
-							"description": "Importance score from 0.0 to 1.0 (higher = more important for retention)",
+							"description": "Importance score 0.0-1.0. user_confirmed facts: 0.8-1.0. Architecture/decisions: 0.7-0.9. Bug fixes: 0.6-0.8. Agent inferences: 0.3-0.6. Routine observations: 0.1-0.4.",
 							"minimum": 0.0,
 							"maximum": 1.0,
 							"default": 0.5
@@ -112,6 +112,12 @@ impl MemoryProvider {
 								"type": "string"
 							},
 							"maxItems": 20
+						},
+						"source": {
+							"type": "string",
+							"description": "Trust tier of this memory. Use 'user_confirmed' when the user explicitly stated, approved, or corrected this — it ranks higher in retrieval. Use 'agent_inferred' (default) for AI conclusions that may be wrong.",
+							"enum": ["user_confirmed", "agent_inferred"],
+							"default": "agent_inferred"
 						}
 					},
 					"required": ["title", "content"],
@@ -120,7 +126,7 @@ impl MemoryProvider {
 			},
 			crate::mcp::types::McpTool {
 				name: "remember".to_string(),
-				description: "Search and retrieve stored memories using semantic search. Find relevant past information, decisions, patterns, or context based on your query.".to_string(),
+				description: "Search and retrieve stored memories using semantic search. ALWAYS call this before memorize to avoid duplicates, and at the start of any task to load relevant context. Results automatically include 1-hop graph neighbors — you do NOT need to call memory_graph for routine lookups. STRATEGY: prefer arrays of 2-5 related terms over a single query for comprehensive coverage, e.g. ['database connection pooling', 'query caching', 'ORM patterns']. Use memory_types filter when you know the category. Results show [CONFIRMED] or [INFERRED] trust labels — weight confirmed memories more heavily.".to_string(),
 				input_schema: json!({
 					"type": "object",
 					"properties": {
@@ -148,7 +154,7 @@ impl MemoryProvider {
 						},
 						"memory_types": {
 							"type": "array",
-							"description": "Optional filter by memory types",
+							"description": "Optional filter by memory types. Use when you know the category to narrow results.",
 							"items": {
 								"type": "string",
 								"enum": ["code", "architecture", "bug_fix", "feature", "documentation", "user_preference", "decision", "learning", "configuration", "testing", "performance", "security", "insight"]
@@ -168,19 +174,19 @@ impl MemoryProvider {
 								"type": "string"
 							}
 						},
-				"limit": {
-					"type": "integer",
-					"description": "Maximum number of memories to return",
-					"minimum": 1,
-					"maximum": 5,
-					"default": 5
-				},
-				"max_tokens": {
-					"type": "integer",
-					"description": "Maximum tokens allowed in output before truncation (default: 2000, set to 0 for unlimited)",
-					"minimum": 0,
-					"default": 2000
-				}
+						"limit": {
+							"type": "integer",
+							"description": "Maximum number of memories to return",
+							"minimum": 1,
+							"maximum": 5,
+							"default": 5
+						},
+						"max_tokens": {
+							"type": "integer",
+							"description": "Maximum tokens allowed in output before truncation (default: 2000, set to 0 for unlimited)",
+							"minimum": 0,
+							"default": 2000
+						}
 					},
 					"required": ["query"],
 					"additionalProperties": false
@@ -188,7 +194,7 @@ impl MemoryProvider {
 			},
 			crate::mcp::types::McpTool {
 				name: "forget".to_string(),
-				description: "Permanently remove specific memories by ID or forget multiple memories matching certain criteria.".to_string(),
+				description: "Permanently remove memories. REQUIRES confirm=true — this is irreversible. Use memory_id (from remember results) for precise single-memory deletion. Use query+memory_types+tags for bulk removal of a category. Do NOT forget memories just because they seem old — importance decay handles that automatically. Only forget when information is actively wrong or superseded.".to_string(),
 				input_schema: json!({
 					"type": "object",
 					"properties": {
@@ -217,7 +223,7 @@ impl MemoryProvider {
 						},
 						"confirm": {
 							"type": "boolean",
-							"description": "Must be true to confirm deletion",
+							"description": "Must be true to confirm deletion — deletion is permanent and cannot be undone",
 							"const": true
 						}
 					},
@@ -227,7 +233,7 @@ impl MemoryProvider {
 			},
 			crate::mcp::types::McpTool {
 				name: "auto_link".to_string(),
-				description: "Manually trigger automatic linking for a memory to find and connect related memories based on semantic similarity.".to_string(),
+				description: "Manually trigger automatic linking for a memory to find and connect related memories based on semantic similarity and shared files. WHEN TO USE: after discovering that two existing memories are related but were stored before auto-linking ran; when you want to refresh links for a memory after its content was updated; for memories imported or created outside the normal memorize flow. Auto-linking runs automatically on new memories — only call this manually for existing ones.".to_string(),
 				input_schema: json!({
 					"type": "object",
 					"properties": {
@@ -242,7 +248,7 @@ impl MemoryProvider {
 			},
 			crate::mcp::types::McpTool {
 				name: "memory_graph".to_string(),
-				description: "Retrieve a memory graph showing a memory and all its connected memories through relationships. Enables multi-hop reasoning and context discovery.".to_string(),
+				description: "Retrieve a memory and all its connected memories as a relationship graph for deep context exploration. NOTE: remember already includes 1-hop neighbors automatically — use memory_graph only when you need deeper traversal (depth > 1) or want to see the full relationship structure. USE CASES: tracing a chain of decisions, understanding how a bug fix relates to architecture choices, exploring all memories connected to a core concept. Prefer depth=2 for most cases; depth=3+ for very broad exploration.".to_string(),
 				input_schema: json!({
 					"type": "object",
 					"properties": {
@@ -265,6 +271,42 @@ impl MemoryProvider {
 						}
 					},
 					"required": ["memory_id"],
+					"additionalProperties": false
+				}),
+			},
+			crate::mcp::types::McpTool {
+				name: "relate".to_string(),
+				description: "Manually create a typed relationship between two memories. Use when you discover a meaningful connection that auto-linking missed or when you want a specific relationship type. Relationship types: related_to (general association), depends_on (A requires B to make sense), supersedes (A replaces/corrects B — mark B as outdated), similar (near-duplicate, consider forgetting one), conflicts (A and B contradict each other — flag for resolution), implements (A is the concrete implementation of abstract B), extends (A builds on B). Strength 0.0-1.0: use 0.9+ for strong direct relationships, 0.5-0.8 for moderate, below 0.5 for weak hints.".to_string(),
+				input_schema: json!({
+					"type": "object",
+					"properties": {
+						"source_id": {
+							"type": "string",
+							"description": "ID of the source memory (get from remember results)"
+						},
+						"target_id": {
+							"type": "string",
+							"description": "ID of the target memory (get from remember results)"
+						},
+						"relationship_type": {
+							"type": "string",
+							"description": "Type of relationship between the memories",
+							"enum": ["related_to", "depends_on", "supersedes", "similar", "conflicts", "implements", "extends"]
+						},
+						"strength": {
+							"type": "number",
+							"description": "Strength of the relationship (0.0-1.0). 0.9+ = strong direct link, 0.5-0.8 = moderate, <0.5 = weak hint.",
+							"minimum": 0.0,
+							"maximum": 1.0,
+							"default": 0.8
+						},
+						"description": {
+							"type": "string",
+							"description": "Human-readable explanation of why these memories are related",
+							"maxLength": 500
+						}
+					},
+					"required": ["source_id", "target_id", "relationship_type"],
 					"additionalProperties": false
 				}),
 			}
@@ -371,6 +413,11 @@ impl MemoryProvider {
                     .collect::<Vec<String>>()
             });
 
+        let source = arguments
+            .get("source")
+            .and_then(|v| v.as_str())
+            .map(|s| crate::memory::types::MemorySource::from(s.to_string()));
+
         // Use structured logging instead of console output for MCP protocol compliance
         debug!(
             title = %title,
@@ -400,14 +447,15 @@ impl MemoryProvider {
             let mut manager_guard = self.memory_manager.lock().await;
 
             manager_guard
-                .memorize(
+                .memorize(crate::memory::manager::MemorizeParams {
                     memory_type,
-                    title.to_string(),
-                    content.to_string(),
+                    title: title.to_string(),
+                    content: content.to_string(),
                     importance,
                     tags,
                     related_files,
-                )
+                    source,
+                })
                 .await
                 .map_err(|e| {
                     McpError::internal_error(format!("Failed to store memory: {}", e), "memorize")
@@ -608,8 +656,67 @@ impl MemoryProvider {
             return Ok("No stored memories match your query. Try using different search terms, removing filters, or checking if any memories have been stored yet.".to_string());
         }
 
-        // Use shared formatting function for token efficiency
-        let output = crate::memory::format_memories_as_text(&results);
+        // Collect IDs already in results so we don't duplicate them
+        let result_ids: std::collections::HashSet<String> =
+            results.iter().map(|r| r.memory.id.clone()).collect();
+
+        // Fetch 1-hop graph neighbors (cap at 3 total across all results)
+        let graph_neighbors: Vec<(
+            crate::memory::types::Memory,
+            crate::memory::types::RelationshipType,
+            f32,
+        )> = {
+            let manager_guard = self.memory_manager.lock().await;
+            let mut neighbors = Vec::new();
+            'outer: for result in &results {
+                let rels = manager_guard
+                    .get_relationships(&result.memory.id)
+                    .await
+                    .unwrap_or_default();
+                for rel in rels {
+                    let neighbor_id = if rel.source_id == result.memory.id {
+                        rel.target_id.clone()
+                    } else {
+                        rel.source_id.clone()
+                    };
+                    if result_ids.contains(&neighbor_id) {
+                        continue;
+                    }
+                    if neighbors
+                        .iter()
+                        .any(|(m, _, _): &(crate::memory::types::Memory, _, _)| m.id == neighbor_id)
+                    {
+                        continue;
+                    }
+                    if let Ok(Some(mem)) = manager_guard.get_memory(&neighbor_id).await {
+                        neighbors.push((mem, rel.relationship_type.clone(), rel.strength));
+                        if neighbors.len() >= 3 {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            neighbors
+        };
+
+        // Format primary results
+        let mut output = crate::memory::format_memories_as_text(&results);
+
+        // Append graph neighbors section if any were found
+        if !graph_neighbors.is_empty() {
+            output.push_str("\n--- Related context (via graph) ---\n");
+            for (mem, rel_type, strength) in &graph_neighbors {
+                output.push_str(&format!(
+                    "\n[{}] {} (ID: {}, rel: {}, strength: {:.2})\n{}\n",
+                    mem.metadata.source.display_label(),
+                    mem.title,
+                    mem.id,
+                    rel_type,
+                    strength,
+                    mem.content
+                ));
+            }
+        }
 
         // Apply token truncation if needed
         Ok(truncate_output(&output, max_tokens))
@@ -901,5 +1008,78 @@ impl MemoryProvider {
 
         // Apply token truncation
         Ok(truncate_output(&output, max_tokens))
+    }
+
+    /// Execute the relate tool — manually create a typed relationship between two memories
+    pub async fn execute_relate(&self, arguments: &Value) -> Result<String, McpError> {
+        let source_id = arguments
+            .get("source_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                McpError::invalid_params("Missing required parameter 'source_id'", "relate")
+            })?
+            .to_string();
+
+        let target_id = arguments
+            .get("target_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                McpError::invalid_params("Missing required parameter 'target_id'", "relate")
+            })?
+            .to_string();
+
+        let rel_type_str = arguments
+            .get("relationship_type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                McpError::invalid_params("Missing required parameter 'relationship_type'", "relate")
+            })?;
+
+        let relationship_type = match rel_type_str {
+            "related_to" => crate::memory::types::RelationshipType::RelatedTo,
+            "depends_on" => crate::memory::types::RelationshipType::DependsOn,
+            "supersedes" => crate::memory::types::RelationshipType::Supersedes,
+            "similar" => crate::memory::types::RelationshipType::Similar,
+            "conflicts" => crate::memory::types::RelationshipType::Conflicts,
+            "implements" => crate::memory::types::RelationshipType::Implements,
+            "extends" => crate::memory::types::RelationshipType::Extends,
+            other => crate::memory::types::RelationshipType::Custom(other.to_string()),
+        };
+
+        let strength = arguments
+            .get("strength")
+            .and_then(|v| v.as_f64())
+            .map(|v| (v as f32).clamp(0.0, 1.0))
+            .unwrap_or(0.8);
+
+        let description = arguments
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let res = {
+            let mut manager_guard = self.memory_manager.lock().await;
+            manager_guard
+                .create_relationship(
+                    source_id,
+                    target_id,
+                    relationship_type,
+                    strength,
+                    description,
+                )
+                .await
+        };
+
+        match res {
+            Ok(rel) => Ok(format!(
+                "✅ Relationship created\nID: {}\n{} -> {} ({}, strength: {:.2})",
+                rel.id, rel.source_id, rel.target_id, rel.relationship_type, rel.strength
+            )),
+            Err(e) => Err(McpError::internal_error(
+                format!("Failed to create relationship: {}", e),
+                "relate",
+            )),
+        }
     }
 }

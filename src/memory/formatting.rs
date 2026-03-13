@@ -26,17 +26,20 @@ pub fn format_memories_as_text(results: &[MemorySearchResult]) -> String {
     output.push_str(&format!("MEMORIES ({} found)\n\n", results.len()));
 
     for (i, result) in results.iter().enumerate() {
+        let trust_label = result.memory.metadata.source.display_label();
         output.push_str(&format!(
-            "{}. {} | Score: {:.2}\n",
+            "{}. {} {} | Score: {:.2}\n",
             i + 1,
+            trust_label,
             result.memory.title,
             result.relevance_score
         ));
 
         output.push_str(&format!(
-            "Type: {} | Importance: {:.1} | Created: {}\n",
+            "Type: {} | Importance: {:.1} | Confidence: {:.2} | Created: {}\n",
             result.memory.memory_type,
             result.memory.metadata.importance,
+            result.memory.metadata.confidence,
             result.memory.created_at.format("%Y-%m-%d %H:%M:%S UTC")
         ));
 

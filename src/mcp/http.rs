@@ -214,7 +214,7 @@ async fn handle_tools_call(
 
     let is_memory_tool = matches!(
         tool_name,
-        "memorize" | "remember" | "forget" | "auto_link" | "memory_graph"
+        "memorize" | "remember" | "forget" | "auto_link" | "memory_graph" | "relate"
     );
     let is_knowledge_tool = tool_name == "knowledge_search";
 
@@ -243,6 +243,7 @@ async fn handle_tools_call(
             "forget" => provider.execute_forget(arguments).await,
             "auto_link" => provider.execute_auto_link(arguments).await,
             "memory_graph" => provider.execute_memory_graph(arguments).await,
+            "relate" => provider.execute_relate(arguments).await,
             _ => unreachable!(),
         }
     } else if is_knowledge_tool {

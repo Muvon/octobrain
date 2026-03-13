@@ -16,6 +16,69 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Origin/trust tier of a memory — determines how much weight it gets in retrieval scoring.
+///
+/// `UserConfirmed` is ground truth: the user explicitly stated, approved, or corrected this.
+/// `AgentInferred` is the AI's own conclusion from reasoning or investigation — may be wrong.
+/// `AutoLinked` is set by the auto-linking system when creating relationship-derived context.
+/// `Imported` is for externally ingested data with unknown provenance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum MemorySource {
+    /// User explicitly confirmed, stated, or approved this — highest trust
+    UserConfirmed,
+    /// AI inferred this from reasoning or investigation — lower trust, may be wrong
+    #[default]
+    AgentInferred,
+    /// Created automatically by the auto-linking system
+    AutoLinked,
+    /// Imported from an external source with unknown provenance
+    Imported,
+}
+
+impl std::fmt::Display for MemorySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemorySource::UserConfirmed => write!(f, "user_confirmed"),
+            MemorySource::AgentInferred => write!(f, "agent_inferred"),
+            MemorySource::AutoLinked => write!(f, "auto_linked"),
+            MemorySource::Imported => write!(f, "imported"),
+        }
+    }
+}
+
+impl From<String> for MemorySource {
+    fn from(s: String) -> Self {
+        match s.to_lowercase().as_str() {
+            "user_confirmed" | "confirmed" | "ground_truth" => MemorySource::UserConfirmed,
+            "auto_linked" | "autolinked" => MemorySource::AutoLinked,
+            "imported" => MemorySource::Imported,
+            _ => MemorySource::AgentInferred,
+        }
+    }
+}
+
+/// Trust multiplier applied to relevance scores during retrieval.
+/// UserConfirmed memories rank higher than AI-inferred ones.
+impl MemorySource {
+    pub fn trust_multiplier(&self) -> f32 {
+        match self {
+            MemorySource::UserConfirmed => 1.0,
+            MemorySource::Imported => 0.9,
+            MemorySource::AgentInferred => 0.85,
+            MemorySource::AutoLinked => 0.8,
+        }
+    }
+
+    pub fn display_label(&self) -> &'static str {
+        match self {
+            MemorySource::UserConfirmed => "[CONFIRMED]",
+            MemorySource::AgentInferred => "[INFERRED]",
+            MemorySource::AutoLinked => "[AUTO]",
+            MemorySource::Imported => "[IMPORTED]",
+        }
+    }
+}
+
 /// Types of memories that can be stored - unified for comprehensive coverage
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MemoryType {
@@ -168,6 +231,8 @@ pub struct MemoryMetadata {
     pub custom_fields: HashMap<String, String>,
     /// Temporal decay tracking
     pub decay: MemoryDecay,
+    /// Trust tier — who/what created this memory
+    pub source: MemorySource,
 }
 
 impl Default for MemoryMetadata {
@@ -181,6 +246,7 @@ impl Default for MemoryMetadata {
             created_by: None,
             custom_fields: HashMap::new(),
             decay: MemoryDecay::new(0.5),
+            source: MemorySource::AgentInferred,
         }
     }
 }
@@ -509,10 +575,6 @@ pub struct MemoryConfig {
     pub auto_cleanup_days: Option<u32>,
     /// Minimum importance for automatic cleanup
     pub cleanup_min_importance: f32,
-    /// Enable automatic relationship detection
-    pub auto_relationships: bool,
-    /// Relationship detection threshold
-    pub relationship_threshold: f32,
     /// Maximum memories returned in search
     pub max_search_results: usize,
     /// Default importance for new memories
@@ -541,8 +603,6 @@ impl Default for MemoryConfig {
             max_memories: Some(10000),
             auto_cleanup_days: Some(365),
             cleanup_min_importance: 0.1,
-            auto_relationships: true,
-            relationship_threshold: 0.7,
             max_search_results: 50,
             default_importance: 0.5,
             decay_enabled: true,

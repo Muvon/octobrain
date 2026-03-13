@@ -87,15 +87,6 @@ auto_cleanup_days = 365
 # Default: 0.1
 cleanup_min_importance = 0.1
 
-# Enable automatic relationship detection between memories
-# Default: true
-auto_relationships = true
-
-# Relationship detection threshold (0.0-1.0)
-# Higher values = only very similar memories get linked
-# Default: 0.7
-relationship_threshold = 0.7
-
 # Maximum memories returned in search
 # Default: 50
 max_search_results = 50

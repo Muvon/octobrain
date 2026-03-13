@@ -145,7 +145,7 @@ impl McpServer {
                 // Check if it's a memory or knowledge tool
                 let is_memory_tool = matches!(
                     tool_name,
-                    "memorize" | "remember" | "forget" | "auto_link" | "memory_graph"
+                    "memorize" | "remember" | "forget" | "auto_link" | "memory_graph" | "relate"
                 );
                 let is_knowledge_tool = tool_name == "knowledge_search";
 
@@ -168,6 +168,7 @@ impl McpServer {
                         "forget" => memory.execute_forget(&arguments).await,
                         "auto_link" => memory.execute_auto_link(&arguments).await,
                         "memory_graph" => memory.execute_memory_graph(&arguments).await,
+                        "relate" => memory.execute_relate(&arguments).await,
                         _ => unreachable!(),
                     };
 
