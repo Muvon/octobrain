@@ -11,7 +11,8 @@ use lancedb::{
     connect,
     index::Index,
     query::{ExecutableQuery, QueryBase, QueryExecutionOptions},
-    Connection, DistanceType,
+    table::OptimizeAction,
+    Connection, DistanceType, Table,
 };
 use std::sync::Arc;
 
@@ -24,7 +25,8 @@ use crate::knowledge::types::{KnowledgeChunk, KnowledgeSearchResult, KnowledgeSt
 const RRF_K: f32 = 60.0;
 
 pub struct KnowledgeStore {
-    db: Connection,
+    table: Table,
+    schema: Arc<Schema>,
     vector_dim: usize,
 }
 
@@ -38,17 +40,22 @@ impl KnowledgeStore {
         std::fs::create_dir_all(&db_path)?;
 
         let db = connect(db_path.to_str().unwrap()).execute().await?;
+        let schema = Self::build_schema(vector_dim);
 
-        let store = Self { db, vector_dim };
-        store.initialize_table().await?;
+        Self::initialize_table(&db, &schema).await?;
 
-        Ok(store)
+        // Cache the table handle — opened once, reused for the lifetime of this store
+        let table = db.open_table("knowledge_chunks").execute().await?;
+
+        Ok(Self {
+            table,
+            schema,
+            vector_dim,
+        })
     }
 
-    async fn initialize_table(&self) -> Result<()> {
-        let table_names = self.db.table_names().execute().await?;
-
-        let schema = Arc::new(Schema::new(vec![
+    fn build_schema(vector_dim: usize) -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("source_url", DataType::Utf8, false),
             Field::new("source_title", DataType::Utf8, false),
@@ -77,15 +84,19 @@ impl KnowledgeStore {
                 "embedding",
                 DataType::FixedSizeList(
                     Arc::new(Field::new("item", DataType::Float32, true)),
-                    self.vector_dim as i32,
+                    vector_dim as i32,
                 ),
                 false,
             ),
-        ]));
+        ]))
+    }
+
+    async fn initialize_table(db: &Connection, schema: &Arc<Schema>) -> Result<()> {
+        let table_names = db.table_names().execute().await?;
 
         // Drop table if schema is outdated (missing columns)
         if table_names.contains(&"knowledge_chunks".to_string()) {
-            let table = self.db.open_table("knowledge_chunks").execute().await?;
+            let table = db.open_table("knowledge_chunks").execute().await?;
             let existing_schema = table.schema().await?;
             let needs_recreate = schema
                 .fields()
@@ -93,25 +104,23 @@ impl KnowledgeStore {
                 .any(|f| existing_schema.field_with_name(f.name()).is_err());
             if needs_recreate {
                 tracing::info!("knowledge_chunks schema outdated, dropping and recreating");
-                self.db.drop_table("knowledge_chunks", &[]).await?;
+                db.drop_table("knowledge_chunks", &[]).await?;
             } else {
                 return Ok(());
             }
         }
 
-        // Create table
+        // Create table with empty batch (schema-only creation)
         use arrow::record_batch::RecordBatchIterator;
         use std::iter::once;
         let empty_batch = RecordBatch::new_empty(schema.clone());
-        let batches = once(Ok(empty_batch));
-        let batch_reader = RecordBatchIterator::new(batches, schema);
-        self.db
-            .create_table("knowledge_chunks", batch_reader)
+        let batch_reader = RecordBatchIterator::new(once(Ok(empty_batch)), schema.clone());
+        db.create_table("knowledge_chunks", batch_reader)
             .execute()
             .await?;
 
         // Create FTS index on content column for hybrid search (BM25 + Vector)
-        let table = self.db.open_table("knowledge_chunks").execute().await?;
+        let table = db.open_table("knowledge_chunks").execute().await?;
         table
             .create_index(&["content"], Index::FTS(Default::default()))
             .execute()
@@ -178,43 +187,8 @@ impl KnowledgeStore {
             None,
         )?;
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("source_url", DataType::Utf8, false),
-            Field::new("source_title", DataType::Utf8, false),
-            Field::new("chunk_index", DataType::Int32, false),
-            Field::new("content", DataType::Utf8, false),
-            Field::new("parent_content", DataType::Utf8, false),
-            Field::new(
-                "section_path",
-                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-                true,
-            ),
-            Field::new("char_start", DataType::Int32, false),
-            Field::new("char_end", DataType::Int32, false),
-            Field::new("content_hash", DataType::Utf8, false),
-            Field::new(
-                "indexed_at",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new(
-                "last_checked",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new(
-                "embedding",
-                DataType::FixedSizeList(
-                    Arc::new(Field::new("item", DataType::Float32, true)),
-                    self.vector_dim as i32,
-                ),
-                false,
-            ),
-        ]));
-
         let batch = RecordBatch::try_new(
-            schema,
+            self.schema.clone(),
             vec![
                 Arc::new(StringArray::from(ids)),
                 Arc::new(StringArray::from(source_urls)),
@@ -232,13 +206,14 @@ impl KnowledgeStore {
             ],
         )?;
 
-        let table = self.db.open_table("knowledge_chunks").execute().await?;
-
         use arrow::record_batch::RecordBatchIterator;
         use std::iter::once;
-        let batches = once(Ok(batch.clone()));
-        let batch_reader = RecordBatchIterator::new(batches, batch.schema());
-        table.add(batch_reader).execute().await?;
+        let batch_reader = RecordBatchIterator::new(once(Ok(batch)), self.schema.clone());
+        self.table.add(batch_reader).execute().await?;
+
+        // Compact fragments and update FTS/scalar indexes so new chunks are immediately
+        // searchable without brute-force fallback on the unindexed portion.
+        self.table.optimize(OptimizeAction::All).await.ok();
 
         Ok(())
     }
@@ -251,9 +226,8 @@ impl KnowledgeStore {
         limit: usize,
         use_hybrid: bool,
     ) -> Result<Vec<KnowledgeSearchResult>> {
-        let table = self.db.open_table("knowledge_chunks").execute().await?;
-
-        let mut query = table
+        let mut query = self
+            .table
             .vector_search(query_embedding)?
             .distance_type(DistanceType::Cosine)
             .limit(limit);
@@ -414,9 +388,8 @@ impl KnowledgeStore {
     }
 
     pub async fn get_source_metadata(&self, url: &str) -> Result<Option<(String, DateTime<Utc>)>> {
-        let table = self.db.open_table("knowledge_chunks").execute().await?;
-
-        let query = table
+        let query = self
+            .table
             .query()
             .only_if(format!("source_url = '{}'", Self::quote_filter_string(url)))
             .limit(1);
@@ -451,8 +424,7 @@ impl KnowledgeStore {
     }
 
     pub async fn delete_source(&self, url: &str) -> Result<()> {
-        let table = self.db.open_table("knowledge_chunks").execute().await?;
-        table
+        self.table
             .delete(&format!(
                 "source_url = '{}'",
                 Self::quote_filter_string(url)
@@ -462,8 +434,7 @@ impl KnowledgeStore {
     }
 
     pub async fn get_stats(&self) -> Result<KnowledgeStats> {
-        let table = self.db.open_table("knowledge_chunks").execute().await?;
-        let count = table.count_rows(None).await?;
+        let count = self.table.count_rows(None).await?;
 
         if count == 0 {
             return Ok(KnowledgeStats {
@@ -474,7 +445,7 @@ impl KnowledgeStore {
             });
         }
         // Get all data to compute stats
-        let results = table.query().execute().await?;
+        let results = self.table.query().execute().await?;
         let batches: Vec<RecordBatch> = results.try_collect().await?;
 
         let mut unique_urls = std::collections::HashSet::new();
@@ -522,8 +493,7 @@ impl KnowledgeStore {
         &self,
         limit: Option<usize>,
     ) -> Result<Vec<(String, String, usize, DateTime<Utc>)>> {
-        let table = self.db.open_table("knowledge_chunks").execute().await?;
-        let results = table.query().execute().await?;
+        let results = self.table.query().execute().await?;
         let batches: Vec<RecordBatch> = results.try_collect().await?;
 
         let mut sources: std::collections::HashMap<String, (String, usize, DateTime<Utc>)> =

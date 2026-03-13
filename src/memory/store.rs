@@ -94,6 +94,7 @@ pub struct MemoryStore {
     memories_table: Table,
     relationships_table: Table,
     schema: Arc<Schema>,
+    rel_schema: Arc<Schema>,
     embedding_provider: Box<dyn EmbeddingProvider>,
     config: MemoryConfig,
     main_config: crate::config::Config,
@@ -153,10 +154,23 @@ impl MemoryStore {
         let memories_table = db.open_table("memories").execute().await?;
         let relationships_table = db.open_table("memory_relationships").execute().await?;
 
+        // Build relationship schema once — reused for every relationship write
+        let rel_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("source_id", DataType::Utf8, false),
+            Field::new("target_id", DataType::Utf8, false),
+            Field::new("project_key", DataType::Utf8, false),
+            Field::new("relationship_type", DataType::Utf8, false),
+            Field::new("strength", DataType::Float32, false),
+            Field::new("description", DataType::Utf8, false),
+            Field::new("created_at", DataType::Utf8, false),
+        ]));
+
         let store = Self {
             memories_table,
             relationships_table,
             schema,
+            rel_schema,
             embedding_provider,
             config,
             main_config,
@@ -352,20 +366,16 @@ impl MemoryStore {
             ],
         )?;
 
-        // Delete existing memory with same ID if it exists
-        self.memories_table
-            .delete(&format!(
-                "id = '{}' AND project_key = '{}'",
-                memory.id, self.project_key
-            ))
-            .await
-            .ok();
-
-        // Add new memory
+        // Use merge_insert for atomic upsert (update if exists, insert if not)
+        // Key on "id" which is globally unique (UUID)
         use arrow::record_batch::RecordBatchIterator;
         use std::iter::once;
         let batch_reader = RecordBatchIterator::new(once(Ok(batch)), self.schema.clone());
-        self.memories_table.add(batch_reader).execute().await?;
+        let mut merge = self.memories_table.merge_insert(&["id"]);
+        merge
+            .when_matched_update_all(None)
+            .when_not_matched_insert_all();
+        merge.execute(Box::new(batch_reader)).await?;
 
         Ok(())
     }
@@ -846,19 +856,8 @@ impl MemoryStore {
 
     /// Store a memory relationship
     pub async fn store_relationship(&mut self, relationship: &MemoryRelationship) -> Result<()> {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("source_id", DataType::Utf8, false),
-            Field::new("target_id", DataType::Utf8, false),
-            Field::new("project_key", DataType::Utf8, false),
-            Field::new("relationship_type", DataType::Utf8, false),
-            Field::new("strength", DataType::Float32, false),
-            Field::new("description", DataType::Utf8, false),
-            Field::new("created_at", DataType::Utf8, false),
-        ]));
-
         let batch = RecordBatch::try_new(
-            schema.clone(),
+            self.rel_schema.clone(),
             vec![
                 Arc::new(StringArray::from(vec![relationship.id.clone()])),
                 Arc::new(StringArray::from(vec![relationship.source_id.clone()])),
@@ -875,21 +874,16 @@ impl MemoryStore {
             ],
         )?;
 
-        // Delete existing relationship with same ID if it exists
-        self.relationships_table
-            .delete(&format!(
-                "id = '{}' AND project_key = '{}'",
-                relationship.id, self.project_key
-            ))
-            .await
-            .ok();
-
-        // Add new relationship
+        // Use merge_insert for atomic upsert (update if exists, insert if not)
+        // Key on "id" which is globally unique (UUID)
         use arrow::record_batch::RecordBatchIterator;
         use std::iter::once;
-        let batches = once(Ok(batch));
-        let batch_reader = RecordBatchIterator::new(batches, schema);
-        self.relationships_table.add(batch_reader).execute().await?;
+        let batch_reader = RecordBatchIterator::new(once(Ok(batch)), self.rel_schema.clone());
+        let mut merge = self.relationships_table.merge_insert(&["id"]);
+        merge
+            .when_matched_update_all(None)
+            .when_not_matched_insert_all();
+        merge.execute(Box::new(batch_reader)).await?;
 
         Ok(())
     }
