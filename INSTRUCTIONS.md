@@ -27,22 +27,29 @@
   - `store.rs` - LanceDB vector storage
   - `formatting.rs` - Output formatting utilities
 - `src/embedding.rs` - Embedding generation (via octolib)
+- `src/knowledge/` - Knowledge base management system
+  - `types.rs` - Knowledge data structures
+  - `manager.rs` - High-level knowledge operations
+  - `store.rs` - LanceDB vector storage for knowledge
+  - `chunker.rs` - Web content chunking logic
+  - `formatting.rs` - Output formatting utilities
 - `src/mcp/` - Model Context Protocol server
 - `src/constants.rs` - Project constants
 
 ### CLI Structure
 Octobrain uses a hierarchical command structure:
 
-**Root Level Commands** (only 3):
+**Root Level Commands** (only 4):
 - `memory` - Memory management for storing and retrieving information
-- `mcp` - Start MCP server (Model Context Protocol) exposing memory tools
+- `knowledge` - Knowledge base management for web content indexing and search
+- `mcp` - Start MCP server (Model Context Protocol) exposing memory and knowledge tools
 - `help` - Print this message or help of the given subcommand(s)
 
-**Memory Subcommands** (all 16):
+**Memory Subcommands** (all 18):
 - `memorize` - Store important information, insights, or context in memory
 - `remember` - Search and retrieve stored memories using semantic search
 - `forget` - Permanently remove specific memories
-- `update` - Update an existing memory
+- `update` - Update a memory
 - `get` - Get memory by ID
 - `recent` - List recent memories
 - `by-type` - Get memories by type
@@ -55,6 +62,8 @@ Octobrain uses a hierarchical command structure:
 - `relate` - Create a relationship between two memories
 - `relationships` - Get relationships for a memory
 - `related` - Get related memories through relationships
+- `auto-link` - Manually trigger auto-linking for a memory
+- `graph` - Get memory graph with linked context
 
 ## Configuration
 
@@ -86,6 +95,114 @@ similarity_threshold = 0.3
 # Maximum number of results to return from search
 # Default: 50
 max_results = 50
+
+[search.hybrid]
+# Enable hybrid search (native BM25 + vector RRF fusion via LanceDB)
+# Default: true
+enabled = true
+
+# Weight applied to the RRF-fused score (vector + BM25 combined) (0.0-1.0)
+# Default: 0.8
+default_vector_weight = 0.8
+
+# Default weight for recency signal (0.0-1.0)
+# Default: 0.1
+default_recency_weight = 0.1
+
+# Default weight for importance signal (0.0-1.0)
+# Default: 0.1
+default_importance_weight = 0.1
+
+# Recency decay period in days
+# Default: 30
+recency_decay_days = 30
+
+[search.reranker]
+# Enable reranking for improved search accuracy
+# Default: false
+enabled = false
+
+# Reranker model (fully qualified, e.g., voyage:rerank-2.5)
+# Default: voyage:rerank-2.5
+model = "voyage:rerank-2.5"
+
+# Number of candidates to retrieve before reranking
+# Default: 50
+top_k_candidates = 50
+
+# Number of results to return after reranking
+# Default: 10
+final_top_k = 10
+
+[memory]
+# Maximum number of memories to keep in storage
+# Default: 10000
+max_memories = 10000
+
+# Automatic cleanup threshold in days
+# Default: 365 (1 year)
+auto_cleanup_days = 365
+
+# Minimum importance for automatic cleanup
+# Default: 0.1
+cleanup_min_importance = 0.1
+
+# Maximum memories returned in search
+# Default: 50
+max_search_results = 50
+
+# Default importance for new memories (0.0-1.0)
+# Default: 0.5
+default_importance = 0.5
+
+# Enable temporal decay system (Ebbinghaus forgetting curve)
+# Default: true
+decay_enabled = true
+
+# Half-life for importance decay in days (time for importance to halve)
+# Default: 90 (3 months)
+decay_half_life_days = 90
+
+# Boost factor for access reinforcement (multiplier per access)
+# Default: 1.2
+access_boost_factor = 1.2
+
+# Minimum importance threshold (floor value after decay)
+# Default: 0.05 (5%)
+min_importance_threshold = 0.05
+
+# Enable automatic linking between semantically similar memories
+# Default: true
+auto_linking_enabled = true
+
+# Similarity threshold for auto-linking (0.0-1.0)
+# Default: 0.78
+auto_link_threshold = 0.78
+
+# Maximum number of auto-links per memory
+# Default: 5
+max_auto_links_per_memory = 5
+
+# Create bidirectional links (A->B and B->A)
+# Default: true
+bidirectional_links = true
+
+[knowledge]
+# Size of each child chunk in characters
+# Default: 1200
+chunk_size = 1200
+
+# Overlap between child chunks in characters (~25% of chunk_size)
+# Default: 300
+chunk_overlap = 300
+
+# Days after which indexed content is considered outdated
+# Default: 15
+outdating_days = 15
+
+# Maximum number of results to return from knowledge search
+# Default: 5
+max_results = 5
 ```
 
 ## Storage Locations
@@ -176,10 +293,14 @@ let memory_query = MemoryQuery {
 - **HTTP Mode** (`--bind=host:port`): HTTP server for web-based integrations and testing
 
 ### MCP Tools
-The server exposes three tools:
-- `memorize`: Store new memories
+The server exposes seven tools:
+- `memorize`: Store memories
 - `remember`: Semantic search with multi-query support
 - `forget`: Delete memories by ID or query
+- `relate`: Create a relationship between two memories
+- `auto_link`: Find and connect related memories based on semantic similarity
+- `memory_graph`: Explore memory relationships with multi-hop graph traversal
+- `knowledge_search`: Search indexed web knowledge with optional auto-indexing
 
 ## Quick Start Checklist
 

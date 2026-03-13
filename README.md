@@ -113,6 +113,12 @@ octobrain memory relationships <memory-id>
 
 # Find related memories
 octobrain memory related <memory-id>
+
+# Manually trigger auto-linking for a memory
+octobrain memory auto-link <memory-id>
+
+# Get memory graph with linked context
+octobrain memory graph <memory-id> --depth 2
 ```
 
 ### Knowledge Commands
@@ -147,12 +153,13 @@ Start the MCP server to expose memory and knowledge tools via Model Context Prot
 octobrain mcp
 ```
 
-The server exposes six tools:
+The server exposes seven tools:
 
 **Memory Tools:**
-- `memorize`: Store new memories with metadata (title, content, type, tags, importance)
+- `memorize`: Store memories with metadata (title, content, type, tags, importance)
 - `remember`: Semantic search with multi-query support and filters
 - `forget`: Delete memories by ID or query (requires confirmation)
+- `relate`: Create a relationship between two memories
 - `auto_link`: Find and connect related memories based on semantic similarity
 - `memory_graph`: Explore memory relationships with multi-hop graph traversal
 
@@ -190,6 +197,27 @@ similarity_threshold = 0.3
 # Default: 50
 max_results = 50
 
+[search.hybrid]
+# Enable hybrid search (native BM25 + vector RRF fusion via LanceDB)
+# Default: true
+enabled = true
+
+# Weight applied to the RRF-fused score (vector + BM25 combined) (0.0-1.0)
+# Default: 0.8
+default_vector_weight = 0.8
+
+# Default weight for recency signal (0.0-1.0)
+# Default: 0.1
+default_recency_weight = 0.1
+
+# Default weight for importance signal (0.0-1.0)
+# Default: 0.1
+default_importance_weight = 0.1
+
+# Recency decay period in days
+# Default: 30
+recency_decay_days = 30
+
 [search.reranker]
 # Enable reranking for improved search accuracy
 # Default: false
@@ -206,6 +234,76 @@ top_k_candidates = 50
 # Number of results to return after reranking
 # Default: 10
 final_top_k = 10
+
+[memory]
+# Maximum number of memories to keep in storage
+# Default: 10000
+max_memories = 10000
+
+# Automatic cleanup threshold in days
+# Default: 365 (1 year)
+auto_cleanup_days = 365
+
+# Minimum importance for automatic cleanup
+# Default: 0.1
+cleanup_min_importance = 0.1
+
+# Maximum memories returned in search
+# Default: 50
+max_search_results = 50
+
+# Default importance for memories (0.0-1.0)
+# Default: 0.5
+default_importance = 0.5
+
+# Enable temporal decay system (Ebbinghaus forgetting curve)
+# Default: true
+decay_enabled = true
+
+# Half-life for importance decay in days (time for importance to halve)
+# Default: 90 (3 months)
+decay_half_life_days = 90
+
+# Boost factor for access reinforcement (multiplier per access)
+# Default: 1.2
+access_boost_factor = 1.2
+
+# Minimum importance threshold (floor value after decay)
+# Default: 0.05 (5%)
+min_importance_threshold = 0.05
+
+# Enable automatic linking between semantically similar memories
+# Default: true
+auto_linking_enabled = true
+
+# Similarity threshold for auto-linking (0.0-1.0)
+# Default: 0.78
+auto_link_threshold = 0.78
+
+# Maximum number of auto-links per memory
+# Default: 5
+max_auto_links_per_memory = 5
+
+# Create bidirectional links (A->B and B->A)
+# Default: true
+bidirectional_links = true
+
+[knowledge]
+# Size of each child chunk in characters
+# Default: 1200
+chunk_size = 1200
+
+# Overlap between child chunks in characters (~25% of chunk_size)
+# Default: 300
+chunk_overlap = 300
+
+# Days after which indexed content is considered outdated
+# Default: 15
+outdating_days = 15
+
+# Maximum number of results to return from knowledge search
+# Default: 5
+max_results = 5
 ```
 
 ## Storage Locations
