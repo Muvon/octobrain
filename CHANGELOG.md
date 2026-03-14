@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.4.0] - 2026-03-14
+
+### 📋 Release Summary
+
+This release introduces configurable knowledge and memory settings alongside automatic index optimization for improved performance (6d083380, d3d4c3e5). Session management is enhanced with locked project and role assignments during initialization (4ca28abd), while memory operations are streamlined for better efficiency and clarity (06c352fb, 7008ec38, 039c8f9c).
+
+
+### ✨ New Features & Enhancements
+
+- **config**: add knowledge and memory configuration `6d083380`
+- **mcp**: lock session project and role on initialize `4ca28abd`
+- **vector**: add automatic index optimization `d3d4c3e5`
+
+### 🔧 Improvements & Optimizations
+
+- **memory**: atomic upsert with merge_insert `06c352fb`
+- **mcp**: remove token truncation from memory tools `7008ec38`
+- **mcp**: simplify memory tool descriptions `039a8f9c`
+
+### 🔄 Other Changes
+
+- **git**: ignore mcpregistry temporary files `399431ef`
+
+### 📊 Release Summary
+
+**Total commits**: 7 across 3 categories
+
+✨ **3** new features - *Enhanced functionality*
+🔧 **3** improvements - *Better performance & code quality*
+🔄 **1** other change - *Maintenance & tooling*
+
 ## [0.3.0] - 2026-03-13
 
 ### 📋 Release Summary
