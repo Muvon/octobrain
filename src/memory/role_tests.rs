@@ -22,7 +22,7 @@ mod tests {
     #[test]
     fn test_predicate_no_role() {
         let query = MemoryQuery::default();
-        let pred = build_scalar_predicate_test("proj123", None, &query);
+        let pred = build_scalar_predicate_test(Some("proj123"), None, &query);
         assert_eq!(pred, "project_key = 'proj123'");
         assert!(
             !pred.contains("role"),
@@ -33,7 +33,7 @@ mod tests {
     #[test]
     fn test_predicate_with_role() {
         let query = MemoryQuery::default();
-        let pred = build_scalar_predicate_test("proj123", Some("developer"), &query);
+        let pred = build_scalar_predicate_test(Some("proj123"), Some("developer"), &query);
         assert!(
             pred.contains("role = 'developer'"),
             "Expected role filter in predicate, got: {}",
@@ -52,10 +52,21 @@ mod tests {
             memory_types: Some(vec![MemoryType::Code]),
             ..Default::default()
         };
-        let pred = build_scalar_predicate_test("proj123", Some("reviewer"), &query);
+        let pred = build_scalar_predicate_test(Some("proj123"), Some("reviewer"), &query);
         assert!(pred.contains("project_key = 'proj123'"));
         assert!(pred.contains("role = 'reviewer'"));
         assert!(pred.contains("memory_type IN ('code')"));
+    }
+
+    #[test]
+    fn test_predicate_no_project_key() {
+        let query = MemoryQuery::default();
+        let pred = build_scalar_predicate_test(None, None, &query);
+        assert!(
+            !pred.contains("project_key"),
+            "No project_key filter expected when None, got: {}",
+            pred
+        );
     }
 
     #[test]
@@ -65,7 +76,7 @@ mod tests {
             memory_types: Some(vec![MemoryType::Architecture]),
             ..Default::default()
         };
-        let pred = build_scalar_predicate_test("myproject", None, &query);
+        let pred = build_scalar_predicate_test(Some("myproject"), None, &query);
         assert!(!pred.contains("role"), "No role clause when role is None");
         assert!(pred.contains("memory_type IN ('architecture')"));
     }

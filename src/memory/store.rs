@@ -44,9 +44,17 @@ use crate::embedding::EmbeddingProvider;
 ///
 /// Tags and related_files are excluded here because they are stored as JSON-serialized strings
 /// and cannot be queried with simple SQL equality — those are handled post-fetch in Rust.
-fn build_scalar_predicate(project_key: &str, role: Option<&str>, query: &MemoryQuery) -> String {
-    // project_key is always the first condition to scope all queries to the current project
-    let mut parts: Vec<String> = vec![format!("project_key = '{}'", project_key)];
+fn build_scalar_predicate(
+    project_key: Option<&str>,
+    role: Option<&str>,
+    query: &MemoryQuery,
+) -> String {
+    // project_key is optional — None means no project filter (show all projects)
+    let mut parts: Vec<String> = if let Some(key) = project_key {
+        vec![format!("project_key = '{}'", key)]
+    } else {
+        Vec::new()
+    };
 
     // role filter — only applied when a role is set (None = no filter)
     if let Some(role) = role {
@@ -100,7 +108,7 @@ pub struct MemoryStore {
     main_config: crate::config::Config,
     vector_dim: usize,
     reranker_integration: Option<RerankerIntegration>,
-    project_key: String,
+    project_key: Option<String>,
     role: Option<String>,
 }
 
@@ -108,7 +116,7 @@ impl MemoryStore {
     /// Create a new memory store
     pub async fn new(
         db_path: &str,
-        project_key: String,
+        project_key: Option<String>,
         role: Option<String>,
         embedding_provider: Box<dyn EmbeddingProvider>,
         config: MemoryConfig,
@@ -346,7 +354,11 @@ impl MemoryStore {
             self.schema.clone(),
             vec![
                 Arc::new(StringArray::from(vec![memory.id.clone()])),
-                Arc::new(StringArray::from(vec![self.project_key.clone()])),
+                Arc::new(StringArray::from(vec![self
+                    .project_key
+                    .as_deref()
+                    .unwrap_or("default")
+                    .to_string()])),
                 Arc::new(StringArray::from(vec![self
                     .role
                     .clone()
@@ -391,7 +403,8 @@ impl MemoryStore {
         self.memories_table
             .delete(&format!(
                 "id = '{}' AND project_key = '{}'",
-                memory_id, self.project_key
+                memory_id,
+                self.project_key.as_deref().unwrap_or("default")
             ))
             .await?;
 
@@ -399,7 +412,9 @@ impl MemoryStore {
         self.relationships_table
             .delete(&format!(
                 "(source_id = '{}' OR target_id = '{}') AND project_key = '{}'",
-                memory_id, memory_id, self.project_key
+                memory_id,
+                memory_id,
+                self.project_key.as_deref().unwrap_or("default")
             ))
             .await
             .ok();
@@ -490,10 +505,10 @@ impl MemoryStore {
         let mut results = self
             .memories_table
             .query()
-            .only_if(format!(
-                "id = '{}' AND project_key = '{}'",
-                memory_id, self.project_key
-            ))
+            .only_if(match self.project_key.as_deref() {
+                Some(key) => format!("id = '{}' AND project_key = '{}'", memory_id, key),
+                None => format!("id = '{}'", memory_id),
+            })
             .limit(1)
             .execute()
             .await?;
@@ -571,7 +586,8 @@ impl MemoryStore {
         let mut results = Vec::new();
 
         // Build scalar filter predicate for pushdown (tags/related_files stay in Rust)
-        let predicate = build_scalar_predicate(&self.project_key, self.role.as_deref(), query);
+        let predicate =
+            build_scalar_predicate(self.project_key.as_deref(), self.role.as_deref(), query);
 
         if let Some(ref query_text) = query.query_text {
             let query_embedding = self
@@ -579,12 +595,14 @@ impl MemoryStore {
                 .generate_embedding(query_text)
                 .await?;
 
-            let db_query = self
+            let mut db_query = self
                 .memories_table
                 .vector_search(query_embedding.as_slice())?
                 .distance_type(DistanceType::Cosine)
-                .limit(limit * 2) // over-fetch to absorb post-filter losses
-                .only_if(predicate.clone());
+                .limit(limit * 2); // over-fetch to absorb post-filter losses
+            if !predicate.is_empty() {
+                db_query = db_query.only_if(predicate.clone());
+            }
 
             let mut db_results = db_query.execute().await?;
 
@@ -627,12 +645,12 @@ impl MemoryStore {
             }
         } else {
             // No text query — filter-only scan (predicate always includes project_key)
-            let mut db_results = self
-                .memories_table
-                .query()
-                .only_if(predicate)
-                .execute()
-                .await?;
+            // No text query — filter-only scan
+            let mut q = self.memories_table.query();
+            if !predicate.is_empty() {
+                q = q.only_if(predicate);
+            }
+            let mut db_results = q.execute().await?;
 
             while let Some(batch) = db_results.try_next().await? {
                 if batch.num_rows() == 0 {
@@ -769,17 +787,22 @@ impl MemoryStore {
             .generate_embedding(query_text)
             .await?;
 
-        // Build scalar predicate for pushdown (always includes project_key)
-        let predicate =
-            build_scalar_predicate(&self.project_key, self.role.as_deref(), &query.filters);
+        // Build scalar predicate for pushdown (project_key=None means all projects)
+        let predicate = build_scalar_predicate(
+            self.project_key.as_deref(),
+            self.role.as_deref(),
+            &query.filters,
+        );
 
-        let db_query = self
+        let mut db_query = self
             .memories_table
             .vector_search(query_embedding.as_slice())?
             .distance_type(DistanceType::Cosine)
             .limit(limit)
-            .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
-            .only_if(predicate);
+            .full_text_search(FullTextSearchQuery::new(query_text.to_string()));
+        if !predicate.is_empty() {
+            db_query = db_query.only_if(predicate);
+        }
 
         // RRF fusion: LanceDB combines vector ranks + BM25 ranks internally
         let mut db_results = db_query
@@ -862,7 +885,11 @@ impl MemoryStore {
                 Arc::new(StringArray::from(vec![relationship.id.clone()])),
                 Arc::new(StringArray::from(vec![relationship.source_id.clone()])),
                 Arc::new(StringArray::from(vec![relationship.target_id.clone()])),
-                Arc::new(StringArray::from(vec![self.project_key.clone()])),
+                Arc::new(StringArray::from(vec![self
+                    .project_key
+                    .as_deref()
+                    .unwrap_or("default")
+                    .to_string()])),
                 Arc::new(StringArray::from(vec![relationship
                     .relationship_type
                     .to_string()])),
@@ -896,10 +923,13 @@ impl MemoryStore {
         let mut results = self
             .relationships_table
             .query()
-            .only_if(format!(
-                "(source_id = '{}' OR target_id = '{}') AND project_key = '{}'",
-                memory_id, memory_id, self.project_key
-            ))
+            .only_if(match self.project_key.as_deref() {
+                Some(key) => format!(
+                    "(source_id = '{}' OR target_id = '{}') AND project_key = '{}'",
+                    memory_id, memory_id, key
+                ),
+                None => format!("source_id = '{}' OR target_id = '{}'", memory_id, memory_id),
+            })
             .execute()
             .await?;
 
@@ -922,19 +952,67 @@ impl MemoryStore {
         self.relationships_table
             .delete(&format!(
                 "(source_id = '{}' OR target_id = '{}') AND relationship_type = 'auto_linked' AND project_key = '{}'",
-                memory_id, memory_id, self.project_key
+                memory_id, memory_id, self.project_key.as_deref().unwrap_or("default")
             ))
             .await
             .ok();
         Ok(())
     }
 
-    /// Get total count of memories for the current project
+    /// Get total count of memories (all projects when project_key is None)
     pub async fn get_memory_count(&self) -> Result<usize> {
-        Ok(self
-            .memories_table
-            .count_rows(Some(format!("project_key = '{}'", self.project_key)))
-            .await?)
+        let filter = self
+            .project_key
+            .as_deref()
+            .map(|k| format!("project_key = '{}'", k));
+        Ok(self.memories_table.count_rows(filter).await?)
+    }
+
+    /// Get distinct project_key and role values across all stored memories
+    pub async fn get_distinct_projects_and_roles(&self) -> Result<(Vec<String>, Vec<String>)> {
+        let mut q = self.memories_table.query();
+        if let Some(key) = self.project_key.as_deref() {
+            q = q.only_if(format!("project_key = '{}'", key));
+        }
+        let mut results = q.execute().await?;
+
+        let mut projects = std::collections::HashSet::new();
+        let mut roles = std::collections::HashSet::new();
+
+        while let Some(batch) = results.try_next().await? {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            if let Some(col) = batch
+                .column_by_name("project_key")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            {
+                for i in 0..col.len() {
+                    if !col.is_null(i) {
+                        projects.insert(col.value(i).to_string());
+                    }
+                }
+            }
+            if let Some(col) = batch
+                .column_by_name("role")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            {
+                for i in 0..col.len() {
+                    if !col.is_null(i) {
+                        let v = col.value(i);
+                        if !v.is_empty() {
+                            roles.insert(v.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut projects: Vec<String> = projects.into_iter().collect();
+        let mut roles: Vec<String> = roles.into_iter().collect();
+        projects.sort();
+        roles.sort();
+        Ok((projects, roles))
     }
 
     /// Clean up old memories based on configuration
@@ -945,7 +1023,9 @@ impl MemoryStore {
 
             let filter = format!(
                 "project_key = '{}' AND created_at < '{}' AND importance < {}",
-                self.project_key, cutoff_str, self.config.cleanup_min_importance
+                self.project_key.as_deref().unwrap_or("default"),
+                cutoff_str,
+                self.config.cleanup_min_importance
             );
 
             // Count memories to be deleted
@@ -1196,10 +1276,12 @@ impl MemoryStore {
         // Get current counts before deletion (scoped to project)
         let memory_count = self.get_memory_count().await.unwrap_or(0);
 
+        let project_key = self.project_key.as_deref().unwrap_or("default");
+
         // Count relationships for this project
         let relationship_count = self
             .relationships_table
-            .count_rows(Some(format!("project_key = '{}'", self.project_key)))
+            .count_rows(Some(format!("project_key = '{}'", project_key)))
             .await
             .unwrap_or(0);
 
@@ -1207,13 +1289,12 @@ impl MemoryStore {
 
         // Delete only this project's memories and relationships
         self.memories_table
-            .delete(&format!("project_key = '{}'", self.project_key))
+            .delete(&format!("project_key = '{}'", project_key))
             .await?;
 
         self.relationships_table
-            .delete(&format!("project_key = '{}'", self.project_key))
+            .delete(&format!("project_key = '{}'", project_key))
             .await?;
-
         // Optimize tables after deletion
         self.memories_table.optimize(OptimizeAction::All).await?;
         self.relationships_table
@@ -1284,7 +1365,7 @@ impl MemoryStore {
 /// Test-only re-export of the private `build_scalar_predicate` function.
 #[cfg(test)]
 pub fn build_scalar_predicate_test(
-    project_key: &str,
+    project_key: Option<&str>,
     role: Option<&str>,
     query: &crate::memory::types::MemoryQuery,
 ) -> String {

@@ -65,15 +65,7 @@ impl MemoryManager {
         // Use shared memory database path (single DB for all projects)
         let db_path = crate::storage::get_memory_database_path()?;
 
-        // Resolve project key: use provided value, or auto-detect from current dir's Git remote
-        let project_key = match project_key {
-            Some(k) => k,
-            None => {
-                let current_dir = std::env::current_dir()?;
-                crate::storage::get_project_identifier(&current_dir)
-                    .unwrap_or_else(|_| "default".to_string())
-            }
-        };
+        // Pass project_key as-is: None = no project filter (all projects visible on reads)
 
         // Create embedding provider using model from config
         let model_string = &config.embedding.model;
@@ -400,11 +392,15 @@ impl MemoryManager {
                 .or_insert(0) += 1;
         }
 
+        let (projects, roles) = self.store.get_distinct_projects_and_roles().await?;
+
         Ok(MemoryStats {
             total_memories: total_count,
             type_counts,
             recent_count: recent_memories.len().min(10),
             git_commit: GitUtils::get_current_commit(),
+            projects,
+            roles,
         })
     }
 
@@ -696,6 +692,8 @@ pub struct MemoryStats {
     pub type_counts: std::collections::HashMap<String, usize>,
     pub recent_count: usize,
     pub git_commit: Option<String>,
+    pub projects: Vec<String>,
+    pub roles: Vec<String>,
 }
 
 impl MemoryStats {
@@ -709,9 +707,25 @@ impl MemoryStats {
             output.push_str(&format!("  Current commit: {}\n", commit));
         }
 
+        if !self.projects.is_empty() {
+            output.push_str("  Projects:\n");
+            for project in &self.projects {
+                output.push_str(&format!("    {}\n", project));
+            }
+        }
+
+        if !self.roles.is_empty() {
+            output.push_str("  Roles:\n");
+            for role in &self.roles {
+                output.push_str(&format!("    {}\n", role));
+            }
+        }
+
         if !self.type_counts.is_empty() {
             output.push_str("  Memory types:\n");
-            for (memory_type, count) in &self.type_counts {
+            let mut types: Vec<_> = self.type_counts.iter().collect();
+            types.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+            for (memory_type, count) in types {
                 output.push_str(&format!("    {}: {}\n", memory_type, count));
             }
         }
