@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.4.1] - 2026-03-15
+
+### 📋 Release Summary
+
+This release streamlines cross-project memory queries by making project keys optional, allowing easier access to shared context across workspaces (4ccc1cb0). Additionally, automated Homebrew tap notifications ensure faster availability of future updates for macOS users (cae97de5).
+
+
+### 🔧 Improvements & Optimizations
+
+- **memory**: make project_key optional for cross-project queries `4ccc1cb0`
+
+### 🔄 Other Changes
+
+- **release**: add homebrew tap notification job `cae97de5`
+
+### 📊 Release Summary
+
+**Total commits**: 2 across 2 categories
+
+🔧 **1** improvement - *Better performance & code quality*
+🔄 **1** other change - *Maintenance & tooling*
+
 ## [0.4.0] - 2026-03-14
 
 ### 📋 Release Summary
