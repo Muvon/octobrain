@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.2] - 2026-03-21
+
+### 📋 Release Summary
+
+This release updates internal dependencies and upgrades the Rust toolchain to version 1.94.0, ensuring improved performance and compatibility.
+
+
+### 🔄 Other Changes
+
+- **deps**: update Cargo.lock `5b758fa8`
+- upgrade Rust toolchain to 1.94.0 `c6c56997`
+
+### 📊 Release Summary
+
+**Total commits**: 2 across 1 categories
+
+🔄 **2** other changes - *Maintenance & tooling*
+
 ## [0.4.1] - 2026-03-15
 
 ### 📋 Release Summary
