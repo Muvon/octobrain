@@ -59,4 +59,4 @@ colored = "3.1"
 
 # Local dep for testing
 # octolib = { path = "../octolib", default-features = false }
-octolib = { version = "0.10.4", default-features = false }
+octolib = { version = "0.11.0", default-features = false }
