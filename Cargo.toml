@@ -57,6 +57,14 @@ dom_smoothie = "0.16"
 reqwest = { version = "0.13", features = ["rustls"], default-features = false }
 colored = "3.1"
 
+# MCP SDK (official Rust SDK for Model Context Protocol)
+rmcp = { version = "0.16", features = ["server", "transport-streamable-http-server", "transport-io", "macros"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+schemars = "1"
+async-trait = "0.1"
+http = "1"
+
 # Local dep for testing
-# octolib = { path = "../octolib", default-features = false }
-octolib = { version = "0.11.0", default-features = false }
+octolib = { path = "../octolib", default-features = false }
+# octolib = { version = "0.13.0", default-features = false }

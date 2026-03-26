@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod http;
 pub mod knowledge;
 pub mod logging;
 pub mod memory;
-pub mod server;
+pub mod rmcp_server;
 pub mod types;
+
+pub use rmcp_server::OctobrainServer as McpServer;

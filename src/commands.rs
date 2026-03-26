@@ -20,7 +20,6 @@ use crate::cli::{Commands, KnowledgeCommand, MemoryCommand};
 use crate::config::Config;
 use crate::constants::MAX_QUERIES;
 use crate::knowledge::KnowledgeManager;
-use crate::mcp::server::McpServer;
 use crate::memory::{MemoryManager, MemoryQuery, MemoryType};
 
 pub async fn execute(config: &Config, command: Commands) -> Result<()> {
@@ -42,11 +41,11 @@ pub async fn execute(config: &Config, command: Commands) -> Result<()> {
             let working_directory = std::env::current_dir()?;
             crate::mcp::logging::init_mcp_logging(working_directory.clone(), false)?;
 
-            // Start MCP server
-            let server = McpServer::new(config.clone(), working_directory).await?;
+            // Start MCP server using rmcp SDK
+            let server = crate::mcp::McpServer::new(config.clone(), working_directory);
             match bind {
                 Some(addr) => server.run_http(&addr).await?,
-                None => server.run().await?,
+                None => server.run_stdio().await?,
             }
             Ok(())
         }

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -42,32 +42,6 @@ impl KnowledgeProvider {
             knowledge_manager: Arc::new(Mutex::new(manager)),
             max_results: config.knowledge.max_results,
         })
-    }
-
-    /// Get all tool definitions for knowledge operations
-    pub fn get_tool_definitions() -> Vec<crate::mcp::types::McpTool> {
-        vec![crate::mcp::types::McpTool {
-            name: "knowledge_search".to_string(),
-            description: "Search indexed web knowledge semantically. Provide source_url to fetch and index a page on-the-fly, then search its content. Omit source_url to search across all previously indexed pages. Not for general web search — use when you have a specific URL or want to query already-indexed content.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "What to search for, in natural language",
-                        "minLength": 3,
-                        "maxLength": 500
-                    },
-                    "source_url": {
-                        "type": "string",
-                        "description": "Webpage URL to fetch, index, and search. If omitted, searches all previously indexed pages.",
-                        "pattern": "^https?://"
-                    }
-                },
-                "required": ["query"],
-                "additionalProperties": false
-            }),
-        }]
     }
 
     /// Execute knowledge search
