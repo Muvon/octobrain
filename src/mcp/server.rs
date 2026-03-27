@@ -49,7 +49,7 @@ pub struct SessionState {
 
 /// MCP Server using rmcp SDK
 #[derive(Clone)]
-pub struct OctobrainServer {
+pub struct McpServer {
     config: Config,
     working_directory: std::path::PathBuf,
     memory: Arc<Mutex<Option<MemoryProvider>>>,
@@ -58,7 +58,7 @@ pub struct OctobrainServer {
     tool_router: ToolRouter<Self>,
 }
 
-impl OctobrainServer {
+impl McpServer {
     pub fn new(config: Config, working_directory: std::path::PathBuf) -> Self {
         Self {
             config,
@@ -152,12 +152,7 @@ impl OctobrainServer {
         let working_directory = self.working_directory.clone();
 
         let service = StreamableHttpService::new(
-            move || {
-                Ok(OctobrainServer::new(
-                    config.clone(),
-                    working_directory.clone(),
-                ))
-            },
+            move || Ok(McpServer::new(config.clone(), working_directory.clone())),
             LocalSessionManager::default().into(),
             Default::default(),
         );
@@ -184,66 +179,134 @@ impl OctobrainServer {
 }
 
 // ============================================================================
+// Shared enum types for schema constraints
+// ============================================================================
+
+/// Memory category for organization and filtering
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryType {
+    Code,
+    Architecture,
+    BugFix,
+    Feature,
+    Documentation,
+    UserPreference,
+    Decision,
+    Learning,
+    Configuration,
+    Testing,
+    Performance,
+    Security,
+    Insight,
+}
+
+/// Trust tier for memory source attribution
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceTrust {
+    /// User explicitly stated or approved this fact
+    UserConfirmed,
+    /// AI-inferred conclusion
+    AgentInferred,
+}
+
+/// Relationship type between memories
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationshipKind {
+    /// General association
+    RelatedTo,
+    /// A needs B
+    DependsOn,
+    /// A replaces B
+    Supersedes,
+    /// Near-duplicate
+    Similar,
+    /// Contradicts
+    Conflicts,
+    /// Concrete implementation of abstract concept
+    Implements,
+    /// Builds on top of
+    Extends,
+}
+
+/// Search query: either a single string or an array of strings for broader coverage
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum QueryInput {
+    /// Single semantic search query
+    Single(String),
+    /// 2-5 related terms for comprehensive coverage — preferred over single query
+    Multiple(Vec<String>),
+}
+
+// ============================================================================
 // Tool parameter schemas using rmcp macros
 // ============================================================================
 
 /// Memorize tool parameters
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MemorizeParams {
-    /// Short, descriptive title for the memory (5-200 characters)
+    /// Short descriptive title
     pub title: String,
-    /// Detailed content to remember
+    /// Full content — explanations, code snippets, decisions, etc.
     pub content: String,
-    /// Category of memory for better organization
-    pub memory_type: Option<String>,
-    /// Importance score from 0.0 to 1.0 (higher = more important)
+    /// Memory category
+    pub memory_type: Option<MemoryType>,
+    /// Importance 0.0-1.0: user facts 0.8-1.0, decisions 0.7-0.9, bug fixes 0.6-0.8, inferences 0.3-0.6
+    #[schemars(range(min = 0.0, max = 1.0))]
     pub importance: Option<f32>,
-    /// Tags for categorization
+    /// Tags for categorization and filtering
+    #[schemars(length(max = 10))]
     pub tags: Option<Vec<String>>,
-    /// Related file paths
+    /// File paths related to this memory
+    #[schemars(length(max = 20))]
     pub related_files: Option<Vec<String>>,
-    /// Trust tier: 'user_confirmed' or 'agent_inferred'
-    pub source: Option<String>,
-    /// Project key to scope this memory to
+    /// Trust tier: 'user_confirmed' (user explicitly stated/approved) ranks higher in retrieval; 'agent_inferred' for AI conclusions
+    pub source: Option<SourceTrust>,
+    /// Project key to scope this memory to. Defaults to auto-detected Git remote hash.
     pub project: Option<String>,
-    /// Role tag to attach to this memory
+    /// Role tag to attach to this memory (e.g. 'developer', 'reviewer').
     pub role: Option<String>,
 }
 
 /// Remember tool parameters
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RememberParams {
-    /// Search query: a string or array of strings for comprehensive search
-    pub query: Option<serde_json::Value>,
-    /// Filter by memory types
-    pub memory_types: Option<Vec<String>>,
+    /// String or array of 2-5 related terms. Array preferred for broader semantic coverage.
+    pub query: QueryInput,
+    /// Narrow results to specific memory categories
+    pub memory_types: Option<Vec<MemoryType>>,
     /// Filter by tags
     pub tags: Option<Vec<String>>,
-    /// Filter by related files
+    /// Filter by related file paths
     pub related_files: Option<Vec<String>>,
-    /// Maximum number of memories to return
+    /// Max memories to return
+    #[schemars(range(min = 1, max = 5))]
     pub limit: Option<usize>,
     /// Minimum relevance score (0.0-1.0)
+    #[schemars(range(min = 0.0, max = 1.0))]
     pub min_relevance: Option<f32>,
-    /// Project key filter
+    /// Filter by project key. If omitted, returns memories from all projects.
     pub project: Option<String>,
-    /// Role filter
+    /// Filter by role. If omitted, returns memories for all roles.
     pub role: Option<String>,
 }
 
 /// Forget tool parameters
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ForgetParams {
-    /// Memory ID to forget
+    /// ID of memory to delete (from remember results)
     pub memory_id: Option<String>,
-    /// Query to find memories to forget
+    /// Semantic query to find memories to delete (alternative to memory_id)
     pub query: Option<String>,
     /// Filter by memory types when using query
-    pub memory_types: Option<Vec<String>>,
+    pub memory_types: Option<Vec<MemoryType>>,
     /// Filter by tags when using query
     pub tags: Option<Vec<String>>,
-    /// Confirm deletion without prompting
-    pub confirm: Option<bool>,
+    /// Must be true — deletion is permanent
+    pub confirm: bool,
     /// Project key filter
     pub project: Option<String>,
     /// Role filter
@@ -262,7 +325,8 @@ pub struct AutoLinkParams {
 pub struct MemoryGraphParams {
     /// Root memory ID
     pub memory_id: String,
-    /// Depth of graph traversal (1-3 recommended)
+    /// Traversal depth (default 2; use 3+ for broad exploration)
+    #[schemars(range(min = 1, max = 5))]
     pub depth: Option<usize>,
 }
 
@@ -273,20 +337,23 @@ pub struct RelateParams {
     pub source_id: String,
     /// Target memory ID
     pub target_id: String,
-    /// Relationship type
-    pub relationship_type: Option<String>,
-    /// Relationship strength (0.0-1.0)
+    /// Relationship type: related_to (general), depends_on (A needs B), supersedes (A replaces B), similar (near-duplicate), conflicts (contradicts), implements (concrete of abstract), extends (builds on)
+    pub relationship_type: RelationshipKind,
+    /// Relationship strength 0.0-1.0
+    #[schemars(range(min = 0.0, max = 1.0))]
     pub strength: Option<f32>,
-    /// Description of relationship
+    /// Why these memories are related
+    #[schemars(length(max = 500))]
     pub description: Option<String>,
 }
 
 /// Knowledge search tool parameters
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct KnowledgeSearchParams {
-    /// What to search for
+    /// What to search for, in natural language
+    #[schemars(length(min = 3, max = 500))]
     pub query: String,
-    /// URL to fetch and index before searching
+    /// Webpage URL to fetch, index, and search. If omitted, searches all previously indexed pages.
     pub source_url: Option<String>,
 }
 
@@ -295,7 +362,7 @@ pub struct KnowledgeSearchParams {
 // ============================================================================
 
 #[tool_router]
-impl OctobrainServer {
+impl McpServer {
     #[tool(
         name = "memorize",
         description = "Store information, insights, or context in memory. Call remember first to avoid duplicates. Set source='user_confirmed' for user-stated facts (importance 0.8-1.0), 'agent_inferred' for AI conclusions (0.3-0.6). Skip transient state or things easily re-derived."
@@ -330,7 +397,7 @@ impl OctobrainServer {
 
     #[tool(
         name = "remember",
-        description = "Semantic search over stored memories. Call before memorize to avoid duplicates, and at task start to load context. Results include 1-hop graph neighbors automatically. Prefer 2-5 related query terms for broader coverage."
+        description = "Semantic search over stored memories. Call before memorize to avoid duplicates, and at task start to load context. Results include 1-hop graph neighbors automatically. Prefer 2-5 related query terms for broader coverage. Results show [CONFIRMED]/[INFERRED] trust labels."
     )]
     async fn remember(
         &self,
@@ -361,7 +428,7 @@ impl OctobrainServer {
 
     #[tool(
         name = "forget",
-        description = "Permanently delete memories. Irreversible — requires confirm=true. Use memory_id for single deletion, or query+filters for bulk removal."
+        description = "Permanently delete memories. Irreversible — requires confirm=true. Use memory_id for single deletion, or query+filters for bulk removal. Don't forget memories just because they're old — importance decay handles that. Only delete when information is wrong or superseded."
     )]
     async fn forget(
         &self,
@@ -391,7 +458,7 @@ impl OctobrainServer {
 
     #[tool(
         name = "auto_link",
-        description = "Find and connect semantically similar memories for a given memory ID. Auto-linking runs on new memories automatically — call this manually to refresh links."
+        description = "Find and connect semantically similar memories for a given memory ID. Auto-linking runs on new memories automatically — call this manually to refresh links after content updates or for memories created outside normal flow."
     )]
     async fn auto_link(
         &self,
@@ -413,7 +480,7 @@ impl OctobrainServer {
 
     #[tool(
         name = "memory_graph",
-        description = "Retrieve a memory and its connected neighbors as a graph. remember already includes 1-hop neighbors — use this only for deeper traversal (depth > 1)."
+        description = "Retrieve a memory and its connected neighbors as a graph. remember already includes 1-hop neighbors — use this only for deeper traversal (depth > 1) or to see the full relationship structure."
     )]
     async fn memory_graph(
         &self,
@@ -435,7 +502,7 @@ impl OctobrainServer {
 
     #[tool(
         name = "relate",
-        description = "Create a typed relationship between two memories. Use when auto-linking missed a meaningful connection or you need a specific type."
+        description = "Create a typed relationship between two memories. Use when auto-linking missed a meaningful connection or you need a specific type. Types: related_to, depends_on, supersedes, similar, conflicts, implements, extends. Strength 0.9+ = strong, 0.5-0.8 = moderate, <0.5 = weak."
     )]
     async fn relate(
         &self,
@@ -457,7 +524,7 @@ impl OctobrainServer {
 
     #[tool(
         name = "knowledge_search",
-        description = "Search indexed web knowledge semantically. Provide source_url to fetch and index a page on-the-fly, then search its content. Omit source_url to search across all previously indexed pages."
+        description = "Search indexed web knowledge semantically. Provide source_url to fetch and index a page on-the-fly, then search its content. Omit source_url to search across all previously indexed pages. Not for general web search — use when you have a specific URL or want to query already-indexed content."
     )]
     async fn knowledge_search(
         &self,
@@ -483,7 +550,7 @@ impl OctobrainServer {
 // ============================================================================
 
 #[tool_handler]
-impl ServerHandler for OctobrainServer {
+impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2025_03_26,

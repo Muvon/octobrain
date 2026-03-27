@@ -15,7 +15,7 @@
 pub mod knowledge;
 pub mod logging;
 pub mod memory;
-pub mod rmcp_server;
+pub mod server;
 pub mod types;
 
-pub use rmcp_server::OctobrainServer as McpServer;
+pub use server::McpServer;
