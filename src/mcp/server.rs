@@ -552,29 +552,22 @@ impl McpServer {
 #[tool_handler]
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2025_03_26,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation {
-                name: "octobrain".to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                title: Some("Octobrain Memory Server".to_string()),
-                description: Some(
-                    "Standalone memory management system for AI context and conversation state"
-                        .to_string(),
-                ),
-                website_url: None,
-                icons: None,
-            },
-            instructions: Some(
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::V_2025_03_26)
+            .with_server_info(
+                Implementation::new("octobrain", env!("CARGO_PKG_VERSION"))
+                    .with_title("Octobrain Memory Server")
+                    .with_description(
+                        "Standalone memory management system for AI context and conversation state",
+                    ),
+            )
+            .with_instructions(
                 "This server provides memory tools for storing and retrieving AI context. \
                  Use 'memorize' to store information, 'remember' for semantic search, \
                  'forget' to delete memories, 'auto_link' to find related memories, \
                  'memory_graph' to explore memory connections, 'relate' to create relationships, \
-                 and 'knowledge_search' to search indexed web content."
-                    .to_string(),
-            ),
-        }
+                 and 'knowledge_search' to search indexed web content.",
+            )
     }
 
     /// Extract project/role from experimental capabilities during initialize handshake
