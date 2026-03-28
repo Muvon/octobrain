@@ -198,7 +198,18 @@ pub enum MemoryType {
     Testing,
     Performance,
     Security,
+    Validation,
+    Research,
+    Workflow,
+    Requirement,
+    Design,
+    Integration,
+    Communication,
+    Process,
     Insight,
+    /// Catch-all for unrecognized types — maps to Insight internally
+    #[serde(other)]
+    Other,
 }
 
 /// Trust tier for memory source attribution

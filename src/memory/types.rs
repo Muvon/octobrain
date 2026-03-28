@@ -79,7 +79,7 @@ impl MemorySource {
     }
 }
 
-/// Types of memories that can be stored - unified for comprehensive coverage
+/// Types of memories that can be stored - covers dev, product, and general knowledge workflows
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MemoryType {
     /// Code insights, patterns, solutions, and implementations
@@ -106,6 +106,22 @@ pub enum MemoryType {
     Performance,
     /// Security considerations, vulnerabilities, and fixes
     Security,
+    /// Idea validation, product validation, hypothesis testing
+    Validation,
+    /// Market research, technical research, analysis findings
+    Research,
+    /// Process descriptions, SOPs, playbooks
+    Workflow,
+    /// Business requirements, specs, constraints
+    Requirement,
+    /// UI/UX decisions, system design, wireframes
+    Design,
+    /// API integrations, third-party services, data flows
+    Integration,
+    /// Stakeholder updates, team decisions, meeting notes
+    Communication,
+    /// Deployment procedures, runbooks, operational checklists
+    Process,
     /// General insights, tips, and miscellaneous knowledge
     Insight,
 }
@@ -125,6 +141,14 @@ impl std::fmt::Display for MemoryType {
             MemoryType::Testing => write!(f, "testing"),
             MemoryType::Performance => write!(f, "performance"),
             MemoryType::Security => write!(f, "security"),
+            MemoryType::Validation => write!(f, "validation"),
+            MemoryType::Research => write!(f, "research"),
+            MemoryType::Workflow => write!(f, "workflow"),
+            MemoryType::Requirement => write!(f, "requirement"),
+            MemoryType::Design => write!(f, "design"),
+            MemoryType::Integration => write!(f, "integration"),
+            MemoryType::Communication => write!(f, "communication"),
+            MemoryType::Process => write!(f, "process"),
             MemoryType::Insight => write!(f, "insight"),
         }
     }
@@ -134,17 +158,25 @@ impl From<String> for MemoryType {
     fn from(s: String) -> Self {
         match s.to_lowercase().as_str() {
             "code" => MemoryType::Code,
-            "architecture" => MemoryType::Architecture,
+            "architecture" | "arch" => MemoryType::Architecture,
             "bug_fix" | "bugfix" | "bug" => MemoryType::BugFix,
             "feature" => MemoryType::Feature,
             "documentation" | "docs" | "doc" => MemoryType::Documentation,
-            "user_preference" | "preference" | "user" => MemoryType::UserPreference,
-            "decision" | "meeting" | "planning" => MemoryType::Decision,
+            "user_preference" | "preference" => MemoryType::UserPreference,
+            "decision" => MemoryType::Decision,
             "learning" | "tutorial" | "education" => MemoryType::Learning,
-            "configuration" | "config" | "setup" | "deployment" => MemoryType::Configuration,
+            "configuration" | "config" | "setup" => MemoryType::Configuration,
             "testing" | "test" | "qa" => MemoryType::Testing,
             "performance" | "perf" | "optimization" => MemoryType::Performance,
             "security" | "vulnerability" | "vuln" => MemoryType::Security,
+            "validation" | "hypothesis" | "experiment" => MemoryType::Validation,
+            "research" | "analysis" | "investigation" => MemoryType::Research,
+            "workflow" | "sop" | "playbook" => MemoryType::Workflow,
+            "requirement" | "spec" | "constraint" => MemoryType::Requirement,
+            "design" | "ux" | "ui" | "wireframe" => MemoryType::Design,
+            "integration" | "api" | "connector" => MemoryType::Integration,
+            "communication" | "stakeholder" | "update" => MemoryType::Communication,
+            "process" | "runbook" | "procedure" | "deployment" => MemoryType::Process,
             _ => MemoryType::Insight, // Default fallback
         }
     }
