@@ -317,10 +317,10 @@ pub enum MemoryCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum KnowledgeCommand {
-    /// Manually index a URL into knowledge base
+    /// Index a URL or local file into knowledge base
     Index {
-        /// URL to index
-        url: String,
+        /// URL or local file path to index (.txt, .md, .pdf, .docx, .html)
+        source: String,
     },
 
     /// Search knowledge base semantically
@@ -328,15 +328,15 @@ pub enum KnowledgeCommand {
         /// Search query
         query: String,
 
-        /// Filter by specific URL (auto-indexes if needed)
+        /// Filter by specific source URL or file path (auto-indexes if needed)
         #[arg(long)]
-        url: Option<String>,
+        source: Option<String>,
     },
 
-    /// Delete indexed URL and all its chunks
+    /// Delete indexed source and all its chunks
     Delete {
-        /// URL to delete
-        url: String,
+        /// Source URL or file path to delete
+        source: String,
     },
 
     /// Show knowledge base statistics

@@ -1,4 +1,5 @@
 pub mod chunker;
+pub mod content;
 pub mod formatting;
 pub mod manager;
 pub mod store;

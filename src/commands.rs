@@ -695,9 +695,9 @@ async fn execute_knowledge_command(
     command: KnowledgeCommand,
 ) -> Result<()> {
     match command {
-        KnowledgeCommand::Index { url } => {
-            println!("Fetching URL...");
-            let result = knowledge_manager.index_url(&url).await?;
+        KnowledgeCommand::Index { source } => {
+            println!("Indexing source...");
+            let result = knowledge_manager.index_source(&source).await?;
 
             if result.was_cached && !result.content_changed {
                 println!("✓ Cached: {} (content unchanged)", result.url);
@@ -709,8 +709,11 @@ async fn execute_knowledge_command(
             }
             Ok(())
         }
-        KnowledgeCommand::Search { query, url } => {
-            let results = knowledge_manager.search(&query, url.as_deref()).await?;
+        KnowledgeCommand::Search { query, source } => {
+            let source_filter = source;
+            let results = knowledge_manager
+                .search(&query, source_filter.as_deref())
+                .await?;
 
             if results.is_empty() {
                 println!("No results found");
@@ -720,9 +723,9 @@ async fn execute_knowledge_command(
             }
             Ok(())
         }
-        KnowledgeCommand::Delete { url } => {
-            knowledge_manager.delete_source(&url).await?;
-            println!("✓ Deleted {} from knowledge base", url);
+        KnowledgeCommand::Delete { source } => {
+            knowledge_manager.delete_source(&source).await?;
+            println!("✓ Deleted {} from knowledge base", source);
             Ok(())
         }
         KnowledgeCommand::Stats => {

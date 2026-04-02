@@ -2,20 +2,84 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 
 use crate::config::KnowledgeConfig;
+use crate::knowledge::content::{self, ContentType};
 use crate::knowledge::types::KnowledgeChunk;
 
-pub struct HtmlChunker {
+pub struct ContentChunker {
     config: KnowledgeConfig,
 }
 
-impl HtmlChunker {
+impl ContentChunker {
     pub fn new(config: KnowledgeConfig) -> Self {
         Self { config }
     }
 
+    /// Extract text from any supported content type, then chunk.
+    /// Returns (title, content_hash, chunks)
+    pub fn extract_and_chunk(
+        &self,
+        source: &str,
+        content_type: &ContentType,
+        raw: &[u8],
+    ) -> Result<(String, String, Vec<KnowledgeChunk>)> {
+        match content_type {
+            ContentType::Html => {
+                let html = String::from_utf8_lossy(raw);
+                self.parse_html_and_chunk(source, &html)
+            }
+            ContentType::Pdf => {
+                let text = content::extract_text_from_pdf(raw)?;
+                self.parse_text_and_chunk(source, &text)
+            }
+            ContentType::Docx => {
+                let text = content::extract_text_from_docx(raw)?;
+                self.parse_text_and_chunk(source, &text)
+            }
+            ContentType::Markdown => {
+                let text = String::from_utf8_lossy(raw);
+                self.parse_text_and_chunk(source, &text)
+            }
+            ContentType::PlainText => {
+                let text = String::from_utf8_lossy(raw);
+                self.parse_text_and_chunk(source, &text)
+            }
+        }
+    }
+
+    /// Parse plain text/markdown and chunk into semantic pieces.
+    /// Returns (title, content_hash, chunks)
+    fn parse_text_and_chunk(
+        &self,
+        source: &str,
+        text: &str,
+    ) -> Result<(String, String, Vec<KnowledgeChunk>)> {
+        let title = self.extract_title_from_text(text);
+        let content_hash = self.compute_hash(text);
+        let chunks = self.chunk_markdown(source, &title, text)?;
+        Ok((title, content_hash, chunks))
+    }
+
+    /// Extract title from text: first markdown heading, or first non-empty line (capped at 100 chars)
+    fn extract_title_from_text(&self, text: &str) -> String {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // Check for markdown heading
+            if trimmed.starts_with('#') {
+                return trimmed.trim_start_matches('#').trim().to_string();
+            }
+            // Use first non-empty line, capped
+            let title: String = trimmed.chars().take(100).collect();
+            return title;
+        }
+        "Untitled".to_string()
+    }
+
     /// Parse HTML and chunk into semantic pieces
     /// Returns (title, content_hash, chunks)
-    pub fn parse_and_chunk(
+    fn parse_html_and_chunk(
         &self,
         url: &str,
         html: &str,
@@ -374,7 +438,7 @@ mod tests {
     #[test]
     fn test_extract_title_from_title_tag() {
         let config = KnowledgeConfig::default();
-        let chunker = HtmlChunker::new(config);
+        let chunker = ContentChunker::new(config);
         let html = "<html><head><title>Test Page</title></head><body></body></html>";
         let title = chunker.extract_title_from_html(html);
         assert_eq!(title, "Test Page");
@@ -383,7 +447,7 @@ mod tests {
     #[test]
     fn test_extract_title_from_h1() {
         let config = KnowledgeConfig::default();
-        let chunker = HtmlChunker::new(config);
+        let chunker = ContentChunker::new(config);
         let html = "<html><body><h1>Main Heading</h1></body></html>";
         let title = chunker.extract_title_from_html(html);
         assert_eq!(title, "Main Heading");
@@ -392,7 +456,7 @@ mod tests {
     #[test]
     fn test_extract_title_fallback() {
         let config = KnowledgeConfig::default();
-        let chunker = HtmlChunker::new(config);
+        let chunker = ContentChunker::new(config);
         let html = "<html><body><p>No title</p></body></html>";
         let title = chunker.extract_title_from_html(html);
         assert_eq!(title, "Untitled");
@@ -401,7 +465,7 @@ mod tests {
     #[test]
     fn test_detect_header_level() {
         let config = KnowledgeConfig::default();
-        let chunker = HtmlChunker::new(config);
+        let chunker = ContentChunker::new(config);
         assert_eq!(chunker.detect_header_level("# Header 1"), Some(1));
         assert_eq!(chunker.detect_header_level("## Header 2"), Some(2));
         assert_eq!(chunker.detect_header_level("### Header 3"), Some(3));
@@ -416,7 +480,7 @@ mod tests {
             outdating_days: 90,
             max_results: 10,
         };
-        let chunker = HtmlChunker::new(config);
+        let chunker = ContentChunker::new(config);
         let text = "a".repeat(250);
         let chunks = chunker.split_text_with_overlap(&text);
         assert!(chunks.len() > 1);

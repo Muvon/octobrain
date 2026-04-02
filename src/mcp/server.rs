@@ -364,7 +364,7 @@ pub struct KnowledgeSearchParams {
     /// What to search for, in natural language
     #[schemars(length(min = 3, max = 500))]
     pub query: String,
-    /// Webpage URL to fetch, index, and search. If omitted, searches all previously indexed pages.
+    /// URL or local file path to fetch, index, and search. Supports http/https URLs, file:///path, or /absolute/path. File types: .html, .txt, .md, .pdf, .docx. If omitted, searches all previously indexed sources.
     pub source_url: Option<String>,
 }
 
@@ -535,7 +535,7 @@ impl McpServer {
 
     #[tool(
         name = "knowledge_search",
-        description = "Search indexed web knowledge semantically. Provide source_url to fetch and index a page on-the-fly, then search its content. Omit source_url to search across all previously indexed pages. Not for general web search — use when you have a specific URL or want to query already-indexed content."
+        description = "Search indexed knowledge semantically. Provide source_url to fetch and index a web page or local file on-the-fly, then search its content. Supports: web URLs (http/https), local files (file:///path or /absolute/path). File types: .html, .txt, .md, .pdf, .docx. Omit source_url to search across all previously indexed sources."
     )]
     async fn knowledge_search(
         &self,
