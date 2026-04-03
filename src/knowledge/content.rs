@@ -1,3 +1,5 @@
+// Copyright 2026 Muvon Un Limited
+//
 use anyhow::{Context, Result};
 use std::io::Cursor;
 

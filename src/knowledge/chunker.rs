@@ -1,3 +1,5 @@
+// Copyright 2026 Muvon Un Limited
+//
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 

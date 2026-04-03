@@ -245,6 +245,7 @@ Project-specific data is stored in subdirectories identified by Git remote URL h
 
 ### Code Quality Standards
 - **Zero clippy warnings** - All code must pass `cargo clippy` without warnings
+- **Copyright header** - Every `.rs` file MUST start with `// Copyright <YEAR> Muvon Un Limited` followed by `//`. When creating new files or modifying existing ones, ensure the copyright year matches the current year
 - **Minimal dependencies** - Reuse existing dependencies before adding new ones
 - **Clone trait** - Add `#[derive(Clone)]` to structs that need to be shared across async contexts
 - **Error handling** - Use proper `Result<T>` types and meaningful error messages

@@ -1,3 +1,5 @@
+// Copyright 2026 Muvon Un Limited
+//
 pub mod chunker;
 pub mod content;
 pub mod formatting;

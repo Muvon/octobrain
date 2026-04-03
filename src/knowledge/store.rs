@@ -1,3 +1,5 @@
+// Copyright 2026 Muvon Un Limited
+//
 use anyhow::{Context, Result};
 use arrow_array::{
     Array, FixedSizeListArray, Float32Array, Int32Array, ListArray, RecordBatch, StringArray,

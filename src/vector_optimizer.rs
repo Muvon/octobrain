@@ -1,3 +1,5 @@
+// Copyright 2026 Muvon Un Limited
+//
 use lancedb::DistanceType;
 
 /// Parameters for vector index optimization
