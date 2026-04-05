@@ -96,6 +96,8 @@ pub struct KnowledgeConfig {
     pub chunk_overlap: usize,
     pub outdating_days: u64,
     pub max_results: usize,
+    /// Hours after which session-scoped chunks are cleaned up (crash recovery)
+    pub session_ttl_hours: u64,
 }
 
 impl Default for KnowledgeConfig {
@@ -105,6 +107,7 @@ impl Default for KnowledgeConfig {
             chunk_overlap: 150,
             outdating_days: 90,
             max_results: 10,
+            session_ttl_hours: 24,
         }
     }
 }

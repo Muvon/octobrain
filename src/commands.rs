@@ -700,11 +700,11 @@ async fn execute_knowledge_command(
             let result = knowledge_manager.index_source(&source).await?;
 
             if result.was_cached && !result.content_changed {
-                println!("✓ Cached: {} (content unchanged)", result.url);
+                println!("✓ Cached: {} (content unchanged)", result.source);
             } else {
                 println!(
                     "✓ Indexed: {} ({} chunks created)",
-                    result.url, result.chunks_created
+                    result.source, result.chunks_created
                 );
             }
             Ok(())
@@ -712,7 +712,7 @@ async fn execute_knowledge_command(
         KnowledgeCommand::Search { query, source } => {
             let source_filter = source;
             let results = knowledge_manager
-                .search(&query, source_filter.as_deref())
+                .search(&query, source_filter.as_deref(), None)
                 .await?;
 
             if results.is_empty() {
@@ -723,9 +723,30 @@ async fn execute_knowledge_command(
             }
             Ok(())
         }
+        KnowledgeCommand::Store {
+            key,
+            content,
+            session_id,
+        } => {
+            let sid = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let result = knowledge_manager
+                .store_content(&key, &content, &sid)
+                .await?;
+            println!(
+                "✓ Stored '{}' as {} ({} chunks indexed, session: {})",
+                key, result.source, result.chunks_created, sid
+            );
+            Ok(())
+        }
         KnowledgeCommand::Delete { source } => {
             knowledge_manager.delete_source(&source).await?;
             println!("✓ Deleted {} from knowledge base", source);
+            Ok(())
+        }
+        KnowledgeCommand::DeleteStored { key, session_id } => {
+            let sid = session_id.unwrap_or_else(|| "cli".to_string());
+            knowledge_manager.delete_content(&key, &sid).await?;
+            println!("✓ Deleted stored knowledge '{}'", key);
             Ok(())
         }
         KnowledgeCommand::Stats => {

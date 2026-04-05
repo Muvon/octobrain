@@ -157,3 +157,8 @@ outdating_days = 15
 # Maximum number of results to return from knowledge search
 # Default: 5
 max_results = 5
+
+# Hours after which session-scoped knowledge chunks are cleaned up (crash recovery)
+# Default: 120
+session_ttl_hours = 120
+

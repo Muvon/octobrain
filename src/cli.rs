@@ -333,10 +333,33 @@ pub enum KnowledgeCommand {
         source: Option<String>,
     },
 
+    /// Store raw text content under a key (session-scoped in MCP, persistent in CLI)
+    Store {
+        /// Unique identifier key for the content
+        key: String,
+
+        /// Raw text content to store and index
+        content: String,
+
+        /// Session ID to scope this stored content to (auto-generated if omitted)
+        #[arg(long)]
+        session_id: Option<String>,
+    },
+
     /// Delete indexed source and all its chunks
     Delete {
         /// Source URL or file path to delete
         source: String,
+    },
+
+    /// Delete stored content by key
+    DeleteStored {
+        /// Key of the stored content to delete
+        key: String,
+
+        /// Session ID that the stored content belongs to
+        #[arg(long)]
+        session_id: Option<String>,
     },
 
     /// Show knowledge base statistics

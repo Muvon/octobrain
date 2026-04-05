@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeChunk {
     pub id: String,
-    pub source_url: String,
+    pub source: String,
     pub source_title: String,
     pub chunk_index: i32,
     /// Small child text — what gets embedded and matched against queries.
@@ -29,6 +29,7 @@ pub struct KnowledgeChunk {
 pub struct KnowledgeSearchResult {
     pub chunk: KnowledgeChunk,
     pub relevance_score: f32,
+    pub session_scoped: bool,
 }
 
 /// Statistics about the knowledge base
@@ -43,8 +44,15 @@ pub struct KnowledgeStats {
 /// Result of indexing operation
 #[derive(Debug, Clone)]
 pub struct IndexResult {
-    pub url: String,
+    pub source: String,
     pub chunks_created: usize,
     pub was_cached: bool,
     pub content_changed: bool,
+}
+
+/// Result of a store operation
+#[derive(Debug, Clone)]
+pub struct StoreResult {
+    pub source: String,
+    pub chunks_created: usize,
 }

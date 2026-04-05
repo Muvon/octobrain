@@ -10,7 +10,9 @@ use crate::embedding::EmbeddingProvider;
 use crate::knowledge::chunker::ContentChunker;
 use crate::knowledge::content::ContentType;
 use crate::knowledge::store::KnowledgeStore;
-use crate::knowledge::types::{IndexResult, KnowledgeSearchResult, KnowledgeStats};
+use crate::knowledge::types::{
+    IndexResult, KnowledgeChunk, KnowledgeSearchResult, KnowledgeStats, StoreResult,
+};
 
 /// Maximum source size in bytes (50 MB)
 const MAX_SOURCE_SIZE: usize = 50 * 1024 * 1024;
@@ -34,6 +36,12 @@ impl KnowledgeManager {
         let store = KnowledgeStore::new(vector_dim).await?;
         let chunker = ContentChunker::new(config.knowledge.clone());
 
+        // Clean up expired session-scoped chunks (crash recovery)
+        store
+            .cleanup_expired_sessions(config.knowledge.session_ttl_hours)
+            .await
+            .ok();
+
         Ok(Self {
             config: config.knowledge.clone(),
             search_config: config.search.clone(),
@@ -47,15 +55,16 @@ impl KnowledgeManager {
     pub async fn search(
         &self,
         query: &str,
-        source_url: Option<&str>,
+        source: Option<&str>,
+        session_id: Option<&str>,
     ) -> Result<Vec<KnowledgeSearchResult>> {
         // If source provided, normalize and check if needs indexing
-        let normalized = source_url.map(normalize_source).transpose()?;
+        let normalized = source.map(normalize_source).transpose()?;
         let source_ref = normalized.as_deref();
 
-        if let Some(source) = source_ref {
-            if self.needs_indexing(source).await? {
-                self.index_source_internal(source).await?;
+        if let Some(s) = source_ref {
+            if self.needs_indexing(s).await? {
+                self.index_source_internal(s).await?;
             }
         }
 
@@ -73,12 +82,18 @@ impl KnowledgeManager {
                 source_ref,
                 self.config.max_results,
                 use_hybrid,
+                session_id,
             )
             .await
     }
 
     /// Check if source needs indexing (not indexed or outdated)
     async fn needs_indexing(&self, source: &str) -> Result<bool> {
+        // stored:// content is managed by the store command, never auto-reindexed
+        if source.starts_with("stored://") {
+            return Ok(false);
+        }
+
         match self.store.get_source_metadata(source).await? {
             None => Ok(true), // Not indexed
             Some((_, last_checked)) => {
@@ -127,7 +142,7 @@ impl KnowledgeManager {
 
                 if new_hash == content_hash {
                     return Ok(IndexResult {
-                        url: source,
+                        source,
                         chunks_created: 0,
                         was_cached: true,
                         content_changed: false,
@@ -144,7 +159,7 @@ impl KnowledgeManager {
 
         if chunks.is_empty() {
             return Ok(IndexResult {
-                url: source,
+                source,
                 chunks_created: 0,
                 was_cached: false,
                 content_changed: true,
@@ -157,13 +172,13 @@ impl KnowledgeManager {
             crate::embedding::generate_embeddings_batch(texts, self.embedding_provider.as_ref())
                 .await?;
 
-        // Store
+        // Store (persistent — no session_id)
         self.store
-            .store_chunks(&source, &title, &content_hash, &chunks, &embeddings)
+            .store_chunks(&source, &title, &content_hash, &chunks, &embeddings, None)
             .await?;
 
         Ok(IndexResult {
-            url: source,
+            source,
             chunks_created: chunks.len(),
             was_cached: false,
             content_changed: true,
@@ -188,7 +203,7 @@ impl KnowledgeManager {
                 .await?;
 
         self.store
-            .store_chunks(source, &title, &content_hash, &chunks, &embeddings)
+            .store_chunks(source, &title, &content_hash, &chunks, &embeddings, None)
             .await?;
 
         Ok(())
@@ -278,6 +293,98 @@ impl KnowledgeManager {
         Ok((content_type, bytes.to_vec()))
     }
 
+    /// Store raw text content under a key, scoped to a session.
+    /// Key must be unique within the session — returns error if it already exists.
+    pub async fn store_content(
+        &self,
+        key: &str,
+        content: &str,
+        session_id: &str,
+    ) -> Result<StoreResult> {
+        let source = format!("stored://{}", key);
+
+        // Check key uniqueness within session
+        if self
+            .store
+            .has_source_in_session(&source, session_id)
+            .await?
+        {
+            anyhow::bail!(
+                "Key '{}' already exists in this session. Delete it first to replace.",
+                key
+            );
+        }
+
+        if content.trim().is_empty() {
+            anyhow::bail!("Content cannot be empty");
+        }
+
+        let bytes = content.as_bytes();
+        let (title, content_hash, chunks) =
+            self.chunker
+                .extract_and_chunk(&source, &ContentType::PlainText, bytes)?;
+
+        if chunks.is_empty() {
+            // Content too small for chunker — create a single chunk directly
+            let chunk = KnowledgeChunk {
+                id: uuid::Uuid::new_v4().to_string(),
+                source: source.clone(),
+                source_title: title.clone(),
+                chunk_index: 0,
+                content: content.to_string(),
+                parent_content: None,
+                section_path: vec![],
+                char_start: 0,
+                char_end: content.len(),
+            };
+            let embedding = self.embedding_provider.generate_embedding(content).await?;
+            self.store
+                .store_chunks(
+                    &source,
+                    &title,
+                    &content_hash,
+                    &[chunk],
+                    &[embedding],
+                    Some(session_id),
+                )
+                .await?;
+            return Ok(StoreResult {
+                source,
+                chunks_created: 1,
+            });
+        }
+
+        // Generate embeddings in batch
+        let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+        let embeddings =
+            crate::embedding::generate_embeddings_batch(texts, self.embedding_provider.as_ref())
+                .await?;
+
+        self.store
+            .store_chunks(
+                &source,
+                &title,
+                &content_hash,
+                &chunks,
+                &embeddings,
+                Some(session_id),
+            )
+            .await?;
+
+        Ok(StoreResult {
+            source,
+            chunks_created: chunks.len(),
+        })
+    }
+
+    /// Delete stored content by key within a session
+    pub async fn delete_content(&self, key: &str, session_id: &str) -> Result<()> {
+        let source = format!("stored://{}", key);
+        self.store
+            .delete_by_source_and_session(&source, session_id)
+            .await
+    }
+
     pub async fn delete_source(&self, source: &str) -> Result<()> {
         let source = normalize_source(source)?;
         self.store.delete_source(&source).await
@@ -310,8 +417,11 @@ fn is_local_source(source: &str) -> bool {
 fn normalize_source(source: &str) -> Result<String> {
     let trimmed = source.trim();
 
-    // Already a URL
-    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+    // Already a URL or stored key
+    if trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("stored://")
+    {
         return Ok(trimmed.to_string());
     }
 
@@ -349,5 +459,77 @@ fn source_to_path(source: &str) -> Result<PathBuf> {
         Ok(PathBuf::from(source))
     } else {
         anyhow::bail!("Not a local source: {}", source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_source_http_passthrough() {
+        assert_eq!(
+            normalize_source("https://example.com/page").unwrap(),
+            "https://example.com/page"
+        );
+        assert_eq!(
+            normalize_source("http://example.com").unwrap(),
+            "http://example.com"
+        );
+    }
+
+    #[test]
+    fn test_normalize_source_stored_passthrough() {
+        assert_eq!(
+            normalize_source("stored://my_key").unwrap(),
+            "stored://my_key"
+        );
+        assert_eq!(
+            normalize_source("stored://web_results").unwrap(),
+            "stored://web_results"
+        );
+    }
+
+    #[test]
+    fn test_normalize_source_file_uri_passthrough() {
+        assert_eq!(
+            normalize_source("file:///tmp/test.txt").unwrap(),
+            "file:///tmp/test.txt"
+        );
+    }
+
+    #[test]
+    fn test_normalize_source_trims_whitespace() {
+        assert_eq!(
+            normalize_source("  https://example.com  ").unwrap(),
+            "https://example.com"
+        );
+        assert_eq!(
+            normalize_source("  stored://key  ").unwrap(),
+            "stored://key"
+        );
+    }
+
+    #[test]
+    fn test_is_local_source() {
+        assert!(is_local_source("file:///tmp/test.txt"));
+        assert!(is_local_source("/absolute/path"));
+        assert!(!is_local_source("https://example.com"));
+        assert!(!is_local_source("stored://key"));
+        assert!(!is_local_source("http://example.com"));
+    }
+
+    #[test]
+    fn test_source_to_path() {
+        assert_eq!(
+            source_to_path("file:///tmp/test.txt").unwrap(),
+            PathBuf::from("/tmp/test.txt")
+        );
+        assert_eq!(
+            source_to_path("/absolute/path").unwrap(),
+            PathBuf::from("/absolute/path")
+        );
+        assert!(source_to_path("https://example.com").is_err());
+        assert!(source_to_path("stored://key").is_err());
     }
 }

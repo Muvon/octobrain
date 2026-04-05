@@ -19,6 +19,7 @@ use lancedb::{
 use std::sync::Arc;
 
 use crate::knowledge::types::{KnowledgeChunk, KnowledgeSearchResult, KnowledgeStats};
+use chrono::Duration;
 
 /// RRF (Reciprocal Rank Fusion) constant k
 /// Default value from LanceDB, based on research paper:
@@ -59,8 +60,9 @@ impl KnowledgeStore {
     fn build_schema(vector_dim: usize) -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
-            Field::new("source_url", DataType::Utf8, false),
+            Field::new("source", DataType::Utf8, false),
             Field::new("source_title", DataType::Utf8, false),
+            Field::new("session_id", DataType::Utf8, true),
             Field::new("chunk_index", DataType::Int32, false),
             Field::new("content", DataType::Utf8, false),
             Field::new("parent_content", DataType::Utf8, false),
@@ -136,14 +138,20 @@ impl KnowledgeStore {
 
     pub async fn store_chunks(
         &self,
-        source_url: &str,
+        source: &str,
         source_title: &str,
         content_hash: &str,
         chunks: &[KnowledgeChunk],
         embeddings: &[Vec<f32>],
+        session_id: Option<&str>,
     ) -> Result<()> {
-        // Delete existing chunks for this URL (full reindex)
-        self.delete_source(source_url).await?;
+        // Delete existing chunks: session-scoped deletes only within session,
+        // persistent deletes all chunks for source (full reindex)
+        if let Some(sid) = session_id {
+            self.delete_by_source_and_session(source, sid).await?;
+        } else {
+            self.delete_source(source).await?;
+        }
 
         if chunks.is_empty() {
             return Ok(());
@@ -154,8 +162,9 @@ impl KnowledgeStore {
 
         // Build arrays
         let ids: Vec<&str> = chunks.iter().map(|c| c.id.as_str()).collect();
-        let source_urls: Vec<&str> = chunks.iter().map(|_| source_url).collect();
+        let sources: Vec<&str> = chunks.iter().map(|_| source).collect();
         let source_titles: Vec<&str> = chunks.iter().map(|_| source_title).collect();
+        let session_ids: Vec<Option<&str>> = chunks.iter().map(|_| session_id).collect();
         let chunk_indices: Vec<i32> = chunks.iter().map(|c| c.chunk_index).collect();
         let contents: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
         let parent_contents: Vec<&str> = chunks
@@ -193,8 +202,9 @@ impl KnowledgeStore {
             self.schema.clone(),
             vec![
                 Arc::new(StringArray::from(ids)),
-                Arc::new(StringArray::from(source_urls)),
+                Arc::new(StringArray::from(sources)),
                 Arc::new(StringArray::from(source_titles)),
+                Arc::new(StringArray::from(session_ids)),
                 Arc::new(Int32Array::from(chunk_indices)),
                 Arc::new(StringArray::from(contents)),
                 Arc::new(StringArray::from(parent_contents)),
@@ -224,9 +234,10 @@ impl KnowledgeStore {
         &self,
         query_embedding: &[f32],
         query_text: &str,
-        source_url: Option<&str>,
+        source: Option<&str>,
         limit: usize,
         use_hybrid: bool,
+        session_id: Option<&str>,
     ) -> Result<Vec<KnowledgeSearchResult>> {
         let mut query = self
             .table
@@ -240,8 +251,23 @@ impl KnowledgeStore {
             query = query.full_text_search(fts_query);
         }
 
-        if let Some(url) = source_url {
-            query = query.only_if(format!("source_url = '{}'", Self::quote_filter_string(url)));
+        // Build filter conditions
+        let mut filters = Vec::new();
+
+        if let Some(s) = source {
+            filters.push(format!("source = '{}'", Self::quote_filter_string(s)));
+        }
+
+        // Session scoping: return persistent (NULL session_id) + current session's data
+        if let Some(sid) = session_id {
+            filters.push(format!(
+                "(session_id IS NULL OR session_id = '{}')",
+                Self::quote_filter_string(sid)
+            ));
+        }
+
+        if !filters.is_empty() {
+            query = query.only_if(filters.join(" AND "));
         }
 
         // Execute hybrid search if enabled, otherwise regular vector search
@@ -266,8 +292,8 @@ impl KnowledgeStore {
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .unwrap();
-            let source_urls = batch
-                .column_by_name("source_url")
+            let sources = batch
+                .column_by_name("source")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -278,6 +304,9 @@ impl KnowledgeStore {
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .unwrap();
+            let session_ids = batch
+                .column_by_name("session_id")
+                .and_then(|col| col.as_any().downcast_ref::<StringArray>());
             let chunk_indices = batch
                 .column_by_name("chunk_index")
                 .unwrap()
@@ -360,9 +389,13 @@ impl KnowledgeStore {
                     .map(|j| section_path_strings.value(j).to_string())
                     .collect();
 
+                let is_session_scoped = session_ids
+                    .map(|arr| !arr.is_null(i) && !arr.value(i).is_empty())
+                    .unwrap_or(false);
+
                 let chunk = KnowledgeChunk {
                     id: ids.value(i).to_string(),
-                    source_url: source_urls.value(i).to_string(),
+                    source: sources.value(i).to_string(),
                     source_title: source_titles.value(i).to_string(),
                     chunk_index: chunk_indices.value(i),
                     content: contents.value(i).to_string(),
@@ -382,6 +415,7 @@ impl KnowledgeStore {
                 search_results.push(KnowledgeSearchResult {
                     chunk,
                     relevance_score,
+                    session_scoped: is_session_scoped,
                 });
             }
         }
@@ -389,11 +423,14 @@ impl KnowledgeStore {
         Ok(search_results)
     }
 
-    pub async fn get_source_metadata(&self, url: &str) -> Result<Option<(String, DateTime<Utc>)>> {
+    pub async fn get_source_metadata(
+        &self,
+        source: &str,
+    ) -> Result<Option<(String, DateTime<Utc>)>> {
         let query = self
             .table
             .query()
-            .only_if(format!("source_url = '{}'", Self::quote_filter_string(url)))
+            .only_if(format!("source = '{}'", Self::quote_filter_string(source)))
             .limit(1);
 
         let results = query.execute().await?;
@@ -425,12 +462,9 @@ impl KnowledgeStore {
         Ok(Some((content_hash, last_checked)))
     }
 
-    pub async fn delete_source(&self, url: &str) -> Result<()> {
+    pub async fn delete_source(&self, source: &str) -> Result<()> {
         self.table
-            .delete(&format!(
-                "source_url = '{}'",
-                Self::quote_filter_string(url)
-            ))
+            .delete(&format!("source = '{}'", Self::quote_filter_string(source)))
             .await?;
         Ok(())
     }
@@ -455,8 +489,8 @@ impl KnowledgeStore {
         let mut newest: Option<DateTime<Utc>> = None;
 
         for batch in batches {
-            let source_urls = batch
-                .column_by_name("source_url")
+            let sources_col = batch
+                .column_by_name("source")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -469,7 +503,7 @@ impl KnowledgeStore {
                 .unwrap();
 
             for i in 0..batch.num_rows() {
-                unique_urls.insert(source_urls.value(i).to_string());
+                unique_urls.insert(sources_col.value(i).to_string());
 
                 let indexed_millis = indexed_ats.value(i);
                 if let Some(indexed) = DateTime::from_timestamp_millis(indexed_millis) {
@@ -502,8 +536,8 @@ impl KnowledgeStore {
             std::collections::HashMap::new();
 
         for batch in batches {
-            let source_urls = batch
-                .column_by_name("source_url")
+            let sources_col = batch
+                .column_by_name("source")
                 .unwrap()
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -522,7 +556,7 @@ impl KnowledgeStore {
                 .unwrap();
 
             for i in 0..batch.num_rows() {
-                let url = source_urls.value(i).to_string();
+                let url = sources_col.value(i).to_string();
                 let title = source_titles.value(i).to_string();
                 let last_checked_millis = last_checkeds.value(i);
                 let last_checked = DateTime::from_timestamp_millis(last_checked_millis)
@@ -553,5 +587,324 @@ impl KnowledgeStore {
         }
 
         Ok(result)
+    }
+
+    /// Check if a source exists for a given session
+    pub async fn has_source_in_session(&self, source: &str, session_id: &str) -> Result<bool> {
+        let query = self
+            .table
+            .query()
+            .only_if(format!(
+                "source = '{}' AND session_id = '{}'",
+                Self::quote_filter_string(source),
+                Self::quote_filter_string(session_id)
+            ))
+            .limit(1);
+
+        let results = query.execute().await?;
+        let batches: Vec<RecordBatch> = results.try_collect().await?;
+        Ok(!batches.is_empty() && batches[0].num_rows() > 0)
+    }
+
+    /// Delete stored content by source and session
+    pub async fn delete_by_source_and_session(&self, source: &str, session_id: &str) -> Result<()> {
+        self.table
+            .delete(&format!(
+                "source = '{}' AND session_id = '{}'",
+                Self::quote_filter_string(source),
+                Self::quote_filter_string(session_id)
+            ))
+            .await?;
+        Ok(())
+    }
+
+    /// Clean up expired session-scoped chunks (crash recovery)
+    pub async fn cleanup_expired_sessions(&self, ttl_hours: u64) -> Result<()> {
+        let cutoff = Utc::now() - Duration::hours(ttl_hours as i64);
+        let cutoff_millis = cutoff.timestamp_millis();
+        self.table
+            .delete(&format!(
+                "session_id IS NOT NULL AND indexed_at < {}",
+                cutoff_millis
+            ))
+            .await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to create a store with a unique temp directory
+    async fn test_store(vector_dim: usize) -> KnowledgeStore {
+        let db_path = std::env::temp_dir().join(format!("octobrain_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&db_path).unwrap();
+
+        let db = connect(db_path.to_str().unwrap()).execute().await.unwrap();
+        let schema = KnowledgeStore::build_schema(vector_dim);
+        KnowledgeStore::initialize_table(&db, &schema)
+            .await
+            .unwrap();
+        let table = db.open_table("knowledge_chunks").execute().await.unwrap();
+
+        KnowledgeStore {
+            table,
+            schema,
+            vector_dim,
+        }
+    }
+
+    fn make_chunk(id: &str, source: &str, content: &str) -> KnowledgeChunk {
+        KnowledgeChunk {
+            id: id.to_string(),
+            source: source.to_string(),
+            source_title: "Test".to_string(),
+            chunk_index: 0,
+            content: content.to_string(),
+            parent_content: None,
+            section_path: vec![],
+            char_start: 0,
+            char_end: content.len(),
+        }
+    }
+
+    fn dummy_embedding(dim: usize) -> Vec<f32> {
+        vec![0.1; dim]
+    }
+
+    #[tokio::test]
+    async fn test_store_and_search_persistent() {
+        let dim = 4;
+        let store = test_store(dim).await;
+        let chunk = make_chunk("c1", "https://example.com", "hello world test content");
+        let embedding = dummy_embedding(dim);
+
+        store
+            .store_chunks(
+                "https://example.com",
+                "Example",
+                "hash1",
+                &[chunk],
+                &[embedding.clone()],
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Search without session filter — should find persistent content
+        let results = store
+            .search(&embedding, "hello", None, 10, false, None)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].session_scoped);
+        assert_eq!(results[0].chunk.source, "https://example.com");
+    }
+
+    #[tokio::test]
+    async fn test_store_and_search_session_scoped() {
+        let dim = 4;
+        let store = test_store(dim).await;
+        let chunk = make_chunk("c1", "stored://my_key", "session specific content");
+        let embedding = dummy_embedding(dim);
+
+        store
+            .store_chunks(
+                "stored://my_key",
+                "My Key",
+                "hash1",
+                &[chunk],
+                &[embedding.clone()],
+                Some("session-abc"),
+            )
+            .await
+            .unwrap();
+
+        // Search with matching session — should find it
+        let results = store
+            .search(&embedding, "session", None, 10, false, Some("session-abc"))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].session_scoped);
+        assert_eq!(results[0].chunk.source, "stored://my_key");
+    }
+
+    #[tokio::test]
+    async fn test_session_isolation() {
+        let dim = 4;
+        let store = test_store(dim).await;
+        let chunk = make_chunk("c1", "stored://secret", "session A data");
+        let embedding = dummy_embedding(dim);
+
+        // Store with session A
+        store
+            .store_chunks(
+                "stored://secret",
+                "Secret",
+                "hash1",
+                &[chunk],
+                &[embedding.clone()],
+                Some("session-A"),
+            )
+            .await
+            .unwrap();
+
+        // Search with session B — should NOT find session A's data
+        let results = store
+            .search(&embedding, "secret", None, 10, false, Some("session-B"))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_persistent_visible_to_all_sessions() {
+        let dim = 4;
+        let store = test_store(dim).await;
+        let chunk = make_chunk("c1", "https://docs.rs", "persistent docs");
+        let embedding = dummy_embedding(dim);
+
+        // Store persistent (no session)
+        store
+            .store_chunks(
+                "https://docs.rs",
+                "Docs",
+                "hash1",
+                &[chunk],
+                &[embedding.clone()],
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Search with any session — should find persistent
+        let results = store
+            .search(&embedding, "docs", None, 10, false, Some("any-session"))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].session_scoped);
+    }
+
+    #[tokio::test]
+    async fn test_has_source_in_session() {
+        let dim = 4;
+        let store = test_store(dim).await;
+        let chunk = make_chunk("c1", "stored://key1", "content");
+        let embedding = dummy_embedding(dim);
+
+        store
+            .store_chunks(
+                "stored://key1",
+                "Key1",
+                "hash1",
+                &[chunk],
+                &[embedding],
+                Some("sess1"),
+            )
+            .await
+            .unwrap();
+
+        assert!(store
+            .has_source_in_session("stored://key1", "sess1")
+            .await
+            .unwrap());
+        assert!(!store
+            .has_source_in_session("stored://key1", "sess2")
+            .await
+            .unwrap());
+        assert!(!store
+            .has_source_in_session("stored://key2", "sess1")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_delete_by_source_and_session() {
+        let dim = 4;
+        let store = test_store(dim).await;
+        let chunk = make_chunk("c1", "stored://key1", "content to delete");
+        let embedding = dummy_embedding(dim);
+
+        store
+            .store_chunks(
+                "stored://key1",
+                "Key1",
+                "hash1",
+                &[chunk],
+                &[embedding.clone()],
+                Some("sess1"),
+            )
+            .await
+            .unwrap();
+
+        assert!(store
+            .has_source_in_session("stored://key1", "sess1")
+            .await
+            .unwrap());
+
+        store
+            .delete_by_source_and_session("stored://key1", "sess1")
+            .await
+            .unwrap();
+
+        assert!(!store
+            .has_source_in_session("stored://key1", "sess1")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_mixed_persistent_and_session_search() {
+        let dim = 4;
+        let store = test_store(dim).await;
+        let embedding = dummy_embedding(dim);
+
+        // Store persistent chunk
+        let persistent = make_chunk("p1", "https://example.com", "persistent data");
+        store
+            .store_chunks(
+                "https://example.com",
+                "Example",
+                "hash1",
+                &[persistent],
+                &[embedding.clone()],
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Store session chunk
+        let session = make_chunk("s1", "stored://notes", "session data");
+        store
+            .store_chunks(
+                "stored://notes",
+                "Notes",
+                "hash2",
+                &[session],
+                &[embedding.clone()],
+                Some("sess1"),
+            )
+            .await
+            .unwrap();
+
+        // Search with matching session — should see both
+        let results = store
+            .search(&embedding, "data", None, 10, false, Some("sess1"))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+
+        let session_count = results.iter().filter(|r| r.session_scoped).count();
+        let persistent_count = results.iter().filter(|r| !r.session_scoped).count();
+        assert_eq!(session_count, 1);
+        assert_eq!(persistent_count, 1);
     }
 }

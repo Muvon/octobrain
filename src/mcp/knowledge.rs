@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use anyhow::Result;
-use serde_json::Value;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -44,24 +43,27 @@ impl KnowledgeProvider {
         })
     }
 
-    /// Execute knowledge search
-    pub async fn execute_knowledge_search(&self, arguments: &Value) -> Result<String, McpError> {
-        let query = arguments
-            .get("query")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::invalid_params("Missing required parameter: query", "knowledge_search")
-            })?;
-
-        let source_url = arguments.get("source_url").and_then(|v| v.as_str());
-
-        let manager = self.knowledge_manager.lock().await;
-        let results = manager.search(query, source_url).await.map_err(|e| {
-            McpError::internal_error(
-                format!("Knowledge search failed: {}", e),
-                "knowledge_search",
+    /// Execute search command
+    pub async fn execute_search(
+        &self,
+        query: Option<&str>,
+        source: Option<&str>,
+        session_id: &str,
+    ) -> Result<String, McpError> {
+        let query = query.ok_or_else(|| {
+            McpError::invalid_params(
+                "Missing required parameter: query (required for search command)",
+                "knowledge",
             )
         })?;
+
+        let manager = self.knowledge_manager.lock().await;
+        let results = manager
+            .search(query, source, Some(session_id))
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Knowledge search failed: {}", e), "knowledge")
+            })?;
 
         if results.is_empty() {
             return Ok("No results found".to_string());
@@ -73,8 +75,12 @@ impl KnowledgeProvider {
             output.push('\n');
             output.push_str(&result.chunk.source_title);
             output.push('\n');
-            output.push_str(&result.chunk.source_url);
+            output.push_str(&result.chunk.source);
             output.push('\n');
+
+            if result.session_scoped {
+                output.push_str("[SESSION] ");
+            }
 
             if !result.chunk.section_path.is_empty() {
                 output.push_str(&result.chunk.section_path.join(" > "));
@@ -98,5 +104,60 @@ impl KnowledgeProvider {
         }
 
         Ok(output)
+    }
+
+    /// Execute store command
+    pub async fn execute_store(
+        &self,
+        key: Option<&str>,
+        content: Option<&str>,
+        session_id: &str,
+    ) -> Result<String, McpError> {
+        let key = key.ok_or_else(|| {
+            McpError::invalid_params(
+                "Missing required parameter: key (required for store command)",
+                "knowledge",
+            )
+        })?;
+        let content = content.ok_or_else(|| {
+            McpError::invalid_params(
+                "Missing required parameter: content (required for store command)",
+                "knowledge",
+            )
+        })?;
+
+        let manager = self.knowledge_manager.lock().await;
+        let result = manager
+            .store_content(key, content, session_id)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Knowledge store failed: {}", e), "knowledge")
+            })?;
+
+        Ok(format!(
+            "Stored '{}' as {} ({} chunks indexed)",
+            key, result.source, result.chunks_created
+        ))
+    }
+
+    /// Execute delete command
+    pub async fn execute_delete(
+        &self,
+        key: Option<&str>,
+        session_id: &str,
+    ) -> Result<String, McpError> {
+        let key = key.ok_or_else(|| {
+            McpError::invalid_params(
+                "Missing required parameter: key (required for delete command)",
+                "knowledge",
+            )
+        })?;
+
+        let manager = self.knowledge_manager.lock().await;
+        manager.delete_content(key, session_id).await.map_err(|e| {
+            McpError::internal_error(format!("Knowledge delete failed: {}", e), "knowledge")
+        })?;
+
+        Ok(format!("Deleted stored knowledge '{}'", key))
     }
 }

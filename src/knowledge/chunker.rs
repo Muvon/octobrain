@@ -279,7 +279,7 @@ impl ContentChunker {
 
         Some(KnowledgeChunk {
             id: uuid::Uuid::new_v4().to_string(),
-            source_url: url.to_string(),
+            source: url.to_string(),
             source_title: title.to_string(),
             chunk_index,
             content: full_content,
@@ -320,7 +320,7 @@ impl ContentChunker {
                     let child_content = format!("{}\n\n{}", header, split);
                     result.push(KnowledgeChunk {
                         id: uuid::Uuid::new_v4().to_string(),
-                        source_url: chunk.source_url.clone(),
+                        source: chunk.source.clone(),
                         source_title: chunk.source_title.clone(),
                         chunk_index: global_index,
                         content: child_content,
@@ -481,6 +481,7 @@ mod tests {
             chunk_overlap: 20,
             outdating_days: 90,
             max_results: 10,
+            session_ttl_hours: 24,
         };
         let chunker = ContentChunker::new(config);
         let text = "a".repeat(250);
@@ -536,7 +537,7 @@ mod tests {
 
         let chunk = KnowledgeChunk {
             id: "test-id".to_string(),
-            source_url: "https://example.com".to_string(),
+            source: "https://example.com".to_string(),
             source_title: "Test Page".to_string(),
             chunk_index: 0,
             content: "Test content".to_string(),
@@ -547,7 +548,7 @@ mod tests {
         };
 
         assert_eq!(chunk.id, "test-id");
-        assert_eq!(chunk.source_url, "https://example.com");
+        assert_eq!(chunk.source, "https://example.com");
         assert_eq!(chunk.source_title, "Test Page");
         assert_eq!(chunk.chunk_index, 0);
         assert_eq!(chunk.content, "Test content");
@@ -576,15 +577,81 @@ mod tests {
         use crate::knowledge::types::IndexResult;
 
         let result = IndexResult {
-            url: "https://example.com".to_string(),
+            source: "https://example.com".to_string(),
             chunks_created: 5,
             was_cached: false,
             content_changed: true,
         };
 
-        assert_eq!(result.url, "https://example.com");
+        assert_eq!(result.source, "https://example.com");
         assert_eq!(result.chunks_created, 5);
         assert!(!result.was_cached);
         assert!(result.content_changed);
+    }
+
+    #[test]
+    fn test_store_result_fields() {
+        use crate::knowledge::types::StoreResult;
+
+        let result = StoreResult {
+            source: "stored://my_key".to_string(),
+            chunks_created: 3,
+        };
+
+        assert_eq!(result.source, "stored://my_key");
+        assert_eq!(result.chunks_created, 3);
+    }
+
+    #[test]
+    fn test_search_result_session_scoped() {
+        use crate::knowledge::types::{KnowledgeChunk, KnowledgeSearchResult};
+
+        let chunk = KnowledgeChunk {
+            id: "test".to_string(),
+            source: "stored://key".to_string(),
+            source_title: "Test".to_string(),
+            chunk_index: 0,
+            content: "content".to_string(),
+            parent_content: None,
+            section_path: vec![],
+            char_start: 0,
+            char_end: 7,
+        };
+
+        let result = KnowledgeSearchResult {
+            chunk,
+            relevance_score: 0.95,
+            session_scoped: true,
+        };
+
+        assert!(result.session_scoped);
+        assert_eq!(result.relevance_score, 0.95);
+        assert!(result.chunk.source.starts_with("stored://"));
+    }
+
+    #[test]
+    fn test_search_result_persistent() {
+        use crate::knowledge::types::{KnowledgeChunk, KnowledgeSearchResult};
+
+        let chunk = KnowledgeChunk {
+            id: "test".to_string(),
+            source: "https://example.com".to_string(),
+            source_title: "Example".to_string(),
+            chunk_index: 0,
+            content: "content".to_string(),
+            parent_content: None,
+            section_path: vec![],
+            char_start: 0,
+            char_end: 7,
+        };
+
+        let result = KnowledgeSearchResult {
+            chunk,
+            relevance_score: 0.80,
+            session_scoped: false,
+        };
+
+        assert!(!result.session_scoped);
+        assert!(result.chunk.source.starts_with("https://"));
     }
 }

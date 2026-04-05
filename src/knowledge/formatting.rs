@@ -21,7 +21,7 @@ pub fn format_search_results(results: &[KnowledgeSearchResult]) -> String {
         output.push('\n');
 
         // Source URL
-        output.push_str(&result.chunk.source_url.bright_black().to_string());
+        output.push_str(&result.chunk.source.bright_black().to_string());
         output.push('\n');
 
         // Section path

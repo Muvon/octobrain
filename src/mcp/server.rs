@@ -40,11 +40,23 @@ use crate::mcp::knowledge::KnowledgeProvider;
 use crate::mcp::memory::MemoryProvider;
 
 /// Session state for project/role locking from MCP capabilities
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SessionState {
     pub project: Option<String>,
     pub role: Option<String>,
+    pub session_id: String,
     pub locked: bool,
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self {
+            project: None,
+            role: None,
+            session_id: uuid::Uuid::new_v4().to_string(),
+            locked: false,
+        }
+    }
 }
 
 /// MCP Server using rmcp SDK
@@ -358,14 +370,32 @@ pub struct RelateParams {
     pub description: Option<String>,
 }
 
-/// Knowledge search tool parameters
+/// Command for the knowledge tool
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct KnowledgeSearchParams {
-    /// What to search for, in natural language
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeAction {
+    /// Semantic search across indexed knowledge
+    Search,
+    /// Store raw text content under a unique key (session-scoped)
+    Store,
+    /// Delete stored content by key
+    Delete,
+}
+
+/// Knowledge tool parameters
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct KnowledgeParams {
+    /// Command to execute
+    pub command: KnowledgeAction,
+    /// [search] What to search for, in natural language (required for search)
     #[schemars(length(min = 3, max = 500))]
-    pub query: String,
-    /// URL or local file path to fetch, index, and search. Supports http/https URLs, file:///path, or /absolute/path. File types: .html, .txt, .md, .pdf, .docx. If omitted, searches all previously indexed sources.
-    pub source_url: Option<String>,
+    pub query: Option<String>,
+    /// [search] Source filter — URL or local file path to auto-index and search within. Supports http/https URLs, file:///path, or /absolute/path. File types: .html, .txt, .md, .pdf, .docx. Omit to search all indexed sources.
+    pub source: Option<String>,
+    /// [store/delete] Unique identifier key for the content. Error if key already exists on store — delete first to replace.
+    pub key: Option<String>,
+    /// [store] Raw text content to store and index (required for store)
+    pub content: Option<String>,
 }
 
 // ============================================================================
@@ -534,20 +564,44 @@ impl McpServer {
     }
 
     #[tool(
-        name = "knowledge_search",
-        description = "Search indexed knowledge semantically. Provide source_url to fetch and index a web page or local file on-the-fly, then search its content. Supports: web URLs (http/https), local files (file:///path or /absolute/path). File types: .html, .txt, .md, .pdf, .docx. Omit source_url to search across all previously indexed sources."
+        name = "knowledge",
+        description = "Knowledge base with three commands. 'search': semantic search across all indexed content — provide source (URL/file) to auto-index on-the-fly, omit to search all. 'store': save raw text under a unique key (session-scoped, auto-cleaned) — error if key exists, delete first to replace. 'delete': remove stored content by key. Supports URLs, local files (.html, .txt, .md, .pdf, .docx)."
     )]
-    async fn knowledge_search(
+    async fn knowledge(
         &self,
-        Parameters(params): Parameters<KnowledgeSearchParams>,
+        Parameters(params): Parameters<KnowledgeParams>,
     ) -> Result<String, McpError> {
         let provider = self.get_or_init_knowledge().await?;
+        let session = self.session.lock().await;
+        let session_id = session.session_id.clone();
+        drop(session);
 
-        let args = serde_json::to_value(&params).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize params: {}", e), None)
-        })?;
-
-        provider.execute_knowledge_search(&args).await.map_err(|e| {
+        match params.command {
+            KnowledgeAction::Search => {
+                provider
+                    .execute_search(
+                        params.query.as_deref(),
+                        params.source.as_deref(),
+                        &session_id,
+                    )
+                    .await
+            }
+            KnowledgeAction::Store => {
+                provider
+                    .execute_store(
+                        params.key.as_deref(),
+                        params.content.as_deref(),
+                        &session_id,
+                    )
+                    .await
+            }
+            KnowledgeAction::Delete => {
+                provider
+                    .execute_delete(params.key.as_deref(), &session_id)
+                    .await
+            }
+        }
+        .map_err(|e| {
             McpError::internal_error(
                 e.message,
                 Some(serde_json::to_value(e.operation).unwrap_or_default()),
@@ -577,7 +631,7 @@ impl ServerHandler for McpServer {
                  Use 'memorize' to store information, 'remember' for semantic search, \
                  'forget' to delete memories, 'auto_link' to find related memories, \
                  'memory_graph' to explore memory connections, 'relate' to create relationships, \
-                 and 'knowledge_search' to search indexed web content.",
+                 and 'knowledge' to search indexed web content.",
             )
     }
 
@@ -598,10 +652,17 @@ impl ServerHandler for McpServer {
                     .get("role")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
+                let session_id = session_obj
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
 
                 let mut session = self.session.lock().await;
                 session.project = project;
                 session.role = role;
+                if let Some(sid) = session_id {
+                    session.session_id = sid;
+                }
                 session.locked = true;
 
                 debug!(
