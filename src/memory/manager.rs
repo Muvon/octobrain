@@ -14,8 +14,9 @@
 
 use anyhow::Result;
 use chrono::Utc;
+use std::path::PathBuf;
 
-use super::git_utils::GitUtils;
+use super::git_utils::{FileFate, GitUtils, RenameMap};
 use super::store::MemoryStore;
 use super::types::{
     Memory, MemoryConfig, MemoryMetadata, MemoryQuery, MemoryRelationship, MemorySearchResult,
@@ -39,6 +40,8 @@ pub struct MemorizeParams {
 pub struct MemoryManager {
     store: MemoryStore,
     config: MemoryConfig,
+    /// Path to the stale-check marker file for incremental git scanning
+    stale_check_marker: PathBuf,
 }
 
 impl MemoryManager {
@@ -65,7 +68,12 @@ impl MemoryManager {
         // Use shared memory database path (single DB for all projects)
         let db_path = crate::storage::get_memory_database_path()?;
 
-        // Pass project_key as-is: None = no project filter (all projects visible on reads)
+        // Marker file for incremental stale-check: {db_dir}/.stale_check_{project_hash}
+        let marker_name = format!(
+            ".stale_check_{}",
+            project_key.as_deref().unwrap_or("default")
+        );
+        let stale_check_marker = db_path.join(marker_name);
 
         // Create embedding provider using model from config
         let model_string = &config.embedding.model;
@@ -86,6 +94,7 @@ impl MemoryManager {
         let mut manager = Self {
             store,
             config: memory_config,
+            stale_check_marker,
         };
 
         // Lazy cleanup of stale file references on init (like knowledge session cleanup)
@@ -96,53 +105,135 @@ impl MemoryManager {
         Ok(manager)
     }
 
-    /// Clean up memories whose related_files no longer exist on disk.
-    /// - ALL files gone → delete the memory entirely
-    /// - Some files gone → remove dead paths and penalize importance
-    async fn cleanup_stale_references(&mut self) -> Result<usize> {
-        let memories = self.store.get_memories_with_files().await?;
-        let mut cleaned = 0;
+    /// Read the last commit we scanned for stale references.
+    fn read_stale_check_marker(&self) -> Option<String> {
+        std::fs::read_to_string(&self.stale_check_marker)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
 
-        for memory in memories {
+    /// Write the current HEAD as the last scanned commit.
+    fn write_stale_check_marker(&self, commit: &str) {
+        std::fs::write(&self.stale_check_marker, commit).ok();
+    }
+
+    /// Clean up memories whose related_files no longer exist on disk.
+    /// Git-aware: detects renames and auto-updates references instead of deleting.
+    /// - Renamed files → update reference (self-healing)
+    /// - ALL files deleted → delete the memory entirely
+    /// - Some files deleted → remove dead paths, penalize importance
+    ///   After cleanup, propagates staleness through the relationship graph.
+    ///   Incremental: tracks the last scanned commit in a marker file.
+    /// - HEAD unchanged since last check → skip entirely
+    /// - HEAD advanced → scan only the delta (last_checked..HEAD)
+    /// - First run → scan from oldest memory's commit
+    async fn cleanup_stale_references(&mut self) -> Result<usize> {
+        // Determine scan range
+        let current_head = match GitUtils::get_current_commit() {
+            Some(h) => h,
+            None => return Ok(0), // not in a git repo
+        };
+
+        let last_checked = self.read_stale_check_marker();
+        if last_checked.as_deref() == Some(current_head.as_str()) {
+            return Ok(0); // HEAD unchanged — nothing to do
+        }
+
+        let memories = self.store.get_memories_with_files().await?;
+        if memories.is_empty() {
+            self.write_stale_check_marker(&current_head);
+            return Ok(0);
+        }
+
+        // Build rename map for the scan range (single git call)
+        let scan_from = match &last_checked {
+            Some(commit) => commit.as_str(),
+            None => {
+                // First run: find oldest memory's commit
+                memories
+                    .iter()
+                    .filter_map(|m| {
+                        m.metadata
+                            .git_commit
+                            .as_deref()
+                            .filter(|c| !c.is_empty())
+                            .map(|c| (m.created_at, c))
+                    })
+                    .min_by_key(|(created_at, _)| *created_at)
+                    .map(|(_, commit)| commit)
+                    .unwrap_or(&current_head)
+            }
+        };
+        let rename_map = RenameMap::build(scan_from);
+
+        let mut cleaned = 0;
+        let mut affected_ids: Vec<String> = Vec::new();
+
+        for memory in &memories {
             if memory.metadata.related_files.is_empty() {
                 continue;
             }
 
-            let (alive, dead): (Vec<_>, Vec<_>) = memory
-                .metadata
-                .related_files
-                .iter()
-                .partition(|f| GitUtils::file_exists(f));
+            let mut alive: Vec<String> = Vec::new();
+            let mut dead_count: usize = 0;
+            let mut renamed = false;
 
-            if dead.is_empty() {
-                continue; // all files still exist
+            for file in &memory.metadata.related_files {
+                match GitUtils::check_file_fate(file, Some(&rename_map)) {
+                    FileFate::Exists => alive.push(file.clone()),
+                    FileFate::Renamed(new_path) => {
+                        tracing::info!(
+                            "Memory '{}': file '{}' renamed to '{}'",
+                            memory.title,
+                            file,
+                            new_path
+                        );
+                        alive.push(new_path);
+                        renamed = true;
+                    }
+                    FileFate::Deleted => dead_count += 1,
+                    FileFate::Unknown => {
+                        if GitUtils::file_exists(file) {
+                            alive.push(file.clone());
+                        } else {
+                            dead_count += 1;
+                        }
+                    }
+                }
+            }
+
+            if dead_count == 0 && !renamed {
+                continue;
             }
 
             if alive.is_empty() {
-                // ALL files are gone — delete the memory
                 self.store.delete_memory(&memory.id).await?;
+                affected_ids.push(memory.id.clone());
                 tracing::info!(
-                    "Deleted stale memory '{}' — all {} related files are gone",
+                    "Deleted stale memory '{}' — all related files are gone",
                     memory.title,
-                    dead.len()
                 );
             } else {
-                // Partial — remove dead files and penalize importance
                 let mut updated = memory.clone();
-                updated.metadata.related_files = alive.into_iter().cloned().collect();
+                updated.metadata.related_files = alive;
 
-                let penalty = self
-                    .config
-                    .stale_ref_importance_penalty
-                    .powi(dead.len() as i32);
-                updated.metadata.importance = (updated.metadata.importance * penalty)
-                    .max(self.config.min_importance_threshold);
+                if dead_count > 0 {
+                    let penalty = self
+                        .config
+                        .stale_ref_importance_penalty
+                        .powi(dead_count as i32);
+                    updated.metadata.importance = (updated.metadata.importance * penalty)
+                        .max(self.config.min_importance_threshold);
+                    affected_ids.push(memory.id.clone());
+                }
 
                 self.store.update_memory(&updated).await?;
                 tracing::info!(
-                    "Cleaned stale memory '{}' — removed {} dead files, importance now {:.2}",
+                    "Updated memory '{}' — {} renamed, {} dead, importance {:.2}",
                     updated.title,
-                    dead.len(),
+                    if renamed { "some" } else { "none" },
+                    dead_count,
                     updated.metadata.importance
                 );
             }
@@ -150,11 +241,64 @@ impl MemoryManager {
             cleaned += 1;
         }
 
+        // Propagate staleness through the relationship graph (1 hop)
+        if !affected_ids.is_empty() {
+            let propagated = self.propagate_staleness(&affected_ids).await?;
+            if propagated > 0 {
+                tracing::info!(
+                    "Staleness propagation: penalized {} related memories",
+                    propagated
+                );
+            }
+        }
+
         if cleaned > 0 {
             tracing::info!("Stale reference cleanup: processed {} memories", cleaned);
         }
 
+        // Mark this HEAD as scanned
+        self.write_stale_check_marker(&current_head);
+
         Ok(cleaned)
+    }
+
+    /// Propagate importance penalties through relationships (1 hop).
+    /// DependsOn → 0.5x penalty, RelatedTo/AutoLinked → 0.9x penalty.
+    async fn propagate_staleness(&mut self, stale_ids: &[String]) -> Result<usize> {
+        let mut penalized = 0;
+        let mut seen = std::collections::HashSet::new();
+
+        for stale_id in stale_ids {
+            let rels = self.store.get_memory_relationships(stale_id).await?;
+            for rel in rels {
+                // Find the neighbor (the other end of the relationship)
+                let neighbor_id = if rel.source_id == *stale_id {
+                    &rel.target_id
+                } else {
+                    &rel.source_id
+                };
+
+                // Skip if already penalized or if it's also stale
+                if seen.contains(neighbor_id) || stale_ids.contains(neighbor_id) {
+                    continue;
+                }
+                seen.insert(neighbor_id.clone());
+
+                let penalty = match rel.relationship_type {
+                    RelationshipType::DependsOn => 0.5,
+                    _ => 0.9, // RelatedTo, AutoLinked, Similar, etc.
+                };
+
+                if let Some(mut neighbor) = self.store.get_memory(neighbor_id).await? {
+                    neighbor.metadata.importance = (neighbor.metadata.importance * penalty)
+                        .max(self.config.min_importance_threshold);
+                    self.store.update_memory(&neighbor).await?;
+                    penalized += 1;
+                }
+            }
+        }
+
+        Ok(penalized)
     }
 
     /// Memorize new information with automatic Git context
