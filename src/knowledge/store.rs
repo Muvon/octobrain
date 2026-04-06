@@ -686,7 +686,7 @@ mod tests {
                 "Example",
                 "hash1",
                 &[chunk],
-                &[embedding.clone()],
+                std::slice::from_ref(&embedding),
                 None,
             )
             .await
@@ -716,7 +716,7 @@ mod tests {
                 "My Key",
                 "hash1",
                 &[chunk],
-                &[embedding.clone()],
+                std::slice::from_ref(&embedding),
                 Some("session-abc"),
             )
             .await
@@ -747,7 +747,7 @@ mod tests {
                 "Secret",
                 "hash1",
                 &[chunk],
-                &[embedding.clone()],
+                std::slice::from_ref(&embedding),
                 Some("session-A"),
             )
             .await
@@ -776,7 +776,7 @@ mod tests {
                 "Docs",
                 "hash1",
                 &[chunk],
-                &[embedding.clone()],
+                std::slice::from_ref(&embedding),
                 None,
             )
             .await
@@ -838,7 +838,7 @@ mod tests {
                 "Key1",
                 "hash1",
                 &[chunk],
-                &[embedding.clone()],
+                std::slice::from_ref(&embedding),
                 Some("sess1"),
             )
             .await
@@ -874,7 +874,7 @@ mod tests {
                 "Example",
                 "hash1",
                 &[persistent],
-                &[embedding.clone()],
+                std::slice::from_ref(&embedding),
                 None,
             )
             .await
@@ -888,7 +888,7 @@ mod tests {
                 "Notes",
                 "hash2",
                 &[session],
-                &[embedding.clone()],
+                std::slice::from_ref(&embedding),
                 Some("sess1"),
             )
             .await
