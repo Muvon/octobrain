@@ -70,6 +70,17 @@ impl GitUtils {
         }
     }
 
+    /// Check if a file exists relative to the repository root.
+    /// Returns true if the repo root can be resolved and the file exists on disk.
+    pub fn file_exists(relative_path: &str) -> bool {
+        if let Some(root) = Self::get_repository_root() {
+            Path::new(&root).join(relative_path).exists()
+        } else {
+            // No git repo — try the path as-is (could be absolute)
+            Path::new(relative_path).exists()
+        }
+    }
+
     /// Get the relative path from repository root
     pub fn get_relative_path<P: AsRef<Path>>(file_path: P) -> Option<String> {
         if let Some(repo_root) = Self::get_repository_root() {

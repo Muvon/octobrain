@@ -83,10 +83,78 @@ impl MemoryManager {
         )
         .await?;
 
-        Ok(Self {
+        let mut manager = Self {
             store,
             config: memory_config,
-        })
+        };
+
+        // Lazy cleanup of stale file references on init (like knowledge session cleanup)
+        if manager.config.stale_ref_cleanup_enabled {
+            manager.cleanup_stale_references().await.ok();
+        }
+
+        Ok(manager)
+    }
+
+    /// Clean up memories whose related_files no longer exist on disk.
+    /// - ALL files gone → delete the memory entirely
+    /// - Some files gone → remove dead paths and penalize importance
+    async fn cleanup_stale_references(&mut self) -> Result<usize> {
+        let memories = self.store.get_memories_with_files().await?;
+        let mut cleaned = 0;
+
+        for memory in memories {
+            if memory.metadata.related_files.is_empty() {
+                continue;
+            }
+
+            let (alive, dead): (Vec<_>, Vec<_>) = memory
+                .metadata
+                .related_files
+                .iter()
+                .partition(|f| GitUtils::file_exists(f));
+
+            if dead.is_empty() {
+                continue; // all files still exist
+            }
+
+            if alive.is_empty() {
+                // ALL files are gone — delete the memory
+                self.store.delete_memory(&memory.id).await?;
+                tracing::info!(
+                    "Deleted stale memory '{}' — all {} related files are gone",
+                    memory.title,
+                    dead.len()
+                );
+            } else {
+                // Partial — remove dead files and penalize importance
+                let mut updated = memory.clone();
+                updated.metadata.related_files = alive.into_iter().cloned().collect();
+
+                let penalty = self
+                    .config
+                    .stale_ref_importance_penalty
+                    .powi(dead.len() as i32);
+                updated.metadata.importance = (updated.metadata.importance * penalty)
+                    .max(self.config.min_importance_threshold);
+
+                self.store.update_memory(&updated).await?;
+                tracing::info!(
+                    "Cleaned stale memory '{}' — removed {} dead files, importance now {:.2}",
+                    updated.title,
+                    dead.len(),
+                    updated.metadata.importance
+                );
+            }
+
+            cleaned += 1;
+        }
+
+        if cleaned > 0 {
+            tracing::info!("Stale reference cleanup: processed {} memories", cleaned);
+        }
+
+        Ok(cleaned)
     }
 
     /// Memorize new information with automatic Git context
@@ -525,9 +593,17 @@ impl MemoryManager {
         }
 
         // 4. File-based relationships: link memories that share related files
-        if !memory.metadata.related_files.is_empty() {
+        //    Only consider files that still exist on disk to avoid linking via dead references
+        let live_files: Vec<String> = memory
+            .metadata
+            .related_files
+            .iter()
+            .filter(|f| GitUtils::file_exists(f))
+            .cloned()
+            .collect();
+        if !live_files.is_empty() {
             let file_query = MemoryQuery {
-                related_files: Some(memory.metadata.related_files.clone()),
+                related_files: Some(live_files),
                 limit: Some(10),
                 ..Default::default()
             };
@@ -619,9 +695,13 @@ impl MemoryManager {
         Ok(graph)
     }
 
-    /// Clean up old memories
+    /// Clean up old memories and stale file references
     pub async fn cleanup(&mut self) -> Result<usize> {
-        self.store.cleanup_old_memories().await
+        let mut total = self.store.cleanup_old_memories().await?;
+        if self.config.stale_ref_cleanup_enabled {
+            total += self.cleanup_stale_references().await?;
+        }
+        Ok(total)
     }
 
     /// Clear all memory data (DANGEROUS: deletes all memories and relationships)

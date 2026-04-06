@@ -1015,6 +1015,35 @@ impl MemoryStore {
         Ok((projects, roles))
     }
 
+    /// Get all memories that have non-empty related_files (for stale reference cleanup).
+    /// Returns (id, related_files, importance) tuples to avoid loading full embeddings.
+    pub async fn get_memories_with_files(&self) -> Result<Vec<Memory>> {
+        let filter = match self.project_key.as_deref() {
+            Some(key) => format!(
+                "project_key = '{}' AND related_files IS NOT NULL AND related_files != '[]'",
+                key
+            ),
+            None => "related_files IS NOT NULL AND related_files != '[]'".to_string(),
+        };
+
+        let mut results = self
+            .memories_table
+            .query()
+            .only_if(filter)
+            .execute()
+            .await?;
+
+        let mut memories = Vec::new();
+        while let Some(batch) = results.try_next().await? {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            memories.extend(self.batch_to_memories(&batch)?);
+        }
+
+        Ok(memories)
+    }
+
     /// Clean up old memories based on configuration
     pub async fn cleanup_old_memories(&mut self) -> Result<usize> {
         if let Some(cleanup_days) = self.config.auto_cleanup_days {

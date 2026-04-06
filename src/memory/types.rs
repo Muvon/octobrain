@@ -598,6 +598,14 @@ impl std::fmt::Display for RelationshipType {
     }
 }
 
+fn default_stale_ref_cleanup_enabled() -> bool {
+    true
+}
+
+fn default_stale_ref_importance_penalty() -> f32 {
+    0.3
+}
+
 /// Configuration for memory system
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
@@ -627,6 +635,14 @@ pub struct MemoryConfig {
     pub max_auto_links_per_memory: usize,
     /// Create bidirectional links
     pub bidirectional_links: bool,
+    /// Enable automatic cleanup of memories whose related_files no longer exist
+    #[serde(default = "default_stale_ref_cleanup_enabled")]
+    pub stale_ref_cleanup_enabled: bool,
+    /// Importance penalty multiplier for memories with missing file references (0.0-1.0).
+    /// Applied per missing file: if 2 of 3 files are gone, penalty is applied twice.
+    /// Memories where ALL files are gone are deleted entirely.
+    #[serde(default = "default_stale_ref_importance_penalty")]
+    pub stale_ref_importance_penalty: f32,
 }
 
 impl Default for MemoryConfig {
@@ -645,6 +661,8 @@ impl Default for MemoryConfig {
             auto_link_threshold: 0.78, // High threshold for quality links
             max_auto_links_per_memory: 5,
             bidirectional_links: true,
+            stale_ref_cleanup_enabled: true,
+            stale_ref_importance_penalty: 0.3, // Multiply importance by 0.3 per missing file
         }
     }
 }

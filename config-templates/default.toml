@@ -137,6 +137,17 @@ max_auto_links_per_memory = 5
 # Default: true
 bidirectional_links = true
 
+# Enable automatic cleanup of memories whose related_files no longer exist on disk.
+# On startup, memories with ALL files gone are deleted; partial loss penalizes importance.
+# Default: true
+stale_ref_cleanup_enabled = true
+
+# Importance penalty multiplier per missing file (0.0-1.0).
+# Applied as importance *= penalty^(number_of_dead_files).
+# Lower = harsher penalty. Memories with ALL files gone are deleted regardless.
+# Default: 0.3
+stale_ref_importance_penalty = 0.3
+
 [knowledge]
 # Size of each child chunk in characters — what gets embedded and matched.
 # Parent sections larger than this are split into children; the full section
