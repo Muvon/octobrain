@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.5.0] - 2026-04-08
+
+### 📋 Release Summary
+
+This release introduces local file indexing capabilities to the knowledge system (breaking change), enabling direct interaction with local files. Memory management has been significantly enhanced with new product and workflow memory categories, session-scoped storage, and automatic stale reference cleanup. The MCP protocol implementation has been upgraded to the official rmcp SDK, along with various dependency updates and documentation improvements.
+
+
+### 🚨 Breaking Changes
+
+⚠️ **Important**: This release contains breaking changes that may require code updates.
+
+- **knowledge**: support local file indexing `0ab5a13f`
+
+### ✨ New Features & Enhancements
+
+- **memory**: add stale file reference cleanup `46c8827d`
+- **knowledge**: add session-scoped storage and commands `21216453`
+- **memory**: add product and workflow memory type categories `04b145a1`
+- **mcp**: replace custom server with official rmcp SDK `1f581537`
+
+### 🔧 Improvements & Optimizations
+
+- **memory**: add git-aware stale reference cleanup `be812684`
+- **knowledge**: use std::slice::from_ref for single-element test slices `21f9da28`
+- **legal**: apply copyright header standards `556b1228`
+- **mcp**: use builder pattern for ServerInfo construction `8041b71a`
+- **mcp**: rename rmcp_server to server and add typed schemas `56b3b6d9`
+
+### 📚 Documentation & Examples
+
+- restructure README for clearer onboarding `78918bd1`
+
+### 🔄 Other Changes
+
+5 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.4.2] - 2026-03-21
 
 ### 📋 Release Summary
