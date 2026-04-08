@@ -1,341 +1,333 @@
-# Octobrain - Standalone Memory Management System
+# Octobrain
 
-Standalone memory management system for AI context and conversation state.
+> Persistent memory for AI assistants — store insights, decisions, and knowledge that survives across conversations.
 
-## Features
+[![Crates.io](https://img.shields.io/crates/v/octobrain.svg)](https://crates.io/crates/octobrain)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
 
-- **Semantic Search**: Find memories using natural language queries
-- **Vector Storage**: LanceDB for efficient vector similarity search
-- **Git Integration**: Automatic context tracking with Git commits
-- **Memory Commands**: Complete memory lifecycle management under `memory` subcommand
-- **Knowledge Base**: Web content indexing and semantic search for persistent knowledge
-- **MCP Server**: Model Context Protocol server exposing memory and knowledge tools
-- **Platform-Specific Storage**: Uses standard XDG data directories per OS
+**Octobrain** gives your AI assistant a long-term memory. Store code insights, architecture decisions, bug fixes, and knowledge — then retrieve them with semantic search in future sessions. Works as a CLI tool or as an MCP server for integration with Claude Desktop and other AI tools.
+
+## Why Octobrain?
+
+AI assistants start every conversation with zero context. You explain your project, your preferences, your decisions — every single time. Octobrain breaks that cycle:
+
+- **Persistent memory** — Insights survive across sessions, not just within them
+- **Semantic search** — Find memories by meaning, not exact keywords
+- **Auto-linking** — Related memories connect automatically (Zettelkasten-style)
+- **Knowledge indexing** — Ingest docs, articles, and files for retrieval
+- **MCP integration** — Works with Claude Desktop and other MCP-compatible tools
+
+## Quick Start
+
+```bash
+# Install from crates.io
+cargo install octobrain
+
+# Store your first memory
+octobrain memory memorize --title "API Design Pattern" \
+  --content "Use REST for CRUD, GraphQL for complex queries" \
+  --memory-type architecture --tags "api,design"
+
+# Search memories
+octobrain memory remember "how should I design APIs"
+
+# Start MCP server for Claude Desktop integration
+octobrain mcp
+```
 
 ## Installation
+
+### From crates.io (Recommended)
+
+```bash
+cargo install octobrain
+```
 
 ### From Source
 
 ```bash
-# Build with default features (fastembed + huggingface)
+# Clone and build
+git clone https://github.com/muvon/octobrain.git
+cd octobrain
 cargo build --release
 
-# Or build without default features (API-based embeddings only)
-cargo build --no-default-features --release
-
-# Or build with specific features
-cargo build --no-default-features --features fastembed --release
-cargo build --no-default-features --features huggingface --release
-cargo build --no-default-features --features "fastembed,huggingface" --release
-
-# Run the binary
+# Binary location
 ./target/release/octobrain --help
 ```
 
-### Features
+### Feature Flags
 
-Octobrain supports multiple embedding providers through feature flags:
+Octobrain supports multiple embedding providers:
 
-- **fastembed**: Local embedding models via FastEmbed (no API key required)
-- **huggingface**: Local embedding models via HuggingFace (no API key required)
-- **default**: Both fastembed and huggingface features enabled
+| Flag | Description | API Key Required |
+|------|-------------|------------------|
+| `fastembed` | Local embeddings via FastEmbed | No |
+| `huggingface` | Local embeddings via HuggingFace | No |
+| (default) | Both `fastembed` + `huggingface` | No |
+| (no features) | API-based: Voyage, OpenAI, Google, Jina | Yes |
 
-When building without default features (`--no-default-features`), you can use API-based embedding providers:
-- Voyage AI (requires `VOYAGE_API_KEY`)
-- OpenAI (requires `OPENAI_API_KEY`)
-- Google (requires `GOOGLE_API_KEY`)
-- Jina (requires `JINA_API_KEY`)
+```bash
+# Build with local embeddings (default, no API keys needed)
+cargo build --release
 
-Configure your embedding provider in `~/.local/share/octobrain/config.toml`:
-
-```toml
-[embedding]
-model = "voyage:voyage-3.5-lite"  # or "openai:text-embedding-3-small", etc.
+# Build with API-based embeddings only
+cargo build --no-default-features --release
 ```
+
+For API-based embeddings, set the appropriate environment variable:
+- `VOYAGE_API_KEY` for Voyage AI
+- `OPENAI_API_KEY` for OpenAI
+- `GOOGLE_API_KEY` for Google
+- `JINA_API_KEY` for Jina
 
 ## Usage
 
-### CLI Structure
+### Memory Management
 
-Octobrain has three top-level commands:
-
-- `memory` - Memory management for storing and retrieving information
-- `knowledge` - Knowledge base management for web content indexing and search
-- `mcp` - Start MCP server (Model Context Protocol) exposing memory and knowledge tools
-- `help` - Print this message or help of the given subcommand(s)
-
-### Memory Commands
-
-All memory-related commands are grouped under the `memory` subcommand:
+Store and retrieve insights, decisions, and context:
 
 ```bash
 # Store a memory
-octobrain memory memorize --title "API Design" --content "Use REST principles" --tags "api,design"
+octobrain memory memorize --title "API Design" \
+  --content "Use REST for CRUD, GraphQL for complex queries" \
+  --memory-type architecture --tags "api,design"
 
-# Search memories
+# Search memories (semantic search)
 octobrain memory remember "api design patterns"
 
-# Multiple query search
+# Multi-query search for broader coverage
 octobrain memory remember "authentication" "security" "jwt"
 
-# Delete a memory
-octobrain memory forget --memory-id <id>
-
-# Update a memory
-octobrain memory update <id> --title "New Title" --add-tags "new-tag"
-
-# Get memory by ID
-octobrain memory get <id>
-
-# List recent memories
+# Get recent memories
 octobrain memory recent --limit 20
 
 # Filter by type
 octobrain memory by-type architecture --limit 10
 
-# Search by tags
+# Filter by tags
 octobrain memory by-tags "api,security"
 
-# Find memories for files
+# Find memories related to files
 octobrain memory for-files "src/main.rs,src/lib.rs"
 
-# Show statistics
-octobrain memory stats
+# Update a memory
+octobrain memory update <id> --title "New Title" --add-tags "new-tag"
 
-# Clean up old memories
-octobrain memory cleanup
+# Delete a memory
+octobrain memory forget --memory-id <id>
+```
 
-# Create relationships
-octobrain memory relate <source-id> <target-id> --relationship-type "depends_on"
+### Memory Relationships
 
-# View relationships
+Connect related memories for context-rich retrieval:
+
+```bash
+# Create a relationship between memories
+octobrain memory relate <source-id> <target-id> \
+  --relationship-type "depends_on" \
+  --description "Source requires target to function"
+
+# View relationships for a memory
 octobrain memory relationships <memory-id>
 
-# Find related memories
+# Find related memories through relationships
 octobrain memory related <memory-id>
 
-# Manually trigger auto-linking for a memory
+# Auto-link similar memories (Zettelkasten-style)
 octobrain memory auto-link <memory-id>
 
-# Get memory graph with linked context
+# Explore memory graph
 octobrain memory graph <memory-id> --depth 2
 ```
 
-### Knowledge Commands
+### Knowledge Base
 
-Knowledge base commands for web content indexing and semantic search:
+Index and search web content, docs, and files:
 
 ```bash
-# Index a URL into knowledge base (fetches and chunks content)
-octobrain knowledge index https://example.com/docs
+# Index a URL
+octobrain knowledge index https://docs.rs/tokio/latest/tokio/
 
 # Search knowledge base
-octobrain knowledge search "how to configure authentication"
+octobrain knowledge search "how to handle async tasks"
 
-# Search within a specific URL (auto-indexes if needed)
-octobrain knowledge search "authentication" --url https://example.com/docs
+# Search within a specific source (auto-indexes if outdated)
+octobrain knowledge search "spawn blocking" --source https://docs.rs/tokio/
 
-# Delete a URL and all its chunks from knowledge base
-octobrain knowledge delete https://example.com/docs
-
-# Show knowledge base statistics
-octobrain knowledge stats
+# Store raw text content
+octobrain knowledge store "meeting-notes" --content "Discussion points..."
 
 # List indexed sources
 octobrain knowledge list --limit 20
+
+# Show statistics
+octobrain knowledge stats
+
+# Delete a source
+octobrain knowledge delete https://example.com/docs
 ```
 
 ### MCP Server
 
-Start the MCP server to expose memory and knowledge tools via Model Context Protocol:
+Run as an MCP server for integration with Claude Desktop and other AI tools:
 
 ```bash
+# Start with stdio transport (for Claude Desktop)
 octobrain mcp
+
+# Start with HTTP transport (for web-based tools)
+octobrain mcp --bind 0.0.0.0:12345
 ```
 
-The server exposes seven tools:
+**Available MCP Tools:**
 
-**Memory Tools:**
-- `memorize`: Store memories with metadata (title, content, type, tags, importance)
-- `remember`: Semantic search with multi-query support and filters
-- `forget`: Delete memories by ID or query (requires confirmation)
-- `relate`: Create a relationship between two memories
-- `auto_link`: Find and connect related memories based on semantic similarity
-- `memory_graph`: Explore memory relationships with multi-hop graph traversal
+| Tool | Description |
+|------|-------------|
+| `memorize` | Store memories with metadata |
+| `remember` | Semantic search with filters |
+| `forget` | Delete memories (requires confirmation) |
+| `relate` | Create relationships between memories |
+| `auto_link` | Auto-connect similar memories |
+| `memory_graph` | Explore memory relationships |
+| `knowledge_search` | Search indexed knowledge |
 
-**Knowledge Tools:**
-- `knowledge_search`: Search indexed web knowledge with optional auto-indexing. Provide a URL to search within that source (auto-indexes if outdated), or omit URL to search across all indexed knowledge.
+See [MCP Integration](#mcp-integration) for Claude Desktop setup.
+
+## Features
+
+- **Semantic Search** — Find memories by meaning using vector embeddings, not exact keyword matches
+- **Hybrid Search** — Combines BM25 full-text search with vector similarity for better results
+- **Reranking Support** — Optional cross-encoder reranking for 20-35% accuracy improvement
+- **Auto-Linking** — Automatically connects semantically similar memories (Zettelkasten-style)
+- **Temporal Decay** — Ebbinghaus forgetting curve for importance management
+- **Knowledge Indexing** — Ingest URLs, PDFs, docs for retrieval
+- **Project Scoping** — Isolate memories per Git project or share across projects
+- **Role Filtering** — Tag memories by role (developer, reviewer, etc.)
+- **MCP Protocol** — Full MCP 2025-11-25 compliance for AI tool integration
 
 ## Configuration
 
-Configuration is stored in `~/.local/share/octobrain/config.toml` on Unix-like systems.
+Configuration is stored in `~/.local/share/octobrain/config.toml`. All options have sensible defaults.
 
-### Default Configuration
+### Key Settings
+
+| Section | Option | Default | Description |
+|---------|--------|---------|-------------|
+| `[embedding]` | `model` | `voyage:voyage-3.5-lite` | Embedding model (provider:model format) |
+| `[search]` | `similarity_threshold` | `0.3` | Minimum relevance (0.0-1.0) |
+| `[search.hybrid]` | `enabled` | `true` | Enable BM25 + vector fusion |
+| `[search.reranker]` | `enabled` | `false` | Enable cross-encoder reranking |
+| `[memory]` | `max_memories` | `10000` | Maximum stored memories |
+| `[memory]` | `decay_enabled` | `true` | Enable temporal importance decay |
+| `[memory]` | `auto_linking_enabled` | `true` | Auto-connect similar memories |
+| `[knowledge]` | `chunk_size` | `1200` | Characters per chunk |
+
+### Embedding Providers
 
 ```toml
 [embedding]
-# Embedding model for memory operations
-# Format: provider:model (e.g., voyage:voyage-3.5-lite, openai:text-embedding-3-small)
-# Default: voyage:voyage-3.5-lite
-model = "voyage:voyage-3.5-lite"
-
-# Batch size for embedding generation (number of texts to process at once)
-# Default: 32
-batch_size = 32
-
-# Maximum tokens per batch request
-# Default: 100000
-max_tokens_per_batch = 100000
-
-[search]
-# Similarity threshold for memory search (0.0 to 1.0)
-# Lower values = more results, higher values = fewer but more relevant
-# Default: 0.3
-similarity_threshold = 0.3
-
-# Maximum number of results to return from search
-# Default: 50
-max_results = 50
-
-[search.hybrid]
-# Enable hybrid search (native BM25 + vector RRF fusion via LanceDB)
-# Default: true
-enabled = true
-
-# Weight applied to the RRF-fused score (vector + BM25 combined) (0.0-1.0)
-# Default: 0.8
-default_vector_weight = 0.8
-
-# Default weight for recency signal (0.0-1.0)
-# Default: 0.1
-default_recency_weight = 0.1
-
-# Default weight for importance signal (0.0-1.0)
-# Default: 0.1
-default_importance_weight = 0.1
-
-# Recency decay period in days
-# Default: 30
-recency_decay_days = 30
-
-[search.reranker]
-# Enable reranking for improved search accuracy
-# Default: false
-enabled = false
-
-# Reranker model (fully qualified, e.g., voyage:rerank-2.5)
-# Default: voyage:rerank-2.5
-model = "voyage:rerank-2.5"
-
-# Number of candidates to retrieve before reranking
-# Default: 50
-top_k_candidates = 50
-
-# Number of results to return after reranking
-# Default: 10
-final_top_k = 10
-
-[memory]
-# Maximum number of memories to keep in storage
-# Default: 10000
-max_memories = 10000
-
-# Automatic cleanup threshold in days
-# Default: 365 (1 year)
-auto_cleanup_days = 365
-
-# Minimum importance for automatic cleanup
-# Default: 0.1
-cleanup_min_importance = 0.1
-
-# Maximum memories returned in search
-# Default: 50
-max_search_results = 50
-
-# Default importance for memories (0.0-1.0)
-# Default: 0.5
-default_importance = 0.5
-
-# Enable temporal decay system (Ebbinghaus forgetting curve)
-# Default: true
-decay_enabled = true
-
-# Half-life for importance decay in days (time for importance to halve)
-# Default: 90 (3 months)
-decay_half_life_days = 90
-
-# Boost factor for access reinforcement (multiplier per access)
-# Default: 1.2
-access_boost_factor = 1.2
-
-# Minimum importance threshold (floor value after decay)
-# Default: 0.05 (5%)
-min_importance_threshold = 0.05
-
-# Enable automatic linking between semantically similar memories
-# Default: true
-auto_linking_enabled = true
-
-# Similarity threshold for auto-linking (0.0-1.0)
-# Default: 0.78
-auto_link_threshold = 0.78
-
-# Maximum number of auto-links per memory
-# Default: 5
-max_auto_links_per_memory = 5
-
-# Create bidirectional links (A->B and B->A)
-# Default: true
-bidirectional_links = true
-
-[knowledge]
-# Size of each child chunk in characters
-# Default: 1200
-chunk_size = 1200
-
-# Overlap between child chunks in characters (~25% of chunk_size)
-# Default: 300
-chunk_overlap = 300
-
-# Days after which indexed content is considered outdated
-# Default: 15
-outdating_days = 15
-
-# Maximum number of results to return from knowledge search
-# Default: 5
-max_results = 5
+# Local embeddings (no API key needed)
+model = "voyage:voyage-3.5-lite"  # Fast, accurate
+model = "openai:text-embedding-3-small"  # OpenAI
+model = "google:text-embedding-004"  # Google
+model = "jina:jina-embeddings-v2"  # Jina
 ```
 
-## Storage Locations
+### Full Configuration
 
-Memories are stored in platform-specific directories following XDG Base Directory specification:
-
-- **macOS**: `~/.local/share/octobrain/`
-- **Linux**: `~/.local/share/octobrain/` (or `$XDG_DATA_HOME/octobrain/`)
-- **Windows**: `%APPDATA%\octobrain\`
-
-Project-specific data is stored in subdirectories identified by Git remote URL hash.
+See [`config-templates/default.toml`](config-templates/default.toml) for all available options with documentation.
 
 ## Memory Types
 
-- `code`: Code insights and patterns
-- `architecture`: System design decisions
-- `bug_fix`: Bug fixes and solutions
-- `feature`: Feature implementations
-- `documentation`: Documentation and knowledge
-- `user_preference`: User settings and preferences
-- `decision`: Project decisions
-- `learning`: Learning notes and tutorials
-- `configuration`: Configuration and setup
-- `testing`: Testing strategies
-- `performance`: Performance optimizations
-- `security`: Security considerations
-- `insight`: General insights
+Organize memories by category for better filtering:
+
+| Type | Use For |
+|------|---------|
+| `code` | Code patterns, solutions, implementations |
+| `architecture` | System design, decisions, patterns |
+| `bug_fix` | Bug fixes, troubleshooting, solutions |
+| `feature` | Feature specs, implementations |
+| `documentation` | Docs, explanations, knowledge |
+| `user_preference` | Settings, preferences, workflows |
+| `decision` | Project decisions, trade-offs |
+| `learning` | Tutorials, notes, education |
+| `configuration` | Setup, config, deployment |
+| `testing` | Test strategies, QA insights |
+| `performance` | Optimizations, benchmarks |
+| `security` | Vulnerabilities, fixes, considerations |
+| `insight` | General insights, tips |
+
+## MCP Integration
+
+### Claude Desktop Setup
+
+Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "octobrain": {
+      "command": "/path/to/octobrain",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop. Octobrain tools will be available in your conversations.
+
+### HTTP Transport
+
+For web-based integrations:
+
+```bash
+octobrain mcp --bind 0.0.0.0:12345
+```
+
+The server exposes endpoints at `/mcp` for MCP protocol communication.
+
+## Storage Locations
+
+Data is stored in platform-specific directories:
+
+| Platform | Location |
+|----------|----------|
+| macOS | `~/.local/share/octobrain/` |
+| Linux | `~/.local/share/octobrain/` or `$XDG_DATA_HOME/octobrain/` |
+| Windows | `%APPDATA%\octobrain\` |
+
+Project-specific memories are isolated by Git remote URL hash.
+
+## Contributing
+
+Contributions are welcome! Please:
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Run `cargo clippy` and fix all warnings
+4. Run `cargo test --no-default-features`
+5. Submit a pull request
+
+### Development Setup
+
+```bash
+# Clone and build
+git clone https://github.com/muvon/octobrain.git
+cd octobrain
+cargo build --no-default-features
+
+# Run tests
+cargo test --no-default-features
+
+# Run clippy
+cargo clippy --no-default-features
+```
 
 ## License
 
-Apache-2.0
+Apache-2.0 — see [LICENSE](LICENSE) for details.
 
 ## Credits
 
-Developed by Muvon Un Limited.
+Developed by [Muvon Un Limited](https://muvon.io).
