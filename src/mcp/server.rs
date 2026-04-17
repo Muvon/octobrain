@@ -17,7 +17,7 @@
 
 use anyhow::Result;
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters, ServerHandler},
+    handler::server::{wrapper::Parameters, ServerHandler},
     model::{
         Implementation, InitializeRequestParams, InitializeResult, ProtocolVersion,
         ServerCapabilities, ServerInfo,
@@ -67,7 +67,6 @@ pub struct McpServer {
     memory: Arc<Mutex<Option<MemoryProvider>>>,
     knowledge: Arc<Mutex<Option<KnowledgeProvider>>>,
     session: Arc<Mutex<SessionState>>,
-    tool_router: ToolRouter<Self>,
 }
 
 impl McpServer {
@@ -78,7 +77,6 @@ impl McpServer {
             memory: Arc::new(Mutex::new(None)),
             knowledge: Arc::new(Mutex::new(None)),
             session: Arc::new(Mutex::new(SessionState::default())),
-            tool_router: Self::tool_router(),
         }
     }
 

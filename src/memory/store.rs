@@ -113,6 +113,11 @@ pub struct MemoryStore {
 }
 
 impl MemoryStore {
+    /// Returns true when no project key is set (global/unscoped context).
+    pub fn has_no_project_key(&self) -> bool {
+        self.project_key.is_none()
+    }
+
     /// Create a new memory store
     pub async fn new(
         db_path: &str,

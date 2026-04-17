@@ -129,6 +129,13 @@ impl MemoryManager {
     /// - HEAD advanced → scan only the delta (last_checked..HEAD)
     /// - First run → scan from oldest memory's commit
     async fn cleanup_stale_references(&mut self) -> Result<usize> {
+        // Without a project key we cannot determine which git repo to check
+        // file existence against — skip entirely to avoid deleting memories
+        // from unrelated projects.
+        if self.store.has_no_project_key() {
+            return Ok(0);
+        }
+
         // Determine scan range
         let current_head = match GitUtils::get_current_commit() {
             Some(h) => h,
