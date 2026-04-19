@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.1] - 2026-04-19
+
+### 📋 Release Summary
+
+This release improves system stability by refining memory cleanup logic to prevent errors when project keys are missing (595318eb). Additionally, core dependencies and internal workflows have been updated to enhance overall performance and security (353f6fc4, afe734ca).
+
+
+### 🐛 Bug Fixes & Stability
+
+- **memory**: skip cleanup without project key `595318eb`
+
+### 🔄 Other Changes
+
+2 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.5.0] - 2026-04-08
 
 ### 📋 Release Summary
