@@ -767,6 +767,18 @@ async fn execute_knowledge_command(
             println!("{}", format_read_result(&result));
             Ok(())
         }
+        KnowledgeCommand::Match { pattern, source } => {
+            let results = knowledge_manager
+                .match_content(&pattern, source.as_deref(), None)
+                .await?;
+            if results.is_empty() {
+                println!("No matches found");
+            } else {
+                use crate::knowledge::formatting::format_match_results;
+                println!("{}", format_match_results(&results));
+            }
+            Ok(())
+        }
     }
 }
 

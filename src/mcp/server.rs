@@ -380,6 +380,8 @@ pub enum KnowledgeAction {
     Delete,
     /// Read full content of a URL or local file (fallback when search is insufficient)
     Read,
+    /// Search indexed content by regex pattern (like grep)
+    Match,
 }
 
 /// Knowledge tool parameters
@@ -392,11 +394,15 @@ pub struct KnowledgeParams {
     pub query: Option<String>,
     /// [search] Source filter — URL or local file path to auto-index and search within. Supports http/https URLs, file:///path, or /absolute/path. File types: .html, .txt, .md, .pdf, .docx. Omit to search all indexed sources.
     /// [read] URL or local file path to read full content from. Supports http/https URLs, file:///path, or /absolute/path. File types: .html, .txt, .md, .pdf, .docx.
+    /// [match] Source filter — only search within this URL or file path. Omit to search all indexed sources.
     pub source: Option<String>,
     /// [store/delete] Unique identifier key for the content. Error if key already exists on store — delete first to replace.
     pub key: Option<String>,
     /// [store] Raw text content to store and index (required for store)
     pub content: Option<String>,
+    /// [match] Regex pattern to search for in indexed content (e.g., "error_code" or "timeout|retry")
+    #[schemars(length(min = 1))]
+    pub pattern: Option<String>,
 }
 
 // ============================================================================
@@ -566,7 +572,7 @@ impl McpServer {
 
     #[tool(
         name = "knowledge",
-        description = "Knowledge base with four commands. 'search': semantic search across all indexed content — provide source (URL/file) to auto-index on-the-fly, omit to search all. 'store': save raw text under a unique key (session-scoped, auto-cleaned) — error if key exists, delete first to replace. 'delete': remove stored content by key. 'read': fetch and return the FULL text content of a URL or local file — use ONLY as a last resort when search results are insufficient; prefer 'search' for targeted retrieval. Supports URLs, local files (.html, .txt, .md, .pdf, .docx)."
+        description = "Knowledge base with five commands. 'search': semantic search across all indexed content — provide source (URL/file) to auto-index on-the-fly, omit to search all. 'store': save raw text under a unique key (session-scoped, auto-cleaned) — error if key exists, delete first to replace. 'delete': remove stored content by key. 'read': fetch and return the FULL text content of a URL or local file — use ONLY as a last resort when search results are insufficient; prefer 'search' for targeted retrieval. 'match': search indexed content by regex pattern (like grep) — returns matching lines only; prefer 'search' for semantic queries, use 'match' for exact string/regex patterns. Supports URLs, local files (.html, .txt, .md, .pdf, .docx)."
     )]
     async fn knowledge(
         &self,
@@ -602,6 +608,15 @@ impl McpServer {
                     .await
             }
             KnowledgeAction::Read => provider.execute_read(params.source.as_deref()).await,
+            KnowledgeAction::Match => {
+                provider
+                    .execute_match(
+                        params.pattern.as_deref(),
+                        params.source.as_deref(),
+                        &session_id,
+                    )
+                    .await
+            }
         }
         .map_err(|e| {
             McpError::internal_error(
