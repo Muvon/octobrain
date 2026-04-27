@@ -761,6 +761,12 @@ async fn execute_knowledge_command(
             println!("{}", format_source_list(&sources));
             Ok(())
         }
+        KnowledgeCommand::Read { source } => {
+            let result = knowledge_manager.read(&source).await?;
+            use crate::knowledge::formatting::format_read_result;
+            println!("{}", format_read_result(&result));
+            Ok(())
+        }
     }
 }
 

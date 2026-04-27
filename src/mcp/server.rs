@@ -378,6 +378,8 @@ pub enum KnowledgeAction {
     Store,
     /// Delete stored content by key
     Delete,
+    /// Read full content of a URL or local file (fallback when search is insufficient)
+    Read,
 }
 
 /// Knowledge tool parameters
@@ -389,6 +391,7 @@ pub struct KnowledgeParams {
     #[schemars(length(min = 3, max = 500))]
     pub query: Option<String>,
     /// [search] Source filter — URL or local file path to auto-index and search within. Supports http/https URLs, file:///path, or /absolute/path. File types: .html, .txt, .md, .pdf, .docx. Omit to search all indexed sources.
+    /// [read] URL or local file path to read full content from. Supports http/https URLs, file:///path, or /absolute/path. File types: .html, .txt, .md, .pdf, .docx.
     pub source: Option<String>,
     /// [store/delete] Unique identifier key for the content. Error if key already exists on store — delete first to replace.
     pub key: Option<String>,
@@ -563,7 +566,7 @@ impl McpServer {
 
     #[tool(
         name = "knowledge",
-        description = "Knowledge base with three commands. 'search': semantic search across all indexed content — provide source (URL/file) to auto-index on-the-fly, omit to search all. 'store': save raw text under a unique key (session-scoped, auto-cleaned) — error if key exists, delete first to replace. 'delete': remove stored content by key. Supports URLs, local files (.html, .txt, .md, .pdf, .docx)."
+        description = "Knowledge base with four commands. 'search': semantic search across all indexed content — provide source (URL/file) to auto-index on-the-fly, omit to search all. 'store': save raw text under a unique key (session-scoped, auto-cleaned) — error if key exists, delete first to replace. 'delete': remove stored content by key. 'read': fetch and return the FULL text content of a URL or local file — use ONLY as a last resort when search results are insufficient; prefer 'search' for targeted retrieval. Supports URLs, local files (.html, .txt, .md, .pdf, .docx)."
     )]
     async fn knowledge(
         &self,
@@ -598,6 +601,7 @@ impl McpServer {
                     .execute_delete(params.key.as_deref(), &session_id)
                     .await
             }
+            KnowledgeAction::Read => provider.execute_read(params.source.as_deref()).await,
         }
         .map_err(|e| {
             McpError::internal_error(

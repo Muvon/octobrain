@@ -56,3 +56,12 @@ pub struct StoreResult {
     pub source: String,
     pub chunks_created: usize,
 }
+
+/// Result of a read operation (full page content)
+#[derive(Debug, Clone)]
+pub struct ReadResult {
+    pub source: String,
+    pub title: String,
+    pub content: String,
+    pub content_type: String,
+}
