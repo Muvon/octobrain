@@ -68,6 +68,8 @@ schemars = "1"
 async-trait = "0.1"
 http = "1"
 
+regex = "1"
+
 # Local dep for testing
 # octolib = { path = "../octolib", default-features = false }
 octolib = { version = "0.16.0", default-features = false }

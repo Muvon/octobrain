@@ -11,7 +11,8 @@ use crate::knowledge::chunker::ContentChunker;
 use crate::knowledge::content::ContentType;
 use crate::knowledge::store::KnowledgeStore;
 use crate::knowledge::types::{
-    IndexResult, KnowledgeChunk, KnowledgeSearchResult, KnowledgeStats, ReadResult, StoreResult,
+    IndexResult, KnowledgeChunk, KnowledgeSearchResult, KnowledgeStats, MatchResult, ReadResult,
+    StoreResult,
 };
 
 /// Maximum source size in bytes (50 MB)
@@ -230,6 +231,20 @@ impl KnowledgeManager {
             content,
             content_type: content_type_str.to_string(),
         })
+    }
+
+    /// Search indexed chunks by regex pattern, returning matching lines.
+    /// Optionally filter by source and/or session.
+    pub async fn match_content(
+        &self,
+        pattern: &str,
+        source: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<Vec<MatchResult>> {
+        let regex = regex::Regex::new(pattern)
+            .with_context(|| format!("Invalid regex pattern: {}", pattern))?;
+
+        self.store.match_content(&regex, source, session_id).await
     }
 
     /// Fetch source content as raw bytes with content type detection.

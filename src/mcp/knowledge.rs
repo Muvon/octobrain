@@ -188,4 +188,51 @@ impl KnowledgeProvider {
 
         Ok(output)
     }
+
+    /// Execute match command — search indexed content by regex pattern
+    pub async fn execute_match(
+        &self,
+        pattern: Option<&str>,
+        source: Option<&str>,
+        session_id: &str,
+    ) -> Result<String, McpError> {
+        let pattern = pattern.ok_or_else(|| {
+            McpError::invalid_params(
+                "Missing required parameter: pattern (required for match command)",
+                "knowledge",
+            )
+        })?;
+
+        let manager = self.knowledge_manager.lock().await;
+        let results = manager
+            .match_content(pattern, source, Some(session_id))
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Knowledge match failed: {}", e), "knowledge")
+            })?;
+
+        if results.is_empty() {
+            return Ok("No matches found".to_string());
+        }
+
+        let mut output = String::new();
+        for result in &results {
+            output.push_str(&"=".repeat(50));
+            output.push('\n');
+            output.push_str(&result.source_title);
+            output.push('\n');
+            output.push_str(&result.source);
+            output.push('\n');
+            output.push_str(&format!(
+                "Line {}: {}",
+                result.line_number, result.matched_line
+            ));
+            if !result.captures.is_empty() {
+                output.push_str(&format!(" [captures: {}]", result.captures.join(", ")));
+            }
+            output.push('\n');
+        }
+
+        Ok(output)
+    }
 }

@@ -630,6 +630,92 @@ impl KnowledgeStore {
             .await?;
         Ok(())
     }
+
+    /// Search indexed chunks by regex pattern, returning matching lines.
+    /// Optionally filter by source and/or session.
+    pub async fn match_content(
+        &self,
+        pattern: &regex::Regex,
+        source: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<Vec<crate::knowledge::types::MatchResult>> {
+        let mut filters = Vec::new();
+
+        if let Some(s) = source {
+            filters.push(format!("source = '{}'", Self::quote_filter_string(s)));
+        }
+
+        if let Some(sid) = session_id {
+            filters.push(format!(
+                "(session_id IS NULL OR session_id = '{}')",
+                Self::quote_filter_string(sid)
+            ));
+        }
+
+        let mut query = self.table.query().limit(10_000);
+        if !filters.is_empty() {
+            query = query.only_if(filters.join(" AND "));
+        }
+
+        let results = query.execute().await?;
+        let batches: Vec<RecordBatch> = results.try_collect().await?;
+
+        let mut matches = Vec::new();
+
+        for batch in &batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+
+            let sources = batch
+                .column_by_name("source")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let source_titles = batch
+                .column_by_name("source_title")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let contents = batch
+                .column_by_name("content")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+
+            for i in 0..batch.num_rows() {
+                let source = sources.value(i).to_string();
+                let source_title = source_titles.value(i).to_string();
+                let content = contents.value(i);
+
+                for (line_num, line) in content.lines().enumerate() {
+                    if pattern.is_match(line) {
+                        let captures: Vec<String> = pattern
+                            .captures_iter(line)
+                            .flat_map(|c| {
+                                (1..c.len())
+                                    .filter_map(|g| c.get(g).map(|m| m.as_str().to_string()))
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect();
+
+                        matches.push(crate::knowledge::types::MatchResult {
+                            source: source.clone(),
+                            source_title: source_title.clone(),
+                            line_number: line_num + 1,
+                            matched_line: line.to_string(),
+                            captures,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(matches)
+    }
 }
 
 #[cfg(test)]

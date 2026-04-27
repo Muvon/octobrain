@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use colored::Colorize;
 
-use crate::knowledge::types::{KnowledgeSearchResult, KnowledgeStats, ReadResult};
+use crate::knowledge::types::{KnowledgeSearchResult, KnowledgeStats, MatchResult, ReadResult};
 
 pub fn format_search_results(results: &[KnowledgeSearchResult]) -> String {
     if results.is_empty() {
@@ -165,6 +165,36 @@ pub fn format_read_result(result: &ReadResult) -> String {
     output.push('\n');
     output.push_str(&result.content);
     output.push('\n');
+
+    output
+}
+
+pub fn format_match_results(results: &[MatchResult]) -> String {
+    if results.is_empty() {
+        return "No matches found".to_string();
+    }
+
+    let mut output = String::new();
+
+    for result in results {
+        output.push_str(&"━".repeat(60));
+        output.push('\n');
+        output.push_str(&result.source_title.blue().bold().to_string());
+        output.push('\n');
+        output.push_str(&result.source.bright_black().to_string());
+        output.push('\n');
+        output.push_str(&format!("Line {}:", result.line_number).cyan().to_string());
+        output.push(' ');
+        output.push_str(&result.matched_line);
+        if !result.captures.is_empty() {
+            output.push_str(
+                &format!(" [captures: {}]", result.captures.join(", "))
+                    .yellow()
+                    .to_string(),
+            );
+        }
+        output.push('\n');
+    }
 
     output
 }

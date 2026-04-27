@@ -377,4 +377,14 @@ pub enum KnowledgeCommand {
         /// URL or local file path to read (.html, .txt, .md, .pdf, .docx)
         source: String,
     },
+
+    /// Search indexed content by regex pattern (like grep)
+    Match {
+        /// Regex pattern to search for (e.g., "error_code" or "timeout|retry")
+        pattern: String,
+
+        /// Filter by specific source URL or file path
+        #[arg(long)]
+        source: Option<String>,
+    },
 }

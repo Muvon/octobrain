@@ -65,3 +65,14 @@ pub struct ReadResult {
     pub content: String,
     pub content_type: String,
 }
+
+/// A single line match within a knowledge chunk
+#[derive(Debug, Clone)]
+pub struct MatchResult {
+    pub source: String,
+    pub source_title: String,
+    pub line_number: usize,
+    pub matched_line: String,
+    /// Substrings captured by the regex pattern
+    pub captures: Vec<String>,
+}
