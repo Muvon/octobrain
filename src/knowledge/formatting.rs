@@ -65,7 +65,10 @@ pub fn format_stats(stats: &KnowledgeStats) -> String {
     output.push('\n');
 
     if stats.total_sources > 0 {
-        let avg = stats.total_chunks / stats.total_sources;
+        let avg = stats
+            .total_chunks
+            .checked_div(stats.total_sources)
+            .unwrap_or(0);
         output.push_str(&format!("Average Chunks/Source: {}", avg));
         output.push('\n');
     }

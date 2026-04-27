@@ -624,7 +624,7 @@ impl MemoryStore {
 
                 let memories = self.batch_to_memories(&batch)?;
 
-                for (memory, distance) in memories.into_iter().zip(distance_array.into_iter()) {
+                for (memory, distance) in memories.into_iter().zip(distance_array) {
                     // Only JSON-field filters remain here
                     if !self.matches_json_filters(&memory, query) {
                         continue;
@@ -838,7 +838,7 @@ impl MemoryStore {
 
             let memories = self.batch_to_memories(&batch)?;
 
-            for (memory, rrf_score) in memories.into_iter().zip(rrf_scores.into_iter()) {
+            for (memory, rrf_score) in memories.into_iter().zip(rrf_scores) {
                 // JSON-field filters (tags, related_files) applied post-fetch
                 if !self.matches_json_filters(&memory, &query.filters) {
                     continue;

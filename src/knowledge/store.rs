@@ -580,7 +580,7 @@ impl KnowledgeStore {
             .collect();
 
         // Sort by last_checked descending
-        result.sort_by(|a, b| b.3.cmp(&a.3));
+        result.sort_by_key(|b| std::cmp::Reverse(b.3));
 
         if let Some(limit) = limit {
             result.truncate(limit);

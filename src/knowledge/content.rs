@@ -80,16 +80,12 @@ pub fn extract_text_from_docx(bytes: &[u8]) -> Result<String> {
                     output.push(' ');
                 }
             }
-            Ok(quick_xml::events::Event::End(ref e)) => {
-                if e.local_name().as_ref() == b"t" {
-                    in_text_node = false;
-                }
+            Ok(quick_xml::events::Event::End(ref e)) if e.local_name().as_ref() == b"t" => {
+                in_text_node = false;
             }
-            Ok(quick_xml::events::Event::Text(ref e)) => {
-                if in_text_node {
-                    if let Ok(text) = e.decode() {
-                        output.push_str(&text);
-                    }
+            Ok(quick_xml::events::Event::Text(ref e)) if in_text_node => {
+                if let Ok(text) = e.decode() {
+                    output.push_str(&text);
                 }
             }
             Ok(quick_xml::events::Event::Eof) => break,
