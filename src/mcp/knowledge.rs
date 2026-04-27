@@ -160,4 +160,32 @@ impl KnowledgeProvider {
 
         Ok(format!("Deleted stored knowledge '{}'", key))
     }
+
+    /// Execute read command — fetch and return full text content of a source
+    pub async fn execute_read(&self, source: Option<&str>) -> Result<String, McpError> {
+        let source = source.ok_or_else(|| {
+            McpError::invalid_params(
+                "Missing required parameter: source (required for read command)",
+                "knowledge",
+            )
+        })?;
+
+        let manager = self.knowledge_manager.lock().await;
+        let result = manager.read(source).await.map_err(|e| {
+            McpError::internal_error(format!("Knowledge read failed: {}", e), "knowledge")
+        })?;
+
+        let mut output = String::new();
+        output.push_str(&result.title);
+        output.push('\n');
+        output.push_str(&result.source);
+        output.push('\n');
+        output.push_str(&format!("Type: {}", result.content_type));
+        output.push('\n');
+        output.push_str(&"=".repeat(50));
+        output.push('\n');
+        output.push_str(&result.content);
+
+        Ok(output)
+    }
 }

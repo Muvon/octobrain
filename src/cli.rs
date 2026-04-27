@@ -371,4 +371,10 @@ pub enum KnowledgeCommand {
         #[arg(long, default_value = "20")]
         limit: usize,
     },
+
+    /// Read and display full content of a URL or local file
+    Read {
+        /// URL or local file path to read (.html, .txt, .md, .pdf, .docx)
+        source: String,
+    },
 }

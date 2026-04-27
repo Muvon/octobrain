@@ -48,6 +48,51 @@ impl ContentChunker {
         }
     }
 
+    /// Extract text from any supported content type, returning full text without chunking.
+    /// Returns (title, full_text)
+    pub fn extract_text(
+        &self,
+        source: &str,
+        content_type: &ContentType,
+        raw: &[u8],
+    ) -> Result<(String, String)> {
+        match content_type {
+            ContentType::Html => {
+                let html = String::from_utf8_lossy(raw);
+                self.extract_html_text(source, &html)
+            }
+            ContentType::Pdf => {
+                let text = content::extract_text_from_pdf(raw)?;
+                let title = self.extract_title_from_text(&text);
+                Ok((title, text))
+            }
+            ContentType::Docx => {
+                let text = content::extract_text_from_docx(raw)?;
+                let title = self.extract_title_from_text(&text);
+                Ok((title, text))
+            }
+            ContentType::Markdown | ContentType::PlainText => {
+                let text = String::from_utf8_lossy(raw);
+                let title = self.extract_title_from_text(&text);
+                Ok((title, text.to_string()))
+            }
+        }
+    }
+
+    /// Extract full text from HTML (uses readability, falls back to html2text)
+    fn extract_html_text(&self, _source: &str, html: &str) -> Result<(String, String)> {
+        // Try readability extraction first
+        if let Some((title, clean_html)) = self.extract_readable_content(html) {
+            let markdown = html2text::from_read(clean_html.as_bytes(), 120).unwrap_or_default();
+            return Ok((title, markdown));
+        }
+
+        // Fallback: extract title from raw HTML, convert full HTML to markdown
+        let title = self.extract_title_from_html(html);
+        let markdown = html2text::from_read(html.as_bytes(), 120).unwrap_or_default();
+        Ok((title, markdown))
+    }
+
     /// Parse plain text/markdown and chunk into semantic pieces.
     /// Returns (title, content_hash, chunks)
     fn parse_text_and_chunk(

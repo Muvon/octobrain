@@ -11,7 +11,7 @@ use crate::knowledge::chunker::ContentChunker;
 use crate::knowledge::content::ContentType;
 use crate::knowledge::store::KnowledgeStore;
 use crate::knowledge::types::{
-    IndexResult, KnowledgeChunk, KnowledgeSearchResult, KnowledgeStats, StoreResult,
+    IndexResult, KnowledgeChunk, KnowledgeSearchResult, KnowledgeStats, ReadResult, StoreResult,
 };
 
 /// Maximum source size in bytes (50 MB)
@@ -207,6 +207,29 @@ impl KnowledgeManager {
             .await?;
 
         Ok(())
+    }
+
+    /// Fetch and return full text content of a source (URL or local file).
+    /// This is a fallback for when search doesn't provide enough context.
+    pub async fn read(&self, source: &str) -> Result<ReadResult> {
+        let source = normalize_source(source)?;
+        let (content_type, bytes) = self.fetch_source(&source).await?;
+        let (title, content) = self.chunker.extract_text(&source, &content_type, &bytes)?;
+
+        let content_type_str = match content_type {
+            ContentType::Html => "html",
+            ContentType::Markdown => "markdown",
+            ContentType::PlainText => "text",
+            ContentType::Pdf => "pdf",
+            ContentType::Docx => "docx",
+        };
+
+        Ok(ReadResult {
+            source,
+            title,
+            content,
+            content_type: content_type_str.to_string(),
+        })
     }
 
     /// Fetch source content as raw bytes with content type detection.

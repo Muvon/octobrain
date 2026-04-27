@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use colored::Colorize;
 
-use crate::knowledge::types::{KnowledgeSearchResult, KnowledgeStats};
+use crate::knowledge::types::{KnowledgeSearchResult, KnowledgeStats, ReadResult};
 
 pub fn format_search_results(results: &[KnowledgeSearchResult]) -> String {
     if results.is_empty() {
@@ -148,4 +148,23 @@ fn format_relative_time(dt: DateTime<Utc>) -> String {
 
 fn truncate_chars(input: &str, max_chars: usize) -> String {
     input.chars().take(max_chars).collect()
+}
+
+pub fn format_read_result(result: &ReadResult) -> String {
+    let mut output = String::new();
+
+    output.push_str(&"━".repeat(60));
+    output.push('\n');
+    output.push_str(&result.title.blue().bold().to_string());
+    output.push('\n');
+    output.push_str(&result.source.bright_black().to_string());
+    output.push('\n');
+    output.push_str(&format!("Type: {}", result.content_type).cyan().to_string());
+    output.push('\n');
+    output.push_str(&"━".repeat(60));
+    output.push('\n');
+    output.push_str(&result.content);
+    output.push('\n');
+
+    output
 }
