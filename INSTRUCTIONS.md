@@ -26,15 +26,26 @@
   - `manager.rs` - High-level memory operations
   - `store.rs` - LanceDB vector storage
   - `formatting.rs` - Output formatting utilities
-- `src/embedding.rs` - Embedding generation (via octolib)
+  - `git_utils.rs` - Git integration for commit/project detection
+  - `mod.rs` - Module exports
+  - `*_tests.rs` - Test files (hybrid_tests, decay_tests, auto_link_tests, role_tests, reranker_integration)
 - `src/knowledge/` - Knowledge base management system
   - `types.rs` - Knowledge data structures
   - `manager.rs` - High-level knowledge operations
   - `store.rs` - LanceDB vector storage for knowledge
   - `chunker.rs` - Web content chunking logic
   - `formatting.rs` - Output formatting utilities
+  - `content.rs` - Content retrieval and processing
+  - `mod.rs` - Module exports
 - `src/mcp/` - Model Context Protocol server
+  - `server.rs` - Main MCP server implementation (stdio + HTTP modes)
+  - `memory.rs` - Memory tool implementations
+  - `knowledge.rs` - Knowledge tool implementations
+  - `types.rs` - MCP tool parameter types
+  - `logging.rs` - Server logging utilities
+  - `mod.rs` - Module exports
 - `src/constants.rs` - Project constants
+- `src/vector_optimizer.rs` - Vector index optimization and query tuning
 
 ### CLI Structure
 Octobrain uses a hierarchical command structure:
@@ -187,6 +198,17 @@ max_auto_links_per_memory = 5
 # Default: true
 bidirectional_links = true
 
+# Enable automatic cleanup of memories whose related_files no longer exist on disk.
+# On startup, memories with ALL files gone are deleted; partial loss penalizes importance.
+# Default: true
+stale_ref_cleanup_enabled = true
+
+# Importance penalty multiplier per missing file (0.0-1.0).
+# Applied as importance *= penalty^(number_of_dead_files).
+# Lower = harsher penalty. Memories with ALL files gone are deleted regardless.
+# Default: 0.3
+stale_ref_importance_penalty = 0.3
+
 [knowledge]
 # Size of each child chunk in characters
 # Default: 1200
@@ -203,11 +225,13 @@ outdating_days = 15
 # Maximum number of results to return from knowledge search
 # Default: 5
 max_results = 5
+
+# Hours after which session-scoped knowledge chunks are cleaned up (crash recovery)
+# Default: 120
+session_ttl_hours = 120
 ```
 
-## Storage Locations
-
-Memories are stored in platform-specific directories following XDG Base Directory specification:
+## Storage Locations in platform-specific directories following XDG Base Directory specification:
 
 - **macOS**: `~/.local/share/octobrain/`
 - **Linux**: `~/.local/share/octobrain/` (or `$XDG_DATA_HOME/octobrain/`)
@@ -229,6 +253,14 @@ Project-specific data is stored in subdirectories identified by Git remote URL h
 - `testing`: Testing strategies
 - `performance`: Performance optimizations
 - `security`: Security considerations
+- `validation`: Idea/product validation, hypothesis testing
+- `research`: Technical/market research, analysis
+- `workflow`: SOPs, playbooks, process descriptions
+- `requirement`: Business requirements, specs, constraints
+- `design`: UI/UX decisions, wireframes, system design
+- `integration`: API integrations, third-party services
+- `communication`: Stakeholder updates, team decisions
+- `process`: Deployment procedures, runbooks, operations
 - `insight`: General insights
 
 ## Development Workflow

@@ -166,6 +166,9 @@ octobrain knowledge stats
 
 # Delete a source
 octobrain knowledge delete https://example.com/docs
+
+# Delete stored content by key
+octobrain knowledge delete-stored "meeting-notes"
 ```
 
 ### MCP Server
@@ -256,6 +259,14 @@ Organize memories by category for better filtering:
 | `testing` | Test strategies, QA insights |
 | `performance` | Optimizations, benchmarks |
 | `security` | Vulnerabilities, fixes, considerations |
+| `validation` | Idea/product validation, hypothesis testing |
+| `research` | Technical/market research, analysis |
+| `workflow` | SOPs, playbooks, process descriptions |
+| `requirement` | Business requirements, specs, constraints |
+| `design` | UI/UX decisions, wireframes, system design |
+| `integration` | API integrations, third-party services |
+| `communication` | Stakeholder updates, team decisions |
+| `process` | Deployment procedures, runbooks, operations |
 | `insight` | General insights, tips |
 
 ## MCP Integration

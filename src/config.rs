@@ -103,11 +103,11 @@ pub struct KnowledgeConfig {
 impl Default for KnowledgeConfig {
     fn default() -> Self {
         Self {
-            chunk_size: 800,
-            chunk_overlap: 150,
-            outdating_days: 90,
-            max_results: 10,
-            session_ttl_hours: 24,
+            chunk_size: 1200,
+            chunk_overlap: 300,
+            outdating_days: 15,
+            max_results: 5,
+            session_ttl_hours: 120,
         }
     }
 }
