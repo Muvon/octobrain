@@ -183,8 +183,7 @@ pub fn format_match_results(results: &[MatchResult]) -> String {
         output.push('\n');
         output.push_str(&result.source.bright_black().to_string());
         output.push('\n');
-        output.push_str(&format!("Line {}:", result.line_number).cyan().to_string());
-        output.push(' ');
+        output.push_str(&format!("Line {}: ", result.line_number).cyan().to_string());
         output.push_str(&result.matched_line);
         if !result.captures.is_empty() {
             output.push_str(

@@ -460,7 +460,7 @@ fn normalize_source(source: &str) -> Result<String> {
         || trimmed.starts_with("https://")
         || trimmed.starts_with("stored://")
     {
-        return Ok(trimmed.to_string());
+        return Ok(trimmed.trim_end_matches('/').to_string());
     }
 
     // Already a file:// URI
