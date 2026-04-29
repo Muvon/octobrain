@@ -33,8 +33,14 @@ impl VectorOptimizer {
         // Calculate optimal partitions (sqrt of row count, min 2, max 256)
         let num_partitions = ((row_count as f64).sqrt() as u32).clamp(2, 256);
 
-        // Calculate sub-vectors (vector_dim / 8, min 1, max 96)
-        let num_sub_vectors = ((vector_dim / 8) as u32).clamp(1, 96);
+        // Calculate sub-vectors. PQ requires num_sub_vectors to evenly divide vector_dim,
+        // so we target ~vector_dim/8 (capped at 96 for memory/perf) and snap DOWN to the
+        // nearest divisor. Without this snap, dims like 1024 yield 96 → 1024 % 96 != 0 → Lance error.
+        let target = ((vector_dim / 8) as u32).clamp(1, 96);
+        let num_sub_vectors = (1..=target)
+            .rev()
+            .find(|n| (vector_dim as u32).is_multiple_of(*n))
+            .unwrap_or(1);
 
         IndexParams {
             should_create_index: true,
