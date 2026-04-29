@@ -41,11 +41,14 @@
   - `server.rs` - Main MCP server implementation (stdio + HTTP modes)
   - `memory.rs` - Memory tool implementations
   - `knowledge.rs` - Knowledge tool implementations
-  - `types.rs` - MCP tool parameter types
+  - `types.rs` - MCP error types and utilities
   - `logging.rs` - Server logging utilities
   - `mod.rs` - Module exports
 - `src/constants.rs` - Project constants
 - `src/vector_optimizer.rs` - Vector index optimization and query tuning
+- `src/embedding.rs` - Embedding provider creation and management
+- `src/lib.rs` - Library exports for external use
+- `src/main.rs` - CLI entry point and command dispatch
 
 ### CLI Structure
 Octobrain uses a hierarchical command structure:
@@ -75,6 +78,17 @@ Octobrain uses a hierarchical command structure:
 - `related` - Get related memories through relationships
 - `auto-link` - Manually trigger auto-linking for a memory
 - `graph` - Get memory graph with linked context
+
+**Knowledge Subcommands** (all 9):
+- `index` - Index a URL or local file into knowledge base
+- `search` - Search knowledge base semantically
+- `read` - Read and display full content of a URL or local file
+- `match` - Search indexed content by regex pattern (like grep)
+- `store` - Store raw text content under a key
+- `delete` - Delete indexed source and all its chunks
+- `delete-stored` - Delete stored content by key
+- `stats` - Show knowledge base statistics
+- `list` - List indexed sources with metadata
 
 ## Configuration
 
@@ -326,7 +340,7 @@ let memory_query = MemoryQuery {
 - **HTTP Mode** (`--bind=host:port`): HTTP server for web-based integrations and testing
 
 ### MCP Tools
-The server exposes seven tools:
+The server exposes nine tools:
 - `memorize`: Store memories
 - `remember`: Semantic search with multi-query support
 - `forget`: Delete memories by ID or query
@@ -334,6 +348,8 @@ The server exposes seven tools:
 - `auto_link`: Find and connect related memories based on semantic similarity
 - `memory_graph`: Explore memory relationships with multi-hop graph traversal
 - `knowledge_search`: Search indexed web knowledge with optional auto-indexing
+- `knowledge_read`: Fetch and return full text content of a URL or local file
+- `knowledge_match`: Search indexed content by regex pattern (like grep)
 
 ## Quick Start Checklist
 
@@ -464,8 +480,42 @@ octobrain memory relationships <memory-id>
 # Find related memories
 octobrain memory related <memory-id>
 
+# Auto-link similar memories
+octobrain memory auto-link <memory-id>
+
+# Explore memory graph
+octobrain memory graph <memory-id> --depth 2
+
 # Start MCP server
 octobrain mcp
+
+# Knowledge commands
+# Index a URL or local file
+octobrain knowledge index https://docs.rs/tokio/latest/tokio/
+
+# Search knowledge base
+octobrain knowledge search "how to handle async tasks"
+
+# Read full content of a source
+octobrain knowledge read https://docs.rs/tokio/latest/tokio/
+
+# Search indexed content by regex pattern
+octobrain knowledge match "spawn_blocking|block_in_place"
+
+# Store raw text content
+octobrain knowledge store "meeting-notes" --content "Discussion points..."
+
+# List indexed sources
+octobrain knowledge list --limit 20
+
+# Show knowledge statistics
+octobrain knowledge stats
+
+# Delete a source
+octobrain knowledge delete https://example.com/docs
+
+# Delete stored content by key
+octobrain knowledge delete-stored "meeting-notes"
 ```
 
 ## License

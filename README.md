@@ -4,7 +4,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/octobrain.svg)](https://crates.io/crates/octobrain)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org/)
 
 **Octobrain** gives your AI assistant a long-term memory. Store code insights, architecture decisions, bug fixes, and knowledge — then retrieve them with semantic search in future sessions. Works as a CLI tool or as an MCP server for integration with Claude Desktop and other AI tools.
 
@@ -155,6 +155,12 @@ octobrain knowledge search "how to handle async tasks"
 # Search within a specific source (auto-indexes if outdated)
 octobrain knowledge search "spawn blocking" --source https://docs.rs/tokio/
 
+# Read full content of a URL or local file
+octobrain knowledge read https://docs.rs/tokio/latest/tokio/
+
+# Search indexed content by regex pattern
+octobrain knowledge match "spawn_blocking|block_in_place"
+
 # Store raw text content
 octobrain knowledge store "meeting-notes" --content "Discussion points..."
 
@@ -194,6 +200,8 @@ octobrain mcp --bind 0.0.0.0:12345
 | `auto_link` | Auto-connect similar memories |
 | `memory_graph` | Explore memory relationships |
 | `knowledge_search` | Search indexed knowledge |
+| `knowledge_read` | Fetch full text content of a source |
+| `knowledge_match` | Search indexed content by regex pattern |
 
 See [MCP Integration](#mcp-integration) for Claude Desktop setup.
 
