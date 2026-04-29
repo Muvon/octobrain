@@ -203,6 +203,12 @@ impl KnowledgeProvider {
             )
         })?;
 
+        // Validate regex up-front so a bad pattern returns invalid_params
+        // (user error) rather than internal_error from the manager.
+        regex::Regex::new(pattern).map_err(|e| {
+            McpError::invalid_params(format!("Invalid regex pattern: {}", e), "knowledge")
+        })?;
+
         let manager = self.knowledge_manager.lock().await;
         let results = manager
             .match_content(pattern, source, Some(session_id))

@@ -652,17 +652,18 @@ impl KnowledgeStore {
             ));
         }
 
-        let mut query = self.table.query().limit(10_000);
+        let mut query = self.table.query();
         if !filters.is_empty() {
             query = query.only_if(filters.join(" AND "));
         }
 
-        let results = query.execute().await?;
-        let batches: Vec<RecordBatch> = results.try_collect().await?;
-
+        // Stream batches: peak memory bounded by a single RecordBatch, not the
+        // whole table. Each batch is processed and dropped before the next is
+        // pulled, so memory stays flat regardless of chunk count.
+        let mut stream = query.execute().await?;
         let mut matches = Vec::new();
 
-        for batch in &batches {
+        while let Some(batch) = stream.try_next().await? {
             if batch.num_rows() == 0 {
                 continue;
             }
