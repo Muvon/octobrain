@@ -1,527 +1,195 @@
-# Octobrain Development Instructions
+# Octobrain — Development Guide
 
-## Core Principles
-
-### Strict Configuration Management
-- **NO DEFAULTS**: All configuration must be explicitly defined in `config-templates/default.toml`
-- **Template-First**: Update template file when adding new config options
-- **Environment Override**: Use env vars for sensitive data (API keys)
-- **Version Control**: Config has version field for future migrations
-
-### Code Reuse & Architecture
-- **DRY Principle**: Don't repeat yourself - reuse existing patterns
-- **KISS Principle**: Keep it simple, stupid - avoid over-engineering
-- **Zero Warnings**: All code must pass `cargo clippy` without warnings
-- **Fail Fast**: Validate inputs early and return clear error messages
+Standalone memory management system for AI context and conversation state. Exposes a CLI (`octobrain`) and an MCP server. Built in Rust (1.95, edition 2021) using LanceDB for vector storage, `rmcp` for MCP protocol, and `octolib` for embedding providers. Apache-2.0, by Muvon Un Limited.
 
 ## Project Structure
 
-### Core Modules
-- `src/cli.rs` - CLI argument parsing with `memory` subcommand grouping
-- `src/commands.rs` - Command execution logic
-- `src/config.rs` - Configuration loading and management
-- `src/storage.rs` - Platform-specific storage paths (XDG compliant)
-- `src/memory/` - Memory management system
-  - `types.rs` - Memory data structures
-  - `manager.rs` - High-level memory operations
-  - `store.rs` - LanceDB vector storage
-  - `formatting.rs` - Output formatting utilities
-  - `git_utils.rs` - Git integration for commit/project detection
-  - `mod.rs` - Module exports
-  - `*_tests.rs` - Test files (hybrid_tests, decay_tests, auto_link_tests, role_tests, reranker_integration)
-- `src/knowledge/` - Knowledge base management system
-  - `types.rs` - Knowledge data structures
-  - `manager.rs` - High-level knowledge operations
-  - `store.rs` - LanceDB vector storage for knowledge
-  - `chunker.rs` - Web content chunking logic
-  - `formatting.rs` - Output formatting utilities
-  - `content.rs` - Content retrieval and processing
-  - `mod.rs` - Module exports
-- `src/mcp/` - Model Context Protocol server
-  - `server.rs` - Main MCP server implementation (stdio + HTTP modes)
-  - `memory.rs` - Memory tool implementations
-  - `knowledge.rs` - Knowledge tool implementations
-  - `types.rs` - MCP error types and utilities
-  - `logging.rs` - Server logging utilities
-  - `mod.rs` - Module exports
-- `src/constants.rs` - Project constants
-- `src/vector_optimizer.rs` - Vector index optimization and query tuning
-- `src/embedding.rs` - Embedding provider creation and management
-- `src/lib.rs` - Library exports for external use
-- `src/main.rs` - CLI entry point and command dispatch
-
-### CLI Structure
-Octobrain uses a hierarchical command structure:
-
-**Root Level Commands** (only 4):
-- `memory` - Memory management for storing and retrieving information
-- `knowledge` - Knowledge base management for web content indexing and search
-- `mcp` - Start MCP server (Model Context Protocol) exposing memory and knowledge tools
-- `help` - Print this message or help of the given subcommand(s)
-
-**Memory Subcommands** (all 18):
-- `memorize` - Store important information, insights, or context in memory
-- `remember` - Search and retrieve stored memories using semantic search
-- `forget` - Permanently remove specific memories
-- `update` - Update a memory
-- `get` - Get memory by ID
-- `recent` - List recent memories
-- `by-type` - Get memories by type
-- `for-files` - Get memories related to files
-- `by-tags` - Get memories by tags
-- `current-commit` - Get memories for current Git commit
-- `stats` - Show memory statistics
-- `cleanup` - Clean up old memories
-- `clear-all` - Clear ALL memory data (DANGEROUS: deletes everything)
-- `relate` - Create a relationship between two memories
-- `relationships` - Get relationships for a memory
-- `related` - Get related memories through relationships
-- `auto-link` - Manually trigger auto-linking for a memory
-- `graph` - Get memory graph with linked context
-
-**Knowledge Subcommands** (all 9):
-- `index` - Index a URL or local file into knowledge base
-- `search` - Search knowledge base semantically
-- `read` - Read and display full content of a URL or local file
-- `match` - Search indexed content by regex pattern (like grep)
-- `store` - Store raw text content under a key
-- `delete` - Delete indexed source and all its chunks
-- `delete-stored` - Delete stored content by key
-- `stats` - Show knowledge base statistics
-- `list` - List indexed sources with metadata
-
-## Configuration
-
-### Config File Location
-Configuration is stored in `~/.local/share/octobrain/config.toml` on Unix-like systems (XDG compliant).
-
-### Default Configuration
-```toml
-[embedding]
-# Embedding model for memory operations
-# Format: provider:model (e.g., voyage:voyage-3.5-lite, openai:text-embedding-3-small)
-# Default: voyage:voyage-3.5-lite
-model = "voyage:voyage-3.5-lite"
-
-# Batch size for embedding generation (number of texts to process at once)
-# Default: 32
-batch_size = 32
-
-# Maximum tokens per batch request
-# Default: 100000
-max_tokens_per_batch = 100000
-
-[search]
-# Similarity threshold for memory search (0.0 to 1.0)
-# Lower values = more results, higher values = fewer but more relevant
-# Default: 0.3
-similarity_threshold = 0.3
-
-# Maximum number of results to return from search
-# Default: 50
-max_results = 50
-
-[search.hybrid]
-# Enable hybrid search (native BM25 + vector RRF fusion via LanceDB)
-# Default: true
-enabled = true
-
-# Weight applied to the RRF-fused score (vector + BM25 combined) (0.0-1.0)
-# Default: 0.8
-default_vector_weight = 0.8
-
-# Default weight for recency signal (0.0-1.0)
-# Default: 0.1
-default_recency_weight = 0.1
-
-# Default weight for importance signal (0.0-1.0)
-# Default: 0.1
-default_importance_weight = 0.1
-
-# Recency decay period in days
-# Default: 30
-recency_decay_days = 30
-
-[search.reranker]
-# Enable reranking for improved search accuracy
-# Default: false
-enabled = false
-
-# Reranker model (fully qualified, e.g., voyage:rerank-2.5)
-# Default: voyage:rerank-2.5
-model = "voyage:rerank-2.5"
-
-# Number of candidates to retrieve before reranking
-# Default: 50
-top_k_candidates = 50
-
-# Number of results to return after reranking
-# Default: 10
-final_top_k = 10
-
-[memory]
-# Maximum number of memories to keep in storage
-# Default: 10000
-max_memories = 10000
-
-# Automatic cleanup threshold in days
-# Default: 365 (1 year)
-auto_cleanup_days = 365
-
-# Minimum importance for automatic cleanup
-# Default: 0.1
-cleanup_min_importance = 0.1
-
-# Maximum memories returned in search
-# Default: 50
-max_search_results = 50
-
-# Default importance for new memories (0.0-1.0)
-# Default: 0.5
-default_importance = 0.5
-
-# Enable temporal decay system (Ebbinghaus forgetting curve)
-# Default: true
-decay_enabled = true
-
-# Half-life for importance decay in days (time for importance to halve)
-# Default: 90 (3 months)
-decay_half_life_days = 90
-
-# Boost factor for access reinforcement (multiplier per access)
-# Default: 1.2
-access_boost_factor = 1.2
-
-# Minimum importance threshold (floor value after decay)
-# Default: 0.05 (5%)
-min_importance_threshold = 0.05
-
-# Enable automatic linking between semantically similar memories
-# Default: true
-auto_linking_enabled = true
-
-# Similarity threshold for auto-linking (0.0-1.0)
-# Default: 0.78
-auto_link_threshold = 0.78
-
-# Maximum number of auto-links per memory
-# Default: 5
-max_auto_links_per_memory = 5
-
-# Create bidirectional links (A->B and B->A)
-# Default: true
-bidirectional_links = true
-
-# Enable automatic cleanup of memories whose related_files no longer exist on disk.
-# On startup, memories with ALL files gone are deleted; partial loss penalizes importance.
-# Default: true
-stale_ref_cleanup_enabled = true
-
-# Importance penalty multiplier per missing file (0.0-1.0).
-# Applied as importance *= penalty^(number_of_dead_files).
-# Lower = harsher penalty. Memories with ALL files gone are deleted regardless.
-# Default: 0.3
-stale_ref_importance_penalty = 0.3
-
-[knowledge]
-# Size of each child chunk in characters
-# Default: 1200
-chunk_size = 1200
-
-# Overlap between child chunks in characters (~25% of chunk_size)
-# Default: 300
-chunk_overlap = 300
-
-# Days after which indexed content is considered outdated
-# Default: 15
-outdating_days = 15
-
-# Maximum number of results to return from knowledge search
-# Default: 5
-max_results = 5
-
-# Hours after which session-scoped knowledge chunks are cleaned up (crash recovery)
-# Default: 120
-session_ttl_hours = 120
+```
+src/
+  main.rs              — CLI entry point, dispatches to commands.rs
+  cli.rs               — Clap structs: Commands, MemoryCommand, KnowledgeCommand
+  commands.rs          — execute(), execute_memory_command(), execute_knowledge_command()
+  config.rs            — Config structs + load() (strict: no defaults, all from TOML)
+  storage.rs           — XDG-compliant storage path resolution
+  embedding.rs         — Embedding provider factory (octolib)
+  vector_optimizer.rs  — LanceDB index optimization logic
+  constants.rs         — Project-wide constants
+  lib.rs               — Public re-exports
+  memory/
+    types.rs           — Memory, MemoryQuery, MemoryRelationship, MemoryConfig, etc.
+    manager.rs         — MemoryManager: high-level ops, stale-ref cleanup, auto-link
+    store.rs           — MemoryStore: LanceDB tables, hybrid search, RRF fusion
+    formatting.rs      — CLI output formatting
+    git_utils.rs       — Git commit/remote detection
+    mod.rs             — Module exports
+    *_tests.rs         — hybrid_tests, decay_tests, auto_link_tests, role_tests, reranker_integration
+  knowledge/
+    types.rs           — KnowledgeChunk, KnowledgeSearchResult, IndexResult, etc.
+    manager.rs         — KnowledgeManager: index, search, read, match, store, delete
+    store.rs           — LanceDB vector storage for knowledge chunks
+    chunker.rs         — Parent/child chunking for web content
+    content.rs         — URL/file fetching and content extraction
+    formatting.rs      — CLI output formatting
+    mod.rs             — Module exports
+  mcp/
+    server.rs          — McpServer: 6 tools via rmcp macros, stdio + HTTP transports
+    memory.rs          — MemoryProvider: execute_memorize/remember/forget/graph/relate
+    knowledge.rs       — KnowledgeProvider: execute_search/store/delete/read/match
+    types.rs           — McpError utilities
+    logging.rs         — Server-side logging
+    mod.rs             — Module exports
+config-templates/
+  default.toml         — CANONICAL config template — update here first for any new option
 ```
 
-## Storage Locations in platform-specific directories following XDG Base Directory specification:
+## Where to Look
 
-- **macOS**: `~/.local/share/octobrain/`
-- **Linux**: `~/.local/share/octobrain/` (or `$XDG_DATA_HOME/octobrain/`)
-- **Windows**: `%APPDATA%\octobrain\`
+| Task | Start here |
+|------|------------|
+| Add a memory CLI command | `src/cli.rs` → `MemoryCommand` enum, then `src/commands.rs` → `execute_memory_command()` |
+| Add a knowledge CLI command | `src/cli.rs` → `KnowledgeCommand` enum, then `src/commands.rs` → `execute_knowledge_command()` |
+| Add/change an MCP tool | `src/mcp/server.rs` (tool macro + params struct), `src/mcp/memory.rs` or `knowledge.rs` |
+| Add a config option | `src/config.rs` struct → `config-templates/default.toml` (both, always together) |
+| Change memory data model | `src/memory/types.rs` → `src/memory/store.rs` (schema + batch_to_memories) |
+| Change knowledge data model | `src/knowledge/types.rs` → `src/knowledge/store.rs` |
+| Search/query logic | `src/memory/store.rs` → `search_memories()`, `hybrid_search()`, `vector_search()` |
+| Embedding provider | `src/embedding.rs` → `octolib` crate |
+| Storage paths | `src/storage.rs` |
+| LanceDB index tuning | `src/vector_optimizer.rs` |
 
-Project-specific data is stored in subdirectories identified by Git remote URL hash.
+## How Things Work
 
-## Memory Types
+### Core Principles
+- **No defaults in code** — all config values come from `config-templates/default.toml`, copied to `~/.local/share/octobrain/config.toml` on first run. `Config::load()` is strict.
+- **`--no-default-features` always** — default features enable `fastembed`/`huggingface` (heavy local models). Dev/CI always uses `--no-default-features`.
+- **Zero clippy warnings** — `cargo clippy --no-default-features --all-targets -- -D warnings` must pass clean.
+- **Copyright header** — every `.rs` file starts with `// Copyright 2026 Muvon Un Limited` then `//`.
+- **No `unwrap()`** — use `?` and `Result<T>`. Fail fast with meaningful messages.
+- **No blocking in async** — no `std::thread::sleep`, no sync I/O in async contexts.
+- **Minimal new deps** — reuse what's in `Cargo.toml` before adding anything.
 
-- `code`: Code insights and patterns
-- `architecture`: System design decisions
-- `bug_fix`: Bug fixes and solutions
-- `feature`: Feature implementations
-- `documentation`: Documentation and knowledge
-- `user_preference`: User settings and preferences
-- `decision`: Project decisions
-- `learning`: Learning notes and tutorials
-- `configuration`: Configuration and setup
-- `testing`: Testing strategies
-- `performance`: Performance optimizations
-- `security`: Security considerations
-- `validation`: Idea/product validation, hypothesis testing
-- `research`: Technical/market research, analysis
-- `workflow`: SOPs, playbooks, process descriptions
-- `requirement`: Business requirements, specs, constraints
-- `design`: UI/UX decisions, wireframes, system design
-- `integration`: API integrations, third-party services
-- `communication`: Stakeholder updates, team decisions
-- `process`: Deployment procedures, runbooks, operations
-- `insight`: General insights
+### Config Pattern
+```rust
+// ✅ Add to struct in src/config.rs
+pub struct MemoryConfig {
+    pub my_new_field: u32,
+    // ...
+}
 
-## Development Workflow
+// ✅ Add Default impl value
+fn default() -> Self { Self { my_new_field: 42, ... } }
 
-### MANDATORY BUILD COMMANDS
-- **ALWAYS use `--no-default-features`** for ALL cargo commands during development
-  ```bash
-  cargo build --no-default-features
-  cargo check --no-default-features --message-format=short
-  cargo test --no-default-features
-  ```
-- **NEVER use `--release`** unless explicitly requested
-- **NEVER use default cargo build** - ALWAYS add `--no-default-features` flag
-
-### Code Quality Standards
-- **Zero clippy warnings** - All code must pass `cargo clippy` without warnings
-- **Copyright header** - Every `.rs` file MUST start with `// Copyright <YEAR> Muvon Un Limited` followed by `//`. When creating new files or modifying existing ones, ensure the copyright year matches the current year
-- **Minimal dependencies** - Reuse existing dependencies before adding new ones
-- **Clone trait** - Add `#[derive(Clone)]` to structs that need to be shared across async contexts
-- **Error handling** - Use proper `Result<T>` types and meaningful error messages
-
-### Testing Approach
-- **Unit tests** for individual components
-- **Integration tests** for full workflows
-- **Manual testing** with real projects during development
-
-## Memory System Architecture
+// ✅ MANDATORY: also add to config-templates/default.toml with comment
+# My new field description
+# Default: 42
+my_new_field = 42
+```
+Never add a config field without updating `config-templates/default.toml`.
 
 ### Memory Storage Pattern
 ```rust
-// ✅ GOOD: Use optimized store methods
-store.store_code_blocks(&blocks, &embeddings).await?;
-store.store_text_blocks(&blocks, &embeddings).await?;
-store.store_document_blocks(&blocks, &embeddings).await?;
+// ✅ Store via manager (handles embedding + auto-link)
+let memory = memory_manager.memorize(MemorizeParams { ... }).await?;
 
-// ✅ GOOD: Search with optimized parameters (automatic)
-let results = memory_store.search_memories(&query).await?;
+// ✅ Search via MemoryQuery builder
+let results = memory_manager.remember(&query, Some(filters)).await?;
 
-// ❌ AVOID: Manual index creation (optimizer handles this)
-// table.create_index(&["embedding"], Index::Auto) // Don't do this
-
-// ❌ AVOID: Fixed parameters (optimizer calculates optimal values)
-// .num_partitions(256) // Don't hardcode
-```
-
-### Memory Query Pattern
-```rust
-// Build query with filters
-let memory_query = MemoryQuery {
-    query_text: Some(query.to_string()),
-    memory_types: Some(vec![MemoryType::Code]),
-    tags: Some(vec!["api".to_string()]),
+// ✅ Query struct — use ..Default::default() for unset fields
+let q = MemoryQuery {
+    query_text: Some("api design".into()),
+    memory_types: Some(vec![MemoryType::Architecture]),
     limit: Some(10),
-    min_relevance: Some(0.5),
     ..Default::default()
 };
+
+// ❌ Never create index manually — VectorOptimizer handles it
+// table.create_index(&["embedding"], Index::Auto)
+
+// ❌ Never hardcode partition counts
+// .num_partitions(256)
 ```
+
+### MCP Tool Pattern
+Tools are defined with `#[tool(...)]` macros on `McpServer` in `src/mcp/server.rs`. Each tool has a typed `Params` struct (with `JsonSchema`, `Serialize`, `Deserialize`). Execution delegates to `MemoryProvider` or `KnowledgeProvider`.
+
+```rust
+// ✅ Tool definition pattern
+#[tool(name = "my_tool", description = "...")]
+async fn my_tool(&self, Parameters(params): Parameters<MyToolParams>) -> Result<String, McpError> {
+    let provider = self.get_or_init_memory().await?;
+    let args = serde_json::to_value(&params).map_err(|e| McpError::internal_error(...))?;
+    provider.execute_my_tool(&args).await.map_err(|e| McpError::internal_error(...))
+}
+```
+
+Session locking: when `session.locked == true`, strip `project`/`role` from args before passing to provider.
+
+### Knowledge Chunking
+Parent/child model: large content → parent sections stored as `parent_content` (returned to user), split into child chunks (embedded + matched). Config: `chunk_size = 1200`, `chunk_overlap = 300`.
+
+### Adding a Memory Command (checklist)
+1. Add variant to `MemoryCommand` in `src/cli.rs` with `/// doc comment` for help text
+2. Add match arm in `execute_memory_command()` in `src/commands.rs`
+3. Call `MemoryManager` methods — don't reach into `MemoryStore` directly from commands
+4. Follow existing output pattern: `format_memories()` / `format_search_results()`
+
+### Adding a Knowledge Command (checklist)
+1. Add variant to `KnowledgeCommand` in `src/cli.rs`
+2. Add match arm in `execute_knowledge_command()` in `src/commands.rs`
+3. Call `KnowledgeManager` methods
+
+### Adding an MCP Tool (checklist)
+1. Define `MyParams` struct in `src/mcp/server.rs` with `JsonSchema + Serialize + Deserialize`
+2. Add `#[tool(...)]` method on `McpServer`
+3. Add `execute_my_tool()` on `MemoryProvider` or `KnowledgeProvider`
+4. Update `get_info()` instructions string if needed
 
 ## MCP Server
 
-### Server Modes
-- **Stdin Mode** (default): Standard MCP protocol over stdin/stdout for AI assistant integration
-- **HTTP Mode** (`--bind=host:port`): HTTP server for web-based integrations and testing
+**6 tools** (knowledge is a unified tool with a `command` discriminator):
 
-### MCP Tools
-The server exposes nine tools:
-- `memorize`: Store memories
-- `remember`: Semantic search with multi-query support
-- `forget`: Delete memories by ID or query
-- `relate`: Create a relationship between two memories
-- `auto_link`: Find and connect related memories based on semantic similarity
-- `memory_graph`: Explore memory relationships with multi-hop graph traversal
-- `knowledge_search`: Search indexed web knowledge with optional auto-indexing
-- `knowledge_read`: Fetch and return full text content of a URL or local file
-- `knowledge_match`: Search indexed content by regex pattern (like grep)
+| Tool | Purpose |
+|------|---------|
+| `memorize` | Store a memory with type, title, content, tags, importance, source trust |
+| `remember` | Semantic search — single query or array of 2-5 terms; returns 1-hop graph neighbors |
+| `forget` | Delete by `memory_id` or by query+filters; requires `confirm=true` |
+| `relate` | Create typed relationship between two memories |
+| `memory_graph` | BFS graph traversal from a root memory (depth > 1) |
+| `knowledge` | Unified: `search`, `store`, `delete`, `read`, `match` via `command` field |
 
-## Quick Start Checklist
+**Transport modes:**
+- Stdio (default): `octobrain mcp`
+- HTTP: `octobrain mcp --bind=host:port` (streamable HTTP, MCP 2025-03-26)
 
-1. **Config First**: Always update `config-templates/default.toml` when adding new config options
-2. **No Defaults**: Explicit configuration for all options
-3. **Reuse Patterns**: Follow existing indexer/storage patterns
-4. **Batch Processing**: Use established batch sizes and flush cycles
-5. **Git Integration**: Leverage commit-based optimization
-6. **Test Incrementally**: Use watch mode for development iteration
-7. **Clean Code**: Always run clippy before finalizing code
-8. **Zero Warnings**: Ensure `cargo clippy` passes without warnings
+**Session locking:** project/role injected at `initialize` handshake via experimental capabilities; once locked, per-call overrides are ignored.
 
-## Development Patterns
+## Memory Types
 
-### Adding New Features
-1. Update struct in `src/config.rs` if adding config options
-2. Add defaults in `Default` impl if needed
-3. **MANDATORY**: Update `config-templates/default.toml`
-4. Add validation if needed
-5. Update README.md with new feature documentation
+`code` · `architecture` · `bug_fix` · `feature` · `documentation` · `user_preference` · `decision` · `learning` · `configuration` · `testing` · `performance` · `security` · `validation` · `research` · `workflow` · `requirement` · `design` · `integration` · `communication` · `process` · `insight`
 
-### Adding Memory Commands
-1. Add variant to `MemoryCommand` enum in `src/cli.rs`
-2. Add match arm in `execute_memory_command()` in `src/commands.rs`
-3. Implement logic following existing patterns
-4. Add help text in CLI enum
-5. Test with `cargo run -- memory <command> --help`
+## Storage
 
-### Code Quality Standards
-- **Zero clippy warnings**: All code must pass `cargo clippy` without warnings
-- **Minimal dependencies**: Reuse existing dependencies before adding new ones
-- **Clone trait**: Add `#[derive(Clone)]` to structs that need to be shared across async contexts
-- **Error handling**: Use proper `Result<T>` types and meaningful error messages
+- **macOS/Linux**: `~/.local/share/octobrain/` (XDG; respects `$XDG_DATA_HOME`)
+- **Windows**: `%APPDATA%\octobrain\`
+- Project-scoped data lives in subdirs keyed by SHA-256 of Git remote URL
+- Config: `~/.local/share/octobrain/config.toml`
 
-## Performance Guidelines
+## Gotchas
 
-### Memory Management
-- **Progressive file counting** during indexing
-- **Preload file metadata** in HashMap for O(1) lookup
-- **Smart merging** of single-line declarations
-- **Context-aware markdown chunking** for better semantic search
-- **Batch operations** for inserts/updates
-- **Regular flush cycles** for persistence
+- `Config::load()` is strict — missing fields cause startup failure. Always update `config-templates/default.toml` alongside `src/config.rs`.
+- `tags` and `memory_types` are stored as JSON strings in LanceDB — they **cannot** be filtered via SQL predicates. Filtering happens in Rust post-fetch (`matches_json_filters()`). Don't push these into LanceDB `only_if()` clauses.
+- `MemoryStore` holds `project_key` and `role` at construction time. Scoping is baked in — don't pass them as query params expecting them to override.
+- Stale-ref cleanup runs on `MemoryManager::new()` — checks Git HEAD and only re-scans when HEAD changes (marker file in storage dir).
+- `auto_link` runs automatically on `memorize` and `update_memory`. Calling it manually is for refresh only.
+- The `knowledge` MCP tool is a single tool with a `command` discriminator — not separate tools. The CLI has separate subcommands.
+- `--no-default-features` is mandatory for all cargo invocations. Default features pull in large local model dependencies (`fastembed`, `huggingface`).
 
-### Database Efficiency
-- **Use `content_exists()`** before processing
-- **Batch operations** for inserts/updates
-- **Regular flush cycles** for persistence
-- **Differential processing** for file changes
+## Never
 
-## Common Patterns
-
-### Error Handling
-```rust
-// ✅ GOOD: Proper error handling
-pub async fn execute(config: &Config, command: Commands) -> Result<()> {
-    match command {
-        Commands::Memory { command } => {
-            let mut memory_manager = MemoryManager::new(config).await?;
-            execute_memory_command(&mut memory_manager, command).await
-        }
-        Commands::Mcp => {
-            let working_directory = std::env::current_dir()?;
-            let server = McpServer::new(config.clone(), working_directory).await?;
-            server.run().await?;
-        }
-    }
-}
-
-// ❌ BAD: Unnecessary unwrap
-let memory_manager = MemoryManager::new(config).await.unwrap(); // Don't do this
-```
-
-### Async Patterns
-```rust
-// ✅ GOOD: Proper async/await usage
-let results = memory_manager.remember(&query, Some(filters)).await?;
-
-// ❌ BAD: Blocking operations in async context
-std::thread::sleep(std::time::Duration::from_secs(1)); // Don't do this
-```
-
-### CLI Usage Examples
-
-```bash
-# Store a memory
-octobrain memory memorize --title "API Design" --content "Use REST principles" --tags "api,design"
-
-# Search memories
-octobrain memory remember "api design patterns"
-
-# Multiple query search
-octobrain memory remember "authentication" "security" "jwt"
-
-# Delete a memory
-octobrain memory forget --memory-id <id>
-
-# Update a memory
-octobrain memory update <id> --title "New Title" --add-tags "new-tag"
-
-# Get memory by ID
-octobrain memory get <id>
-
-# List recent memories
-octobrain memory recent --limit 20
-
-# Filter by type
-octobrain memory by-type architecture --limit 10
-
-# Search by tags
-octobrain memory by-tags "api,security"
-
-# Find memories for files
-octobrain memory for-files "src/main.rs,src/lib.rs"
-
-# Show statistics
-octobrain memory stats
-
-# Clean up old memories
-octobrain memory cleanup
-
-# Create relationships
-octobrain memory relate <source-id> <target-id> --relationship-type "depends_on"
-
-# View relationships
-octobrain memory relationships <memory-id>
-
-# Find related memories
-octobrain memory related <memory-id>
-
-# Auto-link similar memories
-octobrain memory auto-link <memory-id>
-
-# Explore memory graph
-octobrain memory graph <memory-id> --depth 2
-
-# Start MCP server
-octobrain mcp
-
-# Knowledge commands
-# Index a URL or local file
-octobrain knowledge index https://docs.rs/tokio/latest/tokio/
-
-# Search knowledge base
-octobrain knowledge search "how to handle async tasks"
-
-# Read full content of a source
-octobrain knowledge read https://docs.rs/tokio/latest/tokio/
-
-# Search indexed content by regex pattern
-octobrain knowledge match "spawn_blocking|block_in_place"
-
-# Store raw text content
-octobrain knowledge store "meeting-notes" --content "Discussion points..."
-
-# List indexed sources
-octobrain knowledge list --limit 20
-
-# Show knowledge statistics
-octobrain knowledge stats
-
-# Delete a source
-octobrain knowledge delete https://example.com/docs
-
-# Delete stored content by key
-octobrain knowledge delete-stored "meeting-notes"
-```
-
-## License
-
-Apache-2.0
-
-## Credits
-
-Developed by Muvon Un Limited.
+- Add a config field without updating `config-templates/default.toml`
+- Use `unwrap()` or `expect()` in non-test code
+- Run `cargo build` / `cargo check` / `cargo test` without `--no-default-features`
+- Create LanceDB indexes manually — `ensure_optimal_index()` / `VectorOptimizer` handles this
+- Hardcode LanceDB partition counts or index parameters — optimizer calculates them
+- Add new crate dependencies without checking if existing deps already cover the need
+- Omit the copyright header (`// Copyright 2026 Muvon Un Limited`) from new `.rs` files
