@@ -583,8 +583,10 @@ mod tests {
 
     #[test]
     fn test_normalize_source_rejects_directory() {
-        // /tmp exists on every unix-like system used in CI/dev — safe to canonicalize.
-        let err = normalize_source("/tmp")
+        // Use the platform temp dir — guaranteed to exist on every OS (incl. Windows).
+        let tmp = std::env::temp_dir();
+        let tmp_str = tmp.to_str().expect("temp dir path must be valid UTF-8");
+        let err = normalize_source(tmp_str)
             .expect_err("directories must not be accepted as knowledge sources");
         let msg = format!("{:#}", err);
         assert!(
