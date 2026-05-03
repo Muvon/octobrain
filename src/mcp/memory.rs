@@ -583,69 +583,6 @@ impl MemoryProvider {
         }
     }
 
-    /// Execute the auto_link tool
-    pub async fn execute_auto_link(&self, arguments: &Value) -> Result<String, McpError> {
-        let memory_id = arguments
-            .get("memory_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::invalid_params("Missing required parameter 'memory_id'", "auto_link")
-            })?;
-
-        // Validate memory ID
-        if memory_id.trim().is_empty() || memory_id.len() > 100 {
-            return Err(McpError::invalid_params(
-                "Invalid memory ID format",
-                "auto_link",
-            ));
-        }
-
-        debug!(
-            memory_id = %memory_id,
-            "Auto-linking memory"
-        );
-
-        let relationships = {
-            let mut manager_guard = self.memory_manager.lock().await;
-            manager_guard
-                .auto_link_memory(memory_id)
-                .await
-                .map_err(|e| {
-                    McpError::internal_error(
-                        format!("Failed to auto-link memory: {}", e),
-                        "auto_link",
-                    )
-                })?
-        };
-
-        if relationships.is_empty() {
-            Ok(format!(
-                "No similar memories found to link with '{}' (similarity threshold not met)",
-                memory_id
-            ))
-        } else {
-            let mut output = format!(
-                "✅ Created {} auto-link(s) for memory '{}':\n\n",
-                relationships.len(),
-                memory_id
-            );
-
-            for rel in relationships.iter().take(10) {
-                // Limit to 10 for readability
-                output.push_str(&format!(
-                    "  {} -> {} (strength: {:.2})\n",
-                    rel.source_id, rel.target_id, rel.strength
-                ));
-            }
-
-            if relationships.len() > 10 {
-                output.push_str(&format!("\n  ... and {} more\n", relationships.len() - 10));
-            }
-
-            Ok(output)
-        }
-    }
-
     /// Execute the memory_graph tool
     pub async fn execute_memory_graph(&self, arguments: &Value) -> Result<String, McpError> {
         let memory_id = arguments

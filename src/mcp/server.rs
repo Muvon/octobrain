@@ -334,13 +334,6 @@ pub struct ForgetParams {
     pub role: Option<String>,
 }
 
-/// Auto-link tool parameters
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct AutoLinkParams {
-    /// Memory ID to auto-link
-    pub memory_id: String,
-}
-
 /// Memory graph tool parameters
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryGraphParams {
@@ -505,28 +498,6 @@ impl McpServer {
     }
 
     #[tool(
-        name = "auto_link",
-        description = "Find and connect semantically similar memories for a given memory ID. Auto-linking runs on new memories automatically — call this manually to refresh links after content updates or for memories created outside normal flow."
-    )]
-    async fn auto_link(
-        &self,
-        Parameters(params): Parameters<AutoLinkParams>,
-    ) -> Result<String, McpError> {
-        let provider = self.get_or_init_memory().await?;
-
-        let args = serde_json::to_value(&params).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize params: {}", e), None)
-        })?;
-
-        provider.execute_auto_link(&args).await.map_err(|e| {
-            McpError::internal_error(
-                e.message,
-                Some(serde_json::to_value(e.operation).unwrap_or_default()),
-            )
-        })
-    }
-
-    #[tool(
         name = "memory_graph",
         description = "Retrieve a memory and its connected neighbors as a graph. remember already includes 1-hop neighbors — use this only for deeper traversal (depth > 1) or to see the full relationship structure."
     )]
@@ -646,8 +617,8 @@ impl ServerHandler for McpServer {
             .with_instructions(
                 "This server provides memory tools for storing and retrieving AI context. \
                  Use 'memorize' to store information, 'remember' for semantic search, \
-                 'forget' to delete memories, 'auto_link' to find related memories, \
-                 'memory_graph' to explore memory connections, 'relate' to create relationships, \
+                 'forget' to delete memories, 'memory_graph' to explore memory connections, \
+                 'relate' to create relationships, \
                  and 'knowledge' to search indexed web content.",
             )
     }
