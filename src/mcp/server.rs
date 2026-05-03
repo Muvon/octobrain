@@ -385,9 +385,9 @@ pub struct KnowledgeParams {
     /// [search] What to search for, in natural language (required for search)
     #[schemars(length(min = 3, max = 500))]
     pub query: Option<String>,
-    /// [search] Source filter — URL or local file path to auto-index and search within. Supports http/https URLs, file:///path, or /absolute/path. File types: .html, .txt, .md, .pdf, .docx. Omit to search all indexed sources.
-    /// [read] URL or local file path to read full content from. Supports http/https URLs, file:///path, or /absolute/path. File types: .html, .txt, .md, .pdf, .docx.
-    /// [match] Source filter — only search within this URL or file path. Omit to search all indexed sources.
+    /// [search] Source filter — a SINGLE URL or local FILE path to auto-index and search within. MUST point to one specific file (e.g. /path/to/notes.md, https://example.com/page) — directories are NOT supported and will be rejected. Supports http/https URLs, file:///path, or /absolute/path. File types: .html, .txt, .md, .pdf, .docx. Omit to search across ALL previously indexed sources.
+    /// [read] A SINGLE URL or local FILE path to read full content from. MUST point to one specific file — directories are NOT supported. Supports http/https URLs, file:///path, or /absolute/path. File types: .html, .txt, .md, .pdf, .docx.
+    /// [match] Source filter — a SINGLE URL or local FILE path. MUST point to one specific file — directories are NOT supported. Omit to match across ALL indexed sources.
     pub source: Option<String>,
     /// [store/delete] Unique identifier key for the content. Error if key already exists on store — delete first to replace.
     pub key: Option<String>,
@@ -543,7 +543,7 @@ impl McpServer {
 
     #[tool(
         name = "knowledge",
-        description = "Knowledge base with five commands. 'search': semantic search across all indexed content — provide source (URL/file) to auto-index on-the-fly, omit to search all. 'store': save raw text under a unique key (session-scoped, auto-cleaned) — error if key exists, delete first to replace. 'delete': remove stored content by key. 'read': fetch and return the FULL text content of a URL or local file — use ONLY as a last resort when search results are insufficient; prefer 'search' for targeted retrieval. 'match': search indexed content by regex pattern (like grep) — returns matching lines only; prefer 'search' for semantic queries, use 'match' for exact string/regex patterns. Supports URLs, local files (.html, .txt, .md, .pdf, .docx)."
+        description = "Knowledge base with five commands. The 'source' parameter (when used) ALWAYS refers to a SINGLE FILE or URL — never a directory; passing a directory path is an error. 'search': semantic search across indexed content — provide source (single URL or file) to auto-index on-the-fly, omit to search all indexed sources. 'store': save raw text under a unique key (session-scoped, auto-cleaned) — error if key exists, delete first to replace. 'delete': remove stored content by key. 'read': fetch and return the FULL text content of a single URL or file — use ONLY as a last resort when search results are insufficient; prefer 'search' for targeted retrieval. 'match': search indexed content by regex pattern (like grep) — returns matching lines only; prefer 'search' for semantic queries, use 'match' for exact string/regex patterns. Supported file types: .html, .txt, .md, .pdf, .docx."
     )]
     async fn knowledge(
         &self,
@@ -619,7 +619,8 @@ impl ServerHandler for McpServer {
                  Use 'memorize' to store information, 'remember' for semantic search, \
                  'forget' to delete memories, 'memory_graph' to explore memory connections, \
                  'relate' to create relationships, \
-                 and 'knowledge' to search indexed web content.",
+                 and 'knowledge' to search indexed web content. \
+                 The 'knowledge' tool's 'source' parameter is always a SINGLE FILE or URL — never a directory.",
             )
     }
 

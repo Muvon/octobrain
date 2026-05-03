@@ -486,6 +486,16 @@ fn normalize_source(source: &str) -> Result<String> {
         .canonicalize()
         .with_context(|| format!("File not found: {}", path.display()))?;
 
+    // Reject directories — knowledge sources must be a single file or URL.
+    // Indexing a directory has no defined semantics; pass individual files instead.
+    if canonical.is_dir() {
+        anyhow::bail!(
+            "Source must be a single file or URL, not a directory: {}. \
+             Pass a specific file path (e.g. file.md, page.html) or an http(s):// URL.",
+            canonical.display()
+        );
+    }
+
     Ok(format!("file://{}", canonical.display()))
 }
 
@@ -569,5 +579,17 @@ mod tests {
         );
         assert!(source_to_path("https://example.com").is_err());
         assert!(source_to_path("stored://key").is_err());
+    }
+
+    #[test]
+    fn test_normalize_source_rejects_directory() {
+        // /tmp exists on every unix-like system used in CI/dev — safe to canonicalize.
+        let err = normalize_source("/tmp")
+            .expect_err("directories must not be accepted as knowledge sources");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("not a directory") || msg.contains("single file or URL"),
+            "error should mention directory rejection, got: {msg}"
+        );
     }
 }
