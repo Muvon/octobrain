@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.6.0] - 2026-05-03
+
+### 📋 Release Summary
+
+This release introduces advanced content retrieval capabilities, including regex pattern matching and full content extraction tools for indexed knowledge (b4c6e800, 0ca75b74). System reliability and performance are significantly improved through optimized memory streaming, stricter path validation, and enhanced vector dimension handling (95f4deb4, 87df649d, 6f831de7). Additionally, the update streamlines the toolset and provides expanded documentation for configuration and development (104c0b59, 069d0495, a44ef316).
+
+
+### ✨ New Features & Enhancements
+
+- **knowledge**: add regex pattern matching for indexed content `b4c6e800`
+- **knowledge**: implement read command for full content extraction `0ca75b74`
+
+### 🔧 Improvements & Optimizations
+
+- **mcp**: remove auto_link tool `104c0b59`
+- **knowledge**: stream query results to limit memory `95f4deb4`
+- **knowledge**: simplify logic and improve safety `2963f38e`
+
+### 🐛 Bug Fixes & Stability
+
+- **knowledge**: use platform temp dir in tests `201d305f`
+- **knowledge**: reject directory paths as sources `87df649d`
+- **vector**: ensure sub-vectors divide dimension `6f831de7`
+- **knowledge**: normalize source uris and match output `4b154ce1`
+
+### 📚 Documentation & Examples
+
+- **instructions**: rewrite development guide for clarity `a44ef316`
+- **knowledge**: add read and match tool documentation `921c9d7e`
+- **config**: expand memory and knowledge settings `069d0495`
+
+### 🔄 Other Changes
+
+3 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.5.1] - 2026-04-19
 
 ### 📋 Release Summary
