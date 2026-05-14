@@ -72,4 +72,13 @@ regex = "1"
 
 # Local dep for testing
 # octolib = { path = "../octolib", default-features = false }
-octolib = { version = "0.19.2", default-features = false }
+octolib = { version = "0.21.5", default-features = false }
+
+# Optimized release profile for static linking
+[profile.release]
+lto = true              # Enable Link Time Optimization
+codegen-units = 1       # Reduce parallel code generation units for better optimization
+panic = "abort"         # Abort on panic for smaller binary size
+strip = true            # Strip symbols from binary
+opt-level = "z"         # Optimize for speed
+overflow-checks = false # Disable overflow checks in release mode
