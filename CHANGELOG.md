@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.1] - 2026-05-14
+
+### 📋 Release Summary
+
+This release introduces a dedicated production release profile and updated dependencies to ensure optimal performance and stability (3063c17b). These configuration improvements streamline the build process and enhance the overall reliability of the memory management system.
+
+
+### 🔄 Other Changes
+
+1 maintenance, dependency, and tooling update not listed individually.
+
 ## [0.6.0] - 2026-05-03
 
 ### 📋 Release Summary
