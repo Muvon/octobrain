@@ -344,6 +344,18 @@ pub struct MemoryGraphParams {
     pub depth: Option<usize>,
 }
 
+/// Consolidate-goal tool parameters
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ConsolidateGoalParams {
+    /// ID of the Goal memory to close. Memory type must be Goal.
+    pub goal_id: String,
+    /// Optional explicit summary text for the consolidated parent memory.
+    /// When omitted, octobrain synthesizes a deterministic summary from the
+    /// source memory titles.
+    #[schemars(length(max = 4000))]
+    pub summary: Option<String>,
+}
+
 /// Relate tool parameters
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RelateParams {
@@ -520,8 +532,28 @@ impl McpServer {
     }
 
     #[tool(
+        name = "consolidate_goal",
+        description = "Close a Goal memory by summarizing all source memories that Achieve it into a new consolidated parent memory. Sources transition to Consolidated state with dampened importance but remain queryable for audit. Use when a task / project / intent completes and you want its supporting context compressed into a single retrievable insight. The new memory inherits importance = max(sources) * 1.1 (clamped). Provide a summary if you want full control over the consolidated content; omit it to get a deterministic synthesis of source titles."
+    )]
+    async fn consolidate_goal(
+        &self,
+        Parameters(params): Parameters<ConsolidateGoalParams>,
+    ) -> Result<String, McpError> {
+        let provider = self.get_or_init_memory().await?;
+        let args = serde_json::to_value(&params).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize params: {}", e), None)
+        })?;
+        provider.execute_consolidate_goal(&args).await.map_err(|e| {
+            McpError::internal_error(
+                e.message,
+                Some(serde_json::to_value(e.operation).unwrap_or_default()),
+            )
+        })
+    }
+
+    #[tool(
         name = "relate",
-        description = "Create a typed relationship between two memories. Use when auto-linking missed a meaningful connection or you need a specific type. Types: related_to, depends_on, supersedes, similar, conflicts, implements, extends. Strength 0.9+ = strong, 0.5-0.8 = moderate, <0.5 = weak."
+        description = "Create a typed relationship between two memories. Use when auto-linking missed a meaningful connection or you need a specific type. Types: related_to, depends_on, supersedes, similar, conflicts, implements, extends, achieves, closes. Strength 0.9+ = strong, 0.5-0.8 = moderate, <0.5 = weak."
     )]
     async fn relate(
         &self,

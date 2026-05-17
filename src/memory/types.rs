@@ -124,6 +124,10 @@ pub enum MemoryType {
     Process,
     /// General insights, tips, and miscellaneous knowledge
     Insight,
+    /// A goal, task, or intent — the anchor for event-based consolidation.
+    /// When a Goal is closed via `consolidate_goal`, all memories linked to it
+    /// with `Achieves` are summarized into a consolidated parent and archived.
+    Goal,
 }
 
 impl std::fmt::Display for MemoryType {
@@ -150,6 +154,7 @@ impl std::fmt::Display for MemoryType {
             MemoryType::Communication => write!(f, "communication"),
             MemoryType::Process => write!(f, "process"),
             MemoryType::Insight => write!(f, "insight"),
+            MemoryType::Goal => write!(f, "goal"),
         }
     }
 }
@@ -177,7 +182,43 @@ impl From<String> for MemoryType {
             "integration" | "api" | "connector" => MemoryType::Integration,
             "communication" | "stakeholder" | "update" => MemoryType::Communication,
             "process" | "runbook" | "procedure" | "deployment" => MemoryType::Process,
+            "goal" | "intent" | "task" | "objective" => MemoryType::Goal,
             _ => MemoryType::Insight, // Default fallback
+        }
+    }
+}
+
+/// Lifecycle state of a memory.
+///
+/// `Working` is the default — the memory is active and participates fully in
+/// retrieval. When a goal is consolidated, its source memories transition to
+/// `Consolidated` (importance reduced, kept for audit) and a new consolidated
+/// parent memory is created. `Archived` is a manual tombstone state used by
+/// cleanup paths before hard delete.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum MemoryState {
+    #[default]
+    Working,
+    Consolidated,
+    Archived,
+}
+
+impl std::fmt::Display for MemoryState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemoryState::Working => write!(f, "working"),
+            MemoryState::Consolidated => write!(f, "consolidated"),
+            MemoryState::Archived => write!(f, "archived"),
+        }
+    }
+}
+
+impl From<String> for MemoryState {
+    fn from(s: String) -> Self {
+        match s.to_lowercase().as_str() {
+            "consolidated" => MemoryState::Consolidated,
+            "archived" => MemoryState::Archived,
+            _ => MemoryState::Working,
         }
     }
 }
@@ -191,9 +232,9 @@ pub struct MemoryDecay {
     pub access_count: u32,
     /// Last time this memory was accessed
     pub last_accessed: DateTime<Utc>,
-    /// Legacy per-memory decay rate. Retained for serde back-compat with stored memories;
-    /// the live formula uses `MemoryConfig::decay_half_life_days` instead.
-    #[allow(dead_code)]
+    /// Per-memory decay rate multiplier. The effective half-life for this memory is
+    /// `config.decay_half_life_days / decay_rate`. Default 1.0 → unchanged behavior;
+    /// 2.0 → decays twice as fast (critical / ephemeral); 0.5 → twice as slow (long-lived).
     pub decay_rate: f32,
 }
 
@@ -232,31 +273,17 @@ impl MemoryDecay {
         let now = Utc::now();
         let days_since_access = (now - self.last_accessed).num_days() as f32;
 
-        let half_life = half_life_days.max(1) as f32;
-        let time_decay = 0.5_f32.powf(days_since_access / half_life);
+        // Effective half-life = config half-life scaled by this memory's decay_rate.
+        // decay_rate=1.0 (default) → unchanged; >1 → faster decay; <1 → slower decay.
+        let base_half_life = half_life_days.max(1) as f32;
+        let rate = self.decay_rate.max(0.1); // guard against zero/negative
+        let effective_half_life = (base_half_life / rate).max(1.0);
+        let time_decay = 0.5_f32.powf(days_since_access / effective_half_life);
 
         let access_boost = 1.0 + access_boost_factor * (self.access_count as f32).ln_1p();
 
         let current_importance = base_importance * time_decay * access_boost;
         current_importance.max(min_threshold)
-    }
-
-    /// Record an access to this memory.
-    /// Bumps the count and resets the decay clock to "now".
-    ///
-    /// Used by tests and available to callers that hold a `Memory` value in memory
-    /// and want to update its decay state before persisting. Production retrieval
-    /// uses `MemoryStore::record_accesses` (batch UPDATE without re-embedding) instead.
-    #[allow(dead_code)]
-    pub fn record_access(&mut self) {
-        self.access_count += 1;
-        self.last_accessed = Utc::now();
-    }
-
-    /// Update base importance (e.g., when memory is manually updated)
-    #[allow(dead_code)]
-    pub fn update_base_importance(&mut self, new_importance: f32) {
-        self.base_importance = new_importance.clamp(0.0, 1.0);
     }
 }
 
@@ -287,6 +314,9 @@ pub struct MemoryMetadata {
     pub decay: MemoryDecay,
     /// Trust tier — who/what created this memory
     pub source: MemorySource,
+    /// Lifecycle state — Working by default, transitions to Consolidated on goal close.
+    #[serde(default)]
+    pub state: MemoryState,
 }
 
 impl Default for MemoryMetadata {
@@ -301,6 +331,7 @@ impl Default for MemoryMetadata {
             custom_fields: HashMap::new(),
             decay: MemoryDecay::new(0.5),
             source: MemorySource::AgentInferred,
+            state: MemoryState::Working,
         }
     }
 }
@@ -400,17 +431,6 @@ impl Memory {
         }
     }
 
-    /// Record access to this memory (for decay reinforcement).
-    ///
-    /// In-memory only — production retrieval uses `MemoryStore::record_accesses`
-    /// which updates the persisted columns directly without re-embedding. This
-    /// method is kept for tests and ad-hoc local-state mutation.
-    #[allow(dead_code)]
-    pub fn record_access(&mut self) {
-        self.metadata.decay.record_access();
-    }
-
-    /// Add a tag if it doesn't exist
     /// Add a tag if it doesn't exist
     pub fn add_tag(&mut self, tag: String) {
         if !self.metadata.tags.contains(&tag) {
@@ -615,6 +635,12 @@ pub enum RelationshipType {
     Extends,
     /// Automatically detected relationship (via auto-linking)
     AutoLinked,
+    /// Source memory contributes to / advances a Goal memory.
+    /// Used by goal-anchored consolidation.
+    Achieves,
+    /// Source memory (a consolidated parent) closes / summarizes a Goal memory.
+    /// Marks the goal as completed and the consolidation event.
+    Closes,
     /// Custom relationship type
     Custom(String),
 }
@@ -630,7 +656,31 @@ impl std::fmt::Display for RelationshipType {
             RelationshipType::Implements => write!(f, "implements"),
             RelationshipType::Extends => write!(f, "extends"),
             RelationshipType::AutoLinked => write!(f, "auto_linked"),
+            RelationshipType::Achieves => write!(f, "achieves"),
+            RelationshipType::Closes => write!(f, "closes"),
             RelationshipType::Custom(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+impl From<&str> for RelationshipType {
+    /// Parse a stored relationship_type string back into the enum.
+    /// Accepts both the snake_case forms emitted by Display (canonical) and the
+    /// CamelCase forms used by an earlier round-trip path so legacy rows still
+    /// round-trip correctly. Unknown strings become `Custom`.
+    fn from(s: &str) -> Self {
+        match s {
+            "related_to" | "RelatedTo" => RelationshipType::RelatedTo,
+            "depends_on" | "DependsOn" => RelationshipType::DependsOn,
+            "supersedes" | "Supersedes" => RelationshipType::Supersedes,
+            "similar" | "Similar" => RelationshipType::Similar,
+            "conflicts" | "Conflicts" => RelationshipType::Conflicts,
+            "implements" | "Implements" => RelationshipType::Implements,
+            "extends" | "Extends" => RelationshipType::Extends,
+            "auto_linked" | "AutoLinked" => RelationshipType::AutoLinked,
+            "achieves" | "Achieves" => RelationshipType::Achieves,
+            "closes" | "Closes" => RelationshipType::Closes,
+            other => RelationshipType::Custom(other.to_string()),
         }
     }
 }

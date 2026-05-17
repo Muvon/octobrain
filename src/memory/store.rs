@@ -179,6 +179,9 @@ impl MemoryStore {
             // DataFusion SQL-parser versions, and to match what the writer produces below.
             Field::new("access_count", DataType::Int32, false),
             Field::new("last_accessed", DataType::Utf8, false),
+            // Lifecycle state for goal-anchored consolidation. Stores `MemoryState`
+            // as a lowercase string ("working" | "consolidated" | "archived").
+            Field::new("state", DataType::Utf8, false),
             Field::new(
                 "embedding",
                 DataType::FixedSizeList(
@@ -199,6 +202,7 @@ impl MemoryStore {
         // Migrate existing tables that pre-date the access_count / last_accessed columns.
         // New tables created above already have them; this only adds them where missing.
         Self::migrate_decay_columns(&memories_table).await?;
+        Self::migrate_state_column(&memories_table).await?;
 
         // Build relationship schema once — reused for every relationship write
         let rel_schema = Arc::new(Schema::new(vec![
@@ -259,6 +263,28 @@ impl MemoryStore {
             .add_columns(NewColumnTransform::SqlExpressions(transforms), None)
             .await
             .context("Failed to add decay columns to existing memories table")?;
+        Ok(())
+    }
+
+    /// Add the `state` column to pre-existing memory tables created before the
+    /// lifecycle-state / goal-consolidation change. Default value is `'working'`
+    /// so all legacy memories remain fully active.
+    async fn migrate_state_column(table: &Table) -> Result<()> {
+        let schema = table.schema().await?;
+        if schema.field_with_name("state").is_ok() {
+            return Ok(());
+        }
+        tracing::info!("Migrating memories table: adding 'state' column");
+        table
+            .add_columns(
+                NewColumnTransform::SqlExpressions(vec![(
+                    "state".to_string(),
+                    "'working'".to_string(),
+                )]),
+                None,
+            )
+            .await
+            .context("Failed to add state column to existing memories table")?;
         Ok(())
     }
 
@@ -451,6 +477,7 @@ impl MemoryStore {
                     .decay
                     .last_accessed
                     .to_rfc3339()])),
+                Arc::new(StringArray::from(vec![memory.metadata.state.to_string()])),
                 Arc::new(embedding_array),
             ],
         )?;
@@ -669,6 +696,35 @@ impl MemoryStore {
         if let Err(e) = self.record_accesses(&ids).await {
             tracing::warn!("record_accesses failed (search still succeeded): {}", e);
         }
+    }
+
+    /// Apply a lifecycle transition + importance change to one memory without
+    /// touching its embedding column. Used by goal-anchored consolidation when
+    /// source memories are archived (state → Consolidated, importance dampened).
+    pub async fn update_state_and_importance(
+        &self,
+        id: &str,
+        new_state: super::types::MemoryState,
+        new_importance: f32,
+    ) -> Result<()> {
+        let project = self
+            .project_key
+            .as_deref()
+            .unwrap_or("default")
+            .replace('\'', "''");
+        let id_escaped = id.replace('\'', "''");
+        let predicate = format!("id = '{}' AND project_key = '{}'", id_escaped, project);
+        let clamped = new_importance.clamp(0.0, 1.0);
+
+        self.memories_table
+            .update()
+            .only_if(predicate)
+            .column("state", format!("'{}'", new_state))
+            .column("importance", format!("CAST({} AS FLOAT)", clamped))
+            .execute()
+            .await
+            .context("partial update of state/importance failed")?;
+        Ok(())
     }
 
     /// Bump access_count and last_accessed for the given memory IDs.
@@ -1368,6 +1424,11 @@ impl MemoryStore {
         let last_accessed_array = batch
             .column_by_name("last_accessed")
             .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+        // State column is added by migrate_state_column on existing tables; default to
+        // Working if absent so legacy rows keep their normal retrieval behavior.
+        let state_array = batch
+            .column_by_name("state")
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
 
         for i in 0..num_rows {
             let memory_type =
@@ -1411,6 +1472,10 @@ impl MemoryStore {
             decay.access_count = access_count;
             decay.last_accessed = last_accessed;
 
+            let state = state_array
+                .map(|a| super::types::MemoryState::from(a.value(i).to_string()))
+                .unwrap_or_default();
+
             let metadata = super::types::MemoryMetadata {
                 git_commit,
                 importance,
@@ -1419,6 +1484,7 @@ impl MemoryStore {
                 related_files,
                 source,
                 decay,
+                state,
                 ..Default::default()
             };
 
@@ -1484,16 +1550,10 @@ impl MemoryStore {
             .ok_or_else(|| anyhow::anyhow!("created_at column not found or wrong type"))?;
 
         for i in 0..num_rows {
-            let relationship_type = match type_array.value(i) {
-                "RelatedTo" => super::types::RelationshipType::RelatedTo,
-                "DependsOn" => super::types::RelationshipType::DependsOn,
-                "Supersedes" => super::types::RelationshipType::Supersedes,
-                "Similar" => super::types::RelationshipType::Similar,
-                "Conflicts" => super::types::RelationshipType::Conflicts,
-                "Implements" => super::types::RelationshipType::Implements,
-                "Extends" => super::types::RelationshipType::Extends,
-                other => super::types::RelationshipType::Custom(other.to_string()),
-            };
+            // From<&str> understands both the snake_case form emitted by Display
+            // (canonical, written by store_relationship) and the legacy CamelCase
+            // form so existing rows round-trip correctly.
+            let relationship_type = super::types::RelationshipType::from(type_array.value(i));
 
             let relationship = MemoryRelationship {
                 id: id_array.value(i).to_string(),

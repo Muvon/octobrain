@@ -58,55 +58,23 @@ mod tests {
 
     #[test]
     fn test_access_reinforcement() {
+        // Hold time_decay constant by pinning last_accessed; only access_count varies.
         let mut decay = MemoryDecay::new(0.5);
-
-        // Simulate 60 days ago
         decay.last_accessed = Utc::now() - Duration::days(60);
 
-        // Calculate importance with no accesses
         let importance_no_access =
             decay.calculate_current_importance(0.5, 0.05, HALF_LIFE_DAYS, BOOST_FACTOR);
 
-        // Add multiple accesses
-        for _ in 0..10 {
-            decay.record_access();
-        }
-        // record_access() resets last_accessed to now, which would also reset time_decay.
-        // Push it back to 60 days to isolate the access-count effect.
-        decay.last_accessed = Utc::now() - Duration::days(60);
-
-        // Calculate importance with accesses
+        decay.access_count = 10;
         let importance_with_access =
             decay.calculate_current_importance(0.5, 0.05, HALF_LIFE_DAYS, BOOST_FACTOR);
 
-        // With accesses, importance should be higher
         assert!(
             importance_with_access > importance_no_access,
             "Access should boost importance: {} vs {}",
             importance_with_access,
             importance_no_access
         );
-    }
-
-    #[test]
-    fn test_record_access_updates_timestamp() {
-        let mut decay = MemoryDecay::new(0.7);
-
-        // Set last accessed to 10 days ago
-        let old_time = Utc::now() - Duration::days(10);
-        decay.last_accessed = old_time;
-        decay.access_count = 0;
-
-        // Record access
-        decay.record_access();
-
-        // Check access count increased
-        assert_eq!(decay.access_count, 1);
-
-        // Check timestamp updated (should be within last second)
-        let now = Utc::now();
-        let diff = (now - decay.last_accessed).num_seconds().abs();
-        assert!(diff < 2, "Last accessed should be updated to now");
     }
 
     #[test]
@@ -126,21 +94,6 @@ mod tests {
             "Importance should not go below floor: {}",
             current_importance
         );
-    }
-
-    #[test]
-    fn test_update_base_importance() {
-        let mut decay = MemoryDecay::new(0.5);
-
-        decay.update_base_importance(0.9);
-        assert_eq!(decay.base_importance, 0.9);
-
-        // Test clamping to [0.0, 1.0]
-        decay.update_base_importance(1.5);
-        assert_eq!(decay.base_importance, 1.0);
-
-        decay.update_base_importance(-0.5);
-        assert_eq!(decay.base_importance, 0.0);
     }
 
     #[test]
@@ -184,19 +137,44 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_record_access() {
-        let mut memory = Memory::new(
-            MemoryType::Code,
-            "Test".to_string(),
-            "Content".to_string(),
-            None,
+    fn test_per_memory_decay_rate_scales_half_life() {
+        // decay_rate is a per-memory multiplier on the global half-life:
+        //   effective_half_life = config_half_life / decay_rate
+        // decay_rate=2.0 → memory decays twice as fast (importance lower at same age)
+        // decay_rate=0.5 → memory decays twice as slow (importance higher at same age)
+        let mut decay_fast = MemoryDecay::new(1.0);
+        decay_fast.decay_rate = 2.0;
+        decay_fast.last_accessed = Utc::now() - Duration::days(30);
+
+        let mut decay_default = MemoryDecay::new(1.0);
+        decay_default.decay_rate = 1.0;
+        decay_default.last_accessed = Utc::now() - Duration::days(30);
+
+        let mut decay_slow = MemoryDecay::new(1.0);
+        decay_slow.decay_rate = 0.5;
+        decay_slow.last_accessed = Utc::now() - Duration::days(30);
+
+        let fast = decay_fast.calculate_current_importance(1.0, 0.0, HALF_LIFE_DAYS, BOOST_FACTOR);
+        let default =
+            decay_default.calculate_current_importance(1.0, 0.0, HALF_LIFE_DAYS, BOOST_FACTOR);
+        let slow = decay_slow.calculate_current_importance(1.0, 0.0, HALF_LIFE_DAYS, BOOST_FACTOR);
+
+        assert!(
+            fast < default,
+            "rate=2.0 should decay faster: fast={} default={}",
+            fast,
+            default
         );
-
-        let initial_count = memory.metadata.decay.access_count;
-
-        memory.record_access();
-
-        assert_eq!(memory.metadata.decay.access_count, initial_count + 1);
+        assert!(
+            slow > default,
+            "rate=0.5 should decay slower: slow={} default={}",
+            slow,
+            default
+        );
+        // Exact: at 30 days with HL=30 and rate=1.0 → 0.5; rate=2.0 (HL=15) → 0.25; rate=0.5 (HL=60) → ~0.707
+        assert!((default - 0.5).abs() < 0.01);
+        assert!((fast - 0.25).abs() < 0.01);
+        assert!((slow - 0.707).abs() < 0.01);
     }
 
     #[test]
