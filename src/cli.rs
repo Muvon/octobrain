@@ -313,6 +313,19 @@ pub enum MemoryCommand {
         #[arg(short, long, default_value = "text")]
         format: String,
     },
+
+    /// Close a Goal memory by consolidating all source memories that Achieve it
+    /// into a new summarized parent. Sources transition to Consolidated state and
+    /// have their importance dampened, but remain queryable for audit.
+    Consolidate {
+        /// ID of the Goal memory to close (memory_type must be Goal)
+        goal_id: String,
+
+        /// Optional explicit summary. If omitted, a deterministic synthesis of
+        /// source memory titles is generated.
+        #[arg(short, long)]
+        summary: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

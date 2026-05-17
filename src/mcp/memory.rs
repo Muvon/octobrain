@@ -714,16 +714,8 @@ impl MemoryProvider {
                 McpError::invalid_params("Missing required parameter 'relationship_type'", "relate")
             })?;
 
-        let relationship_type = match rel_type_str {
-            "related_to" => crate::memory::types::RelationshipType::RelatedTo,
-            "depends_on" => crate::memory::types::RelationshipType::DependsOn,
-            "supersedes" => crate::memory::types::RelationshipType::Supersedes,
-            "similar" => crate::memory::types::RelationshipType::Similar,
-            "conflicts" => crate::memory::types::RelationshipType::Conflicts,
-            "implements" => crate::memory::types::RelationshipType::Implements,
-            "extends" => crate::memory::types::RelationshipType::Extends,
-            other => crate::memory::types::RelationshipType::Custom(other.to_string()),
-        };
+        // From<&str> handles both snake_case and CamelCase legacy forms.
+        let relationship_type = crate::memory::types::RelationshipType::from(rel_type_str);
 
         let strength = arguments
             .get("strength")
@@ -758,6 +750,43 @@ impl MemoryProvider {
             Err(e) => Err(McpError::internal_error(
                 format!("Failed to create relationship: {}", e),
                 "relate",
+            )),
+        }
+    }
+
+    /// Execute the consolidate_goal tool: close a Goal memory by summarizing all
+    /// Achieves sources into a new consolidated parent.
+    pub async fn execute_consolidate_goal(&self, arguments: &Value) -> Result<String, McpError> {
+        let goal_id = arguments
+            .get("goal_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                McpError::invalid_params("Missing required parameter 'goal_id'", "consolidate_goal")
+            })?
+            .to_string();
+
+        let summary = arguments
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let res = {
+            let mut manager_guard = self.memory_manager.lock().await;
+            manager_guard.consolidate_goal(&goal_id, summary).await
+        };
+
+        match res {
+            Ok(m) => Ok(format!(
+                "✅ Goal '{}' consolidated\n   New memory ID: {}\n   Title: {}\n   Importance: {:.3}\n   Tags: {}",
+                goal_id,
+                m.id,
+                m.title,
+                m.metadata.importance,
+                m.metadata.tags.join(", ")
+            )),
+            Err(e) => Err(McpError::internal_error(
+                format!("Failed to consolidate goal: {}", e),
+                "consolidate_goal",
             )),
         }
     }
