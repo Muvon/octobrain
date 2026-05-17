@@ -36,6 +36,30 @@ use lancedb::{
 /// "Experiments indicate that k = 60 was near-optimal"
 const RRF_K: f32 = 60.0;
 
+/// Rocchio query expansion: `alpha * query + (1 - alpha) * centroid`, then L2-normalized.
+///
+/// Pure-math helper extracted so it can be unit-tested without LanceDB. `alpha` is clamped
+/// to [0.0, 1.0]. The output is normalized so cosine similarity over the blended vector
+/// matches the geometry the rest of the search path expects.
+pub(crate) fn rocchio_blend(query: &[f32], centroid: &[f32], alpha: f32) -> Vec<f32> {
+    debug_assert_eq!(query.len(), centroid.len());
+    let alpha = alpha.clamp(0.0, 1.0);
+    let mut blended: Vec<f32> = query
+        .iter()
+        .zip(centroid.iter())
+        .map(|(q, c)| alpha * q + (1.0 - alpha) * c)
+        .collect();
+
+    let norm: f32 = blended.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        let inv = 1.0 / norm;
+        for v in blended.iter_mut() {
+            *v *= inv;
+        }
+    }
+    blended
+}
+
 use super::reranker_integration::RerankerIntegration;
 use super::types::{Memory, MemoryConfig, MemoryQuery, MemoryRelationship, MemorySearchResult};
 use crate::embedding::EmbeddingProvider;
@@ -695,9 +719,12 @@ impl MemoryStore {
             build_scalar_predicate(self.project_key.as_deref(), self.role.as_deref(), query);
 
         if let Some(ref query_text) = query.query_text {
-            let query_embedding = self
+            let raw_embedding = self
                 .embedding_provider
                 .generate_embedding(query_text)
+                .await?;
+            let query_embedding = self
+                .expand_query_embedding(raw_embedding, &predicate)
                 .await?;
 
             let mut db_query = self
@@ -858,6 +885,70 @@ impl MemoryStore {
         (-decay_rate).exp()
     }
 
+    /// Pseudo-relevance feedback (Rocchio) query expansion.
+    /// First-pass vector retrieval → centroid of top-K embeddings → blend with original query.
+    /// Returns the input embedding unchanged when HyDE is disabled or no neighbors exist.
+    async fn expand_query_embedding(
+        &self,
+        query_embedding: Vec<f32>,
+        predicate: &str,
+    ) -> Result<Vec<f32>> {
+        let hyde = &self.main_config.search.hyde;
+        if !hyde.enabled || hyde.top_k == 0 || hyde.alpha >= 1.0 {
+            return Ok(query_embedding);
+        }
+
+        let mut q = self
+            .memories_table
+            .vector_search(query_embedding.as_slice())?
+            .distance_type(DistanceType::Cosine)
+            .limit(hyde.top_k);
+        if !predicate.is_empty() {
+            q = q.only_if(predicate);
+        }
+        let mut results = q.execute().await?;
+
+        let dim = query_embedding.len();
+        let mut centroid = vec![0.0_f32; dim];
+        let mut count = 0usize;
+
+        while let Some(batch) = results.try_next().await? {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            let Some(emb_col) = batch.column_by_name("embedding") else {
+                continue;
+            };
+            let Some(list_arr) = emb_col.as_any().downcast_ref::<FixedSizeListArray>() else {
+                continue;
+            };
+            for i in 0..list_arr.len() {
+                let vec_arr = list_arr.value(i);
+                let Some(f32_arr) = vec_arr.as_any().downcast_ref::<Float32Array>() else {
+                    continue;
+                };
+                if f32_arr.len() != dim {
+                    continue; // skip mismatched-dim rows defensively
+                }
+                for (j, c) in centroid.iter_mut().enumerate() {
+                    *c += f32_arr.value(j);
+                }
+                count += 1;
+            }
+        }
+
+        if count == 0 {
+            return Ok(query_embedding);
+        }
+
+        let inv = 1.0 / count as f32;
+        for c in centroid.iter_mut() {
+            *c *= inv;
+        }
+
+        Ok(rocchio_blend(&query_embedding, &centroid, hyde.alpha))
+    }
+
     /// Convert MemoryQuery to HybridSearchQuery using config weights
     fn convert_to_hybrid_query(&self, query: &MemoryQuery) -> super::types::HybridSearchQuery {
         let hybrid_config = &self.main_config.search.hybrid;
@@ -895,7 +986,7 @@ impl MemoryStore {
             .unwrap_or(self.config.max_search_results);
         let min_relevance = query.filters.min_relevance.unwrap_or(0.0);
 
-        let query_embedding = self
+        let raw_embedding = self
             .embedding_provider
             .generate_embedding(query_text)
             .await?;
@@ -906,6 +997,10 @@ impl MemoryStore {
             self.role.as_deref(),
             &query.filters,
         );
+
+        let query_embedding = self
+            .expand_query_embedding(raw_embedding, &predicate)
+            .await?;
 
         let mut db_query = self
             .memories_table
