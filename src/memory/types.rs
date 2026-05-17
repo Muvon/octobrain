@@ -191,7 +191,9 @@ pub struct MemoryDecay {
     pub access_count: u32,
     /// Last time this memory was accessed
     pub last_accessed: DateTime<Utc>,
-    /// Decay rate (higher = faster decay)
+    /// Legacy per-memory decay rate. Retained for serde back-compat with stored memories;
+    /// the live formula uses `MemoryConfig::decay_half_life_days` instead.
+    #[allow(dead_code)]
     pub decay_rate: f32,
 }
 
@@ -207,24 +209,44 @@ impl MemoryDecay {
         }
     }
 
-    /// Calculate current importance based on temporal decay and access reinforcement
-    /// Formula: importance = base_importance * exp(-decay_rate * days_since_access / 30) * ln(access_count + 1)
-    pub fn calculate_current_importance(&self, min_threshold: f32) -> f32 {
+    /// Calculate current importance using config-driven half-life decay and bounded access boost.
+    ///
+    /// Formula: `importance = base_importance * 0.5^(days/half_life) * (1 + boost_factor * ln(1 + access_count))`
+    ///
+    /// `base_importance` is passed in (rather than read from `self.base_importance`) so the
+    /// canonical stored `metadata.importance` is the single source of truth. The field on
+    /// MemoryDecay is kept only for serde back-compat with stored memories.
+    ///
+    /// - At `days_since_access == half_life_days`, the time term is exactly 0.5.
+    /// - At `access_count == 0`, the boost term is exactly 1.0 — zero-access memories are
+    ///   governed by base*time_decay alone (not silently zeroed out as the previous
+    ///   `ln(access_count + 1)` formulation did).
+    /// - `access_boost_factor` scales the logarithmic growth per access; 0 disables the boost.
+    pub fn calculate_current_importance(
+        &self,
+        base_importance: f32,
+        min_threshold: f32,
+        half_life_days: u32,
+        access_boost_factor: f32,
+    ) -> f32 {
         let now = Utc::now();
         let days_since_access = (now - self.last_accessed).num_days() as f32;
 
-        // Exponential decay over time (normalized to 30-day periods)
-        let time_decay = (-self.decay_rate * days_since_access / 30.0).exp();
+        let half_life = half_life_days.max(1) as f32;
+        let time_decay = 0.5_f32.powf(days_since_access / half_life);
 
-        // Access reinforcement using logarithmic scaling
-        let access_boost = (self.access_count as f32 + 1.0).ln();
+        let access_boost = 1.0 + access_boost_factor * (self.access_count as f32).ln_1p();
 
-        // Combined score with minimum threshold
-        let current_importance = self.base_importance * time_decay * access_boost;
+        let current_importance = base_importance * time_decay * access_boost;
         current_importance.max(min_threshold)
     }
 
-    /// Record an access to this memory
+    /// Record an access to this memory.
+    /// Bumps the count and resets the decay clock to "now".
+    ///
+    /// Used by tests and available to callers that hold a `Memory` value in memory
+    /// and want to update its decay state before persisting. Production retrieval
+    /// uses `MemoryStore::record_accesses` (batch UPDATE without re-embedding) instead.
     #[allow(dead_code)]
     pub fn record_access(&mut self) {
         self.access_count += 1;
@@ -356,18 +378,33 @@ impl Memory {
         )
     }
 
-    /// Get current importance considering temporal decay
-    pub fn get_current_importance(&self, decay_enabled: bool, min_threshold: f32) -> f32 {
+    /// Get current importance considering temporal decay.
+    /// `half_life_days` and `access_boost_factor` should come from MemoryConfig.
+    /// The stored `metadata.importance` is the canonical base_importance.
+    pub fn get_current_importance(
+        &self,
+        decay_enabled: bool,
+        min_threshold: f32,
+        half_life_days: u32,
+        access_boost_factor: f32,
+    ) -> f32 {
         if decay_enabled {
-            self.metadata
-                .decay
-                .calculate_current_importance(min_threshold)
+            self.metadata.decay.calculate_current_importance(
+                self.metadata.importance,
+                min_threshold,
+                half_life_days,
+                access_boost_factor,
+            )
         } else {
             self.metadata.importance
         }
     }
 
-    /// Record access to this memory (for decay reinforcement)
+    /// Record access to this memory (for decay reinforcement).
+    ///
+    /// In-memory only — production retrieval uses `MemoryStore::record_accesses`
+    /// which updates the persisted columns directly without re-embedding. This
+    /// method is kept for tests and ad-hoc local-state mutation.
     #[allow(dead_code)]
     pub fn record_access(&mut self) {
         self.metadata.decay.record_access();

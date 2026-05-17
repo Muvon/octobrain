@@ -17,6 +17,11 @@ mod tests {
     use super::super::types::{HybridSearchQuery, Memory, MemoryDecay, MemoryMetadata, MemoryType};
     use chrono::{Duration, Utc};
 
+    // Test fixtures: explicit values so the math in each test is easy to verify by hand.
+    // 30-day half-life makes day-0/30/60 importance ratios exactly 1.0/0.5/0.25 for base=1.0.
+    const HALF_LIFE_DAYS: u32 = 30;
+    const BOOST_FACTOR: f32 = 1.2;
+
     #[test]
     fn test_memory_decay_creation() {
         let decay = MemoryDecay::new(0.8);
@@ -38,14 +43,15 @@ mod tests {
         // Simulate 30 days ago
         decay.last_accessed = Utc::now() - Duration::days(30);
 
-        let current_importance = decay.calculate_current_importance(0.05);
+        let current_importance =
+            decay.calculate_current_importance(1.0, 0.05, HALF_LIFE_DAYS, BOOST_FACTOR);
 
-        // After 30 days with decay_rate=1.0, importance should be ~0.368 (e^-1)
-        // But with access_boost of ln(1) = 0, it becomes 0
-        // So we need at least 1 access for meaningful importance
+        // After 30 days at 30-day half-life with 0 accesses:
+        //   1.0 * 0.5^(30/30) * (1 + 1.2*ln(1)) = 0.5 * 1.0 = 0.5
         assert!(
-            current_importance >= 0.05,
-            "Should respect minimum threshold"
+            (current_importance - 0.5).abs() < 0.01,
+            "30-day-old memory at 30-day half-life should be ~0.5, got {}",
+            current_importance
         );
         assert!(current_importance < 1.0, "Should decay from original");
     }
@@ -58,15 +64,20 @@ mod tests {
         decay.last_accessed = Utc::now() - Duration::days(60);
 
         // Calculate importance with no accesses
-        let importance_no_access = decay.calculate_current_importance(0.05);
+        let importance_no_access =
+            decay.calculate_current_importance(0.5, 0.05, HALF_LIFE_DAYS, BOOST_FACTOR);
 
         // Add multiple accesses
         for _ in 0..10 {
             decay.record_access();
         }
+        // record_access() resets last_accessed to now, which would also reset time_decay.
+        // Push it back to 60 days to isolate the access-count effect.
+        decay.last_accessed = Utc::now() - Duration::days(60);
 
         // Calculate importance with accesses
-        let importance_with_access = decay.calculate_current_importance(0.05);
+        let importance_with_access =
+            decay.calculate_current_importance(0.5, 0.05, HALF_LIFE_DAYS, BOOST_FACTOR);
 
         // With accesses, importance should be higher
         assert!(
@@ -106,7 +117,8 @@ mod tests {
         decay.last_accessed = Utc::now() - Duration::days(365);
 
         let min_threshold = 0.05;
-        let current_importance = decay.calculate_current_importance(min_threshold);
+        let current_importance =
+            decay.calculate_current_importance(0.1, min_threshold, HALF_LIFE_DAYS, BOOST_FACTOR);
 
         // Should never go below minimum threshold
         assert!(
@@ -133,15 +145,14 @@ mod tests {
 
     #[test]
     fn test_memory_get_current_importance_with_decay_enabled() {
+        // 30 days old, ZERO accesses: pure half-life decay, no boost.
+        // Half-life=30 → time_decay=0.5 → importance = 0.8 * 0.5 * 1.0 = 0.4
         let mut metadata = MemoryMetadata {
             importance: 0.8,
             decay: MemoryDecay::new(0.8),
             ..Default::default()
         };
-
-        // Simulate 30 days old
         metadata.decay.last_accessed = Utc::now() - Duration::days(30);
-        metadata.decay.access_count = 5;
 
         let memory = Memory::new(
             MemoryType::Code,
@@ -150,17 +161,26 @@ mod tests {
             Some(metadata),
         );
 
-        // With decay enabled
-        let importance_with_decay = memory.get_current_importance(true, 0.05);
+        let importance_with_decay =
+            memory.get_current_importance(true, 0.05, HALF_LIFE_DAYS, BOOST_FACTOR);
+        let importance_without_decay =
+            memory.get_current_importance(false, 0.05, HALF_LIFE_DAYS, BOOST_FACTOR);
 
-        // Without decay
-        let importance_without_decay = memory.get_current_importance(false, 0.05);
-
-        // Without decay should return base importance
+        // Without decay returns raw base importance
         assert_eq!(importance_without_decay, 0.8);
 
-        // With decay should be different (likely lower due to time)
-        assert!(importance_with_decay <= 0.8);
+        // With decay enabled, a 30-day-old unread memory must lose importance vs. its base
+        assert!(
+            importance_with_decay < importance_without_decay,
+            "decay should reduce unread memory below base (got {} vs base {})",
+            importance_with_decay,
+            importance_without_decay
+        );
+        assert!(
+            (importance_with_decay - 0.4).abs() < 0.01,
+            "30-day-old unread memory at base=0.8, half-life=30 should be ~0.4, got {}",
+            importance_with_decay
+        );
     }
 
     #[test]
@@ -181,38 +201,116 @@ mod tests {
 
     #[test]
     fn test_decay_formula_correctness() {
+        // With base=1.0, 0 accesses, half_life=30:
+        //   day 0  → 1.0 * 1.0  * 1.0 = 1.0
+        //   day 30 → 1.0 * 0.5  * 1.0 = 0.5  (half-life property)
+        //   day 60 → 1.0 * 0.25 * 1.0 = 0.25
         let mut decay = MemoryDecay::new(1.0);
-        decay.decay_rate = 1.0;
         decay.access_count = 0;
 
-        // Test at different time points
-
-        // Day 0 (just created)
         decay.last_accessed = Utc::now();
-        let importance_day_0 = decay.calculate_current_importance(0.0);
-        // ln(1) = 0, so importance should be 0 (base_importance * 1 * 0 = 0)
-        assert_eq!(
-            importance_day_0, 0.0,
-            "Day 0 importance should be 0 with no accesses"
+        let importance_day_0 =
+            decay.calculate_current_importance(1.0, 0.0, HALF_LIFE_DAYS, BOOST_FACTOR);
+        assert!(
+            (importance_day_0 - 1.0).abs() < 0.001,
+            "Day 0 should be ~1.0 (no decay yet), got {}",
+            importance_day_0
         );
 
-        // Day 30
         decay.last_accessed = Utc::now() - Duration::days(30);
-        decay.access_count = 1; // Need at least 1 access for non-zero importance
-        let importance_day_30 = decay.calculate_current_importance(0.0);
-
-        // Day 60
-        decay.last_accessed = Utc::now() - Duration::days(60);
-        decay.access_count = 1;
-        let importance_day_60 = decay.calculate_current_importance(0.0);
-
-        // Importance should decrease over time
+        let importance_day_30 =
+            decay.calculate_current_importance(1.0, 0.0, HALF_LIFE_DAYS, BOOST_FACTOR);
         assert!(
-            importance_day_30 > importance_day_60,
-            "Importance should decay over time: day30={} vs day60={}",
-            importance_day_30,
+            (importance_day_30 - 0.5).abs() < 0.01,
+            "Day 30 at half_life=30 must be exactly half (0.5), got {}",
+            importance_day_30
+        );
+
+        decay.last_accessed = Utc::now() - Duration::days(60);
+        let importance_day_60 =
+            decay.calculate_current_importance(1.0, 0.0, HALF_LIFE_DAYS, BOOST_FACTOR);
+        assert!(
+            (importance_day_60 - 0.25).abs() < 0.01,
+            "Day 60 at half_life=30 must be quarter (0.25), got {}",
             importance_day_60
         );
+
+        assert!(importance_day_0 > importance_day_30);
+        assert!(importance_day_30 > importance_day_60);
+    }
+
+    #[test]
+    fn test_zero_access_young_memory_has_meaningful_importance() {
+        // Regression test for silent no-op bug: prior formula `ln(access_count + 1)`
+        // returned 0 for every memory in production because record_access was never
+        // wired into retrieval paths. A fresh memory must score at base_importance,
+        // not at the min_threshold floor.
+        let decay = MemoryDecay::new(0.7);
+        let min_threshold = 0.05;
+        let importance =
+            decay.calculate_current_importance(0.7, min_threshold, HALF_LIFE_DAYS, BOOST_FACTOR);
+
+        assert!(
+            importance > min_threshold,
+            "Young 0-access memory must exceed floor, got {} (floor={})",
+            importance,
+            min_threshold
+        );
+        assert!(
+            (importance - 0.7).abs() < 0.01,
+            "Young 0-access memory should equal base_importance (0.7), got {}",
+            importance
+        );
+    }
+
+    #[test]
+    fn test_importance_ranking_differentiates_base_importance() {
+        // Pre-fix the broken `ln(access_count + 1) = 0` term zeroed every memory's
+        // importance and clamped it to min_threshold, so every importance-weighted
+        // ranking in store.rs was effectively comparing constants. This test asserts
+        // the property all four importance-weighted code paths depend on: same-age,
+        // same-access memories rank by base_importance strictly.
+        let bases = [0.1_f32, 0.3, 0.5, 0.7, 0.9];
+        let min_threshold = 0.05;
+
+        let importances: Vec<f32> = bases
+            .iter()
+            .map(|&base| {
+                let metadata = MemoryMetadata {
+                    importance: base,
+                    decay: MemoryDecay::new(base),
+                    ..Default::default()
+                };
+                let memory = Memory::new(
+                    MemoryType::Code,
+                    "T".to_string(),
+                    "C".to_string(),
+                    Some(metadata),
+                );
+                memory.get_current_importance(true, min_threshold, HALF_LIFE_DAYS, BOOST_FACTOR)
+            })
+            .collect();
+
+        for (i, &v) in importances.iter().enumerate() {
+            assert!(
+                v > min_threshold,
+                "Memory {} (base={}) clamped to floor — ranking impossible",
+                i,
+                bases[i]
+            );
+        }
+        for i in 1..importances.len() {
+            assert!(
+                importances[i] > importances[i - 1],
+                "Rank broken: base[{}]={} > base[{}]={} but imp {} <= {}",
+                i,
+                bases[i],
+                i - 1,
+                bases[i - 1],
+                importances[i],
+                importances[i - 1]
+            );
+        }
     }
 
     #[test]
@@ -220,16 +318,14 @@ mod tests {
         let mut decay = MemoryDecay::new(0.5);
         decay.last_accessed = Utc::now() - Duration::days(30);
 
-        // Test with increasing access counts
         let mut importances = Vec::new();
-
         for count in [1, 5, 10, 20, 50] {
             decay.access_count = count;
-            let importance = decay.calculate_current_importance(0.0);
+            let importance =
+                decay.calculate_current_importance(0.5, 0.0, HALF_LIFE_DAYS, BOOST_FACTOR);
             importances.push(importance);
         }
 
-        // Each subsequent importance should be higher (logarithmic growth)
         for i in 1..importances.len() {
             assert!(
                 importances[i] > importances[i - 1],
@@ -238,6 +334,56 @@ mod tests {
                 importances[i - 1]
             );
         }
+    }
+
+    #[test]
+    fn test_access_boost_factor_scales_boost() {
+        // Verify the config knob actually does something: a higher boost_factor
+        // produces a higher importance for the same access_count.
+        let mut decay = MemoryDecay::new(0.5);
+        decay.last_accessed = Utc::now() - Duration::days(30);
+        decay.access_count = 10;
+
+        let with_zero_boost = decay.calculate_current_importance(0.5, 0.0, HALF_LIFE_DAYS, 0.0);
+        let with_default_boost = decay.calculate_current_importance(0.5, 0.0, HALF_LIFE_DAYS, 1.2);
+        let with_double_boost = decay.calculate_current_importance(0.5, 0.0, HALF_LIFE_DAYS, 2.4);
+
+        // boost_factor=0 → access_boost term collapses to 1.0
+        assert!(
+            (with_zero_boost - 0.25).abs() < 0.01,
+            "boost_factor=0 should give base * time_decay = 0.5 * 0.5 = 0.25, got {}",
+            with_zero_boost
+        );
+        assert!(with_default_boost > with_zero_boost);
+        assert!(with_double_boost > with_default_boost);
+    }
+
+    #[test]
+    fn test_half_life_config_scales_decay() {
+        // Verify the config knob actually does something: shorter half_life decays faster.
+        let mut decay = MemoryDecay::new(1.0);
+        decay.last_accessed = Utc::now() - Duration::days(60);
+        decay.access_count = 0;
+
+        let short = decay.calculate_current_importance(1.0, 0.0, 30, BOOST_FACTOR); // 60d / 30d HL = 2 half-lives → 0.25
+        let medium = decay.calculate_current_importance(1.0, 0.0, 60, BOOST_FACTOR); // 60d / 60d HL = 1 half-life → 0.5
+        let long = decay.calculate_current_importance(1.0, 0.0, 120, BOOST_FACTOR); // 60d / 120d HL = 0.5 half-life → ~0.707
+
+        assert!(
+            (short - 0.25).abs() < 0.01,
+            "60-day-old at 30-day HL must equal 0.25, got {}",
+            short
+        );
+        assert!(
+            (medium - 0.5).abs() < 0.01,
+            "60-day-old at 60-day HL must equal 0.5, got {}",
+            medium
+        );
+        assert!(
+            (long - 0.707).abs() < 0.01,
+            "60-day-old at 120-day HL must be ~0.707, got {}",
+            long
+        );
     }
 
     #[test]
@@ -257,7 +403,7 @@ mod tests {
         );
 
         // With decay disabled, should always return base importance
-        let importance = memory.get_current_importance(false, 0.05);
+        let importance = memory.get_current_importance(false, 0.05, HALF_LIFE_DAYS, BOOST_FACTOR);
         assert_eq!(importance, 0.75);
     }
 

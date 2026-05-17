@@ -17,7 +17,7 @@ use chrono::Utc;
 use std::sync::Arc;
 
 // Arrow imports
-use arrow_array::{Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray};
+use arrow_array::{Array, FixedSizeListArray, Float32Array, Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 
 // LanceDB imports
@@ -27,7 +27,7 @@ use lancedb::{
     connect,
     index::Index,
     query::{ExecutableQuery, QueryBase, QueryExecutionOptions},
-    table::OptimizeAction,
+    table::{NewColumnTransform, OptimizeAction},
     Connection, DistanceType, Table,
 };
 
@@ -150,6 +150,11 @@ impl MemoryStore {
             Field::new("related_files", DataType::Utf8, true),
             Field::new("git_commit", DataType::Utf8, true),
             Field::new("source", DataType::Utf8, false),
+            // Decay state, persisted so retrieval ranking actually differentiates memories.
+            // Int32 (not UInt32) so the migration SQL `CAST(0 AS INT)` is portable across
+            // DataFusion SQL-parser versions, and to match what the writer produces below.
+            Field::new("access_count", DataType::Int32, false),
+            Field::new("last_accessed", DataType::Utf8, false),
             Field::new(
                 "embedding",
                 DataType::FixedSizeList(
@@ -166,6 +171,10 @@ impl MemoryStore {
         // Cache table handles — opened once, reused for the lifetime of this store
         let memories_table = db.open_table("memories").execute().await?;
         let relationships_table = db.open_table("memory_relationships").execute().await?;
+
+        // Migrate existing tables that pre-date the access_count / last_accessed columns.
+        // New tables created above already have them; this only adds them where missing.
+        Self::migrate_decay_columns(&memories_table).await?;
 
         // Build relationship schema once — reused for every relationship write
         let rel_schema = Arc::new(Schema::new(vec![
@@ -196,6 +205,37 @@ impl MemoryStore {
         store.ensure_optimal_index().await?;
 
         Ok(store)
+    }
+
+    /// Add `access_count` and `last_accessed` columns to pre-existing memory tables that
+    /// were created before the decay-persistence change. New tables already have them
+    /// via the schema in `new()`. Defaults: access_count=0, last_accessed=created_at.
+    async fn migrate_decay_columns(table: &Table) -> Result<()> {
+        let schema = table.schema().await?;
+        let has_access_count = schema.field_with_name("access_count").is_ok();
+        let has_last_accessed = schema.field_with_name("last_accessed").is_ok();
+
+        let mut transforms: Vec<(String, String)> = Vec::new();
+        if !has_access_count {
+            transforms.push(("access_count".to_string(), "CAST(0 AS INT)".to_string()));
+        }
+        if !has_last_accessed {
+            transforms.push(("last_accessed".to_string(), "created_at".to_string()));
+        }
+
+        if transforms.is_empty() {
+            return Ok(());
+        }
+
+        tracing::info!(
+            "Migrating memories table: adding {} decay column(s)",
+            transforms.len()
+        );
+        table
+            .add_columns(NewColumnTransform::SqlExpressions(transforms), None)
+            .await
+            .context("Failed to add decay columns to existing memories table")?;
+        Ok(())
     }
 
     /// Initialize memory and relationship tables (static — called once from new())
@@ -379,6 +419,14 @@ impl MemoryStore {
                 Arc::new(StringArray::from(vec![files_json])),
                 Arc::new(StringArray::from(vec![memory.metadata.git_commit.clone()])),
                 Arc::new(StringArray::from(vec![memory.metadata.source.to_string()])),
+                Arc::new(Int32Array::from(vec![
+                    memory.metadata.decay.access_count as i32,
+                ])),
+                Arc::new(StringArray::from(vec![memory
+                    .metadata
+                    .decay
+                    .last_accessed
+                    .to_rfc3339()])),
                 Arc::new(embedding_array),
             ],
         )?;
@@ -564,17 +612,69 @@ impl MemoryStore {
             self.vector_search(&extended_query).await?
         } else {
             // Standard vector search, no reranker
-            return self.vector_search(query).await;
+            let results = self.vector_search(query).await?;
+            self.record_accesses_best_effort(&results).await;
+            return Ok(results);
         };
 
         // Apply reranker as a post-processing step if enabled
-        if let (Some(ref query_text), Some(ref reranker)) =
+        let final_results = if let (Some(ref query_text), Some(ref reranker)) =
             (reranker_query_text, &self.reranker_integration)
         {
-            return reranker.rerank_memories(query_text, candidates).await;
-        }
+            reranker.rerank_memories(query_text, candidates).await?
+        } else {
+            candidates
+        };
 
-        Ok(candidates)
+        self.record_accesses_best_effort(&final_results).await;
+        Ok(final_results)
+    }
+
+    /// Bump access_count and last_accessed for the memories that this query actually
+    /// returned to the caller. Best-effort: failures are logged and swallowed because
+    /// failing a search just because the bookkeeping write failed would be worse than
+    /// silently missing one access tick.
+    ///
+    /// Uses LanceDB partial column update so the embedding column is never rewritten —
+    /// no re-embedding cost on the read path.
+    async fn record_accesses_best_effort(&self, results: &[MemorySearchResult]) {
+        if results.is_empty() {
+            return;
+        }
+        let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
+        if let Err(e) = self.record_accesses(&ids).await {
+            tracing::warn!("record_accesses failed (search still succeeded): {}", e);
+        }
+    }
+
+    /// Bump access_count and last_accessed for the given memory IDs.
+    /// Partial update: embedding column is untouched.
+    async fn record_accesses(&self, ids: &[&str]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let id_list = ids
+            .iter()
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let project = self
+            .project_key
+            .as_deref()
+            .unwrap_or("default")
+            .replace('\'', "''");
+        let predicate = format!("id IN ({}) AND project_key = '{}'", id_list, project);
+        let now_literal = format!("'{}'", Utc::now().to_rfc3339());
+
+        self.memories_table
+            .update()
+            .only_if(predicate)
+            .column("access_count", "access_count + 1")
+            .column("last_accessed", now_literal)
+            .execute()
+            .await
+            .context("partial update of access_count/last_accessed failed")?;
+        Ok(())
     }
 
     /// Standard vector search with temporal importance decay.
@@ -635,6 +735,8 @@ impl MemoryStore {
                     let current_importance = memory.get_current_importance(
                         self.config.decay_enabled,
                         self.config.min_importance_threshold,
+                        self.config.decay_half_life_days,
+                        self.config.access_boost_factor,
                     );
                     let trust_multiplier = memory.metadata.source.trust_multiplier();
                     let final_score = vector_similarity * current_importance * trust_multiplier;
@@ -672,6 +774,8 @@ impl MemoryStore {
                     let relevance_score = memory.get_current_importance(
                         self.config.decay_enabled,
                         self.config.min_importance_threshold,
+                        self.config.decay_half_life_days,
+                        self.config.access_boost_factor,
                     );
 
                     if relevance_score >= min_relevance {
@@ -702,10 +806,14 @@ impl MemoryStore {
                         let a_imp = a.memory.get_current_importance(
                             self.config.decay_enabled,
                             self.config.min_importance_threshold,
+                            self.config.decay_half_life_days,
+                            self.config.access_boost_factor,
                         );
                         let b_imp = b.memory.get_current_importance(
                             self.config.decay_enabled,
                             self.config.min_importance_threshold,
+                            self.config.decay_half_life_days,
+                            self.config.access_boost_factor,
                         );
                         a_imp
                             .partial_cmp(&b_imp)
@@ -848,6 +956,8 @@ impl MemoryStore {
                 let importance_score = memory.get_current_importance(
                     self.config.decay_enabled,
                     self.config.min_importance_threshold,
+                    self.config.decay_half_life_days,
+                    self.config.access_boost_factor,
                 );
 
                 // RRF already fuses vector + BM25; recency and importance are additive signals
@@ -1154,6 +1264,16 @@ impl MemoryStore {
         let source_array = batch
             .column_by_name("source")
             .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+
+        // Decay columns are present on tables migrated by migrate_decay_columns(); fall
+        // back to defaults (count=0, last_accessed=created_at) if absent (e.g. mid-migration).
+        let access_count_array = batch
+            .column_by_name("access_count")
+            .and_then(|col| col.as_any().downcast_ref::<Int32Array>());
+        let last_accessed_array = batch
+            .column_by_name("last_accessed")
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+
         for i in 0..num_rows {
             let memory_type =
                 super::types::MemoryType::from(memory_type_array.value(i).to_string());
@@ -1180,13 +1300,30 @@ impl MemoryStore {
                 .map(|arr| super::types::MemorySource::from(arr.value(i).to_string()))
                 .unwrap_or_default();
 
+            let created_at =
+                DateTime::parse_from_rfc3339(created_at_array.value(i))?.with_timezone(&Utc);
+
+            let access_count = access_count_array
+                .map(|a| a.value(i).max(0) as u32)
+                .unwrap_or(0);
+            let last_accessed = last_accessed_array
+                .and_then(|a| DateTime::parse_from_rfc3339(a.value(i)).ok())
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or(created_at);
+
+            let importance = importance_array.value(i);
+            let mut decay = super::types::MemoryDecay::new(importance);
+            decay.access_count = access_count;
+            decay.last_accessed = last_accessed;
+
             let metadata = super::types::MemoryMetadata {
                 git_commit,
-                importance: importance_array.value(i),
+                importance,
                 confidence: confidence_array.value(i),
                 tags,
                 related_files,
                 source,
+                decay,
                 ..Default::default()
             };
 
@@ -1195,8 +1332,7 @@ impl MemoryStore {
                 memory_type,
                 title: title_array.value(i).to_string(),
                 content: content_array.value(i).to_string(),
-                created_at: DateTime::parse_from_rfc3339(created_at_array.value(i))?
-                    .with_timezone(&Utc),
+                created_at,
                 updated_at: DateTime::parse_from_rfc3339(updated_at_array.value(i))?
                     .with_timezone(&Utc),
                 metadata,
