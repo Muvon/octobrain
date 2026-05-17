@@ -356,6 +356,21 @@ pub struct ConsolidateGoalParams {
     pub summary: Option<String>,
 }
 
+/// Sleep-consolidate tool parameters
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SleepConsolidateParams {
+    /// Cosine similarity threshold (0.0-1.0) for two memories to share a cluster.
+    /// Higher = stricter clusters (fewer, denser); lower = looser (more, fuzzier).
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub threshold: Option<f32>,
+    /// Minimum cluster size required to consolidate. Default 3.
+    #[schemars(range(min = 2, max = 50))]
+    pub min_size: Option<usize>,
+    /// Only consider Working-state memories created in the last N days. Default 7.
+    #[schemars(range(min = 1, max = 365))]
+    pub max_age_days: Option<u32>,
+}
+
 /// Relate tool parameters
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RelateParams {
@@ -549,6 +564,29 @@ impl McpServer {
                 Some(serde_json::to_value(e.operation).unwrap_or_default()),
             )
         })
+    }
+
+    #[tool(
+        name = "sleep_consolidate",
+        description = "Batch-consolidate clusters of similar recent memories. Scans Working-state memories created in the last `max_age_days`, groups ones with mutual cosine similarity ≥ `threshold` into clusters of at least `min_size`, and folds each cluster into a consolidated parent via the same goal-anchored pipeline as `consolidate_goal`. Use periodically (e.g. once a day) to compress redundant episodic memories into summarized abstractions. Defaults: threshold=0.85, min_size=3, max_age_days=7."
+    )]
+    async fn sleep_consolidate(
+        &self,
+        Parameters(params): Parameters<SleepConsolidateParams>,
+    ) -> Result<String, McpError> {
+        let provider = self.get_or_init_memory().await?;
+        let args = serde_json::to_value(&params).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize params: {}", e), None)
+        })?;
+        provider
+            .execute_sleep_consolidate(&args)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(
+                    e.message,
+                    Some(serde_json::to_value(e.operation).unwrap_or_default()),
+                )
+            })
     }
 
     #[tool(

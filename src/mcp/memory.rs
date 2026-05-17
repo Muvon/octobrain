@@ -754,6 +754,56 @@ impl MemoryProvider {
         }
     }
 
+    /// Execute the sleep_consolidate tool: batch-find clusters of recent similar
+    /// memories and fold each into a consolidated parent.
+    pub async fn execute_sleep_consolidate(&self, arguments: &Value) -> Result<String, McpError> {
+        let threshold = arguments
+            .get("threshold")
+            .and_then(|v| v.as_f64())
+            .map(|v| (v as f32).clamp(0.0, 1.0))
+            .unwrap_or(0.85);
+
+        let min_size = arguments
+            .get("min_size")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.clamp(2, 50) as usize)
+            .unwrap_or(3);
+
+        let max_age_days = arguments
+            .get("max_age_days")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.clamp(1, 365) as u32)
+            .unwrap_or(7);
+
+        let res = {
+            let mut manager_guard = self.memory_manager.lock().await;
+            manager_guard
+                .sleep_consolidate(threshold, min_size, max_age_days)
+                .await
+        };
+
+        match res {
+            Ok(memories) if memories.is_empty() => Ok(format!(
+                "ℹ️ No clusters tight enough at threshold {:.2} — nothing consolidated.",
+                threshold
+            )),
+            Ok(memories) => {
+                let mut out = format!("✅ Consolidated {} cluster(s):\n", memories.len());
+                for m in &memories {
+                    out.push_str(&format!(
+                        "  • {} (id={}, importance={:.3})\n",
+                        m.title, m.id, m.metadata.importance
+                    ));
+                }
+                Ok(out)
+            }
+            Err(e) => Err(McpError::internal_error(
+                format!("Sleep consolidation failed: {}", e),
+                "sleep_consolidate",
+            )),
+        }
+    }
+
     /// Execute the consolidate_goal tool: close a Goal memory by summarizing all
     /// Achieves sources into a new consolidated parent.
     pub async fn execute_consolidate_goal(&self, arguments: &Value) -> Result<String, McpError> {

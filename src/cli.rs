@@ -326,6 +326,23 @@ pub enum MemoryCommand {
         #[arg(short, long)]
         summary: Option<String>,
     },
+
+    /// Sleep consolidation: scan recent Working-state memories, cluster the
+    /// semantically similar ones, and consolidate each cluster via the same
+    /// goal-anchored pipeline (one synthetic Goal per cluster).
+    SleepConsolidate {
+        /// Cosine similarity threshold for considering two memories part of the same cluster
+        #[arg(short, long, default_value = "0.85")]
+        threshold: f32,
+
+        /// Minimum number of memories required to consolidate a cluster
+        #[arg(short, long, default_value = "3")]
+        min_size: usize,
+
+        /// Only consider Working memories created in the last N days
+        #[arg(short = 'a', long, default_value = "7")]
+        max_age_days: u32,
+    },
 }
 
 #[derive(Subcommand, Debug)]

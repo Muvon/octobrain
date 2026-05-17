@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{Duration, Utc};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use super::git_utils::{FileFate, GitUtils, RenameMap};
@@ -818,6 +819,115 @@ impl MemoryManager {
         Ok(consolidated)
     }
 
+    /// Sleep consolidation: batch-find clusters of similar recent memories and
+    /// fold each cluster into a consolidated parent via the same goal-anchored
+    /// pipeline `consolidate_goal` uses.
+    ///
+    /// Process:
+    /// 1. Fetch all Working-state memories created in the last `max_age_days`
+    /// 2. For each candidate (in order), search for similar candidates above
+    ///    `similarity_threshold` and form a cluster {candidate} ∪ neighbors,
+    ///    excluding anything already assigned to another cluster
+    /// 3. For each cluster of size ≥ `min_cluster_size`, synthesize an
+    ///    ephemeral `Goal` memory, link cluster members via `Achieves`, then
+    ///    call `consolidate_goal`. The synthetic goal becomes part of the
+    ///    permanent provenance chain — no special teardown needed.
+    ///
+    /// Returns the consolidated memories produced. Empty vec when nothing
+    /// clusters tightly enough at the given threshold.
+    pub async fn sleep_consolidate(
+        &mut self,
+        similarity_threshold: f32,
+        min_cluster_size: usize,
+        max_age_days: u32,
+    ) -> Result<Vec<Memory>> {
+        if min_cluster_size < 2 {
+            return Err(anyhow::anyhow!(
+                "min_cluster_size must be >= 2, got {}",
+                min_cluster_size
+            ));
+        }
+
+        let cutoff = Utc::now() - Duration::days(max_age_days as i64);
+        let candidates = self.store.get_recent_working_memories(cutoff).await?;
+        if candidates.len() < min_cluster_size {
+            return Ok(Vec::new());
+        }
+
+        // For each candidate, find similar Working memories above threshold.
+        // We collect (id, neighbor_ids) pairs then run pure clustering on them.
+        let candidate_ids: HashSet<String> = candidates.iter().map(|m| m.id.clone()).collect();
+        let mut neighborhoods: Vec<(String, Vec<String>)> = Vec::with_capacity(candidates.len());
+        for cand in &candidates {
+            let query = MemoryQuery {
+                query_text: Some(cand.get_searchable_text()),
+                limit: Some(self.config.max_auto_links_per_memory.max(min_cluster_size) * 2),
+                min_relevance: Some(similarity_threshold),
+                ..Default::default()
+            };
+            let hits = self.store.search_memories(&query).await?;
+            let neighbors: Vec<String> = hits
+                .into_iter()
+                .filter(|r| r.memory.id != cand.id && candidate_ids.contains(&r.memory.id))
+                .map(|r| r.memory.id)
+                .collect();
+            neighborhoods.push((cand.id.clone(), neighbors));
+        }
+
+        let clusters = build_clusters(&neighborhoods, min_cluster_size);
+        if clusters.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let now = Utc::now();
+        let mut consolidated = Vec::with_capacity(clusters.len());
+        for cluster in clusters {
+            // Synthesize an ephemeral Goal so we can reuse consolidate_goal verbatim.
+            let goal_meta = MemoryMetadata {
+                importance: 0.5,
+                source: MemorySource::AgentInferred,
+                ..Default::default()
+            };
+            let goal = Memory::new(
+                MemoryType::Goal,
+                format!("Sleep cluster {}", now.format("%Y-%m-%d %H:%M:%S")),
+                format!(
+                    "Auto-detected cluster of {} similar memories created in the last {} days, \
+                     similarity ≥ {:.2}",
+                    cluster.len(),
+                    max_age_days,
+                    similarity_threshold
+                ),
+                Some(goal_meta),
+            );
+            self.store.store_memory(&goal).await?;
+
+            for member_id in &cluster {
+                let achieves = MemoryRelationship {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    source_id: member_id.clone(),
+                    target_id: goal.id.clone(),
+                    relationship_type: RelationshipType::Achieves,
+                    strength: 1.0,
+                    description: "Sleep consolidation cluster member".to_string(),
+                    created_at: now,
+                };
+                self.store.store_relationship(&achieves).await?;
+            }
+
+            match self.consolidate_goal(&goal.id, None).await {
+                Ok(m) => consolidated.push(m),
+                Err(e) => tracing::warn!(
+                    "Sleep consolidation: cluster {:?} failed to consolidate: {}",
+                    cluster,
+                    e
+                ),
+            }
+        }
+
+        Ok(consolidated)
+    }
+
     /// Automatically link a memory to similar memories based on semantic similarity
     /// Creates bidirectional AutoLinked relationships
     pub async fn auto_link_memory(&mut self, memory_id: &str) -> Result<Vec<MemoryRelationship>> {
@@ -1061,6 +1171,42 @@ impl MemoryManager {
     pub fn disable_reranker(&mut self) {
         self.store.disable_reranker();
     }
+}
+
+/// Greedy clustering on a candidate / neighbors list.
+///
+/// Each candidate is visited in input order. If it hasn't already been claimed
+/// by an earlier cluster, it forms a new candidate cluster = {self} ∪ {unclaimed
+/// neighbors}. Clusters smaller than `min_size` are discarded. Members claimed
+/// by an accepted cluster cannot join later ones — output clusters are disjoint.
+///
+/// Pure function so it can be unit-tested without LanceDB.
+pub(crate) fn build_clusters(
+    candidates: &[(String, Vec<String>)],
+    min_size: usize,
+) -> Vec<Vec<String>> {
+    let mut claimed: HashSet<String> = HashSet::new();
+    let mut clusters: Vec<Vec<String>> = Vec::new();
+
+    for (id, neighbors) in candidates {
+        if claimed.contains(id) {
+            continue;
+        }
+        let mut cluster: Vec<String> = vec![id.clone()];
+        for n in neighbors {
+            if n != id && !claimed.contains(n) && !cluster.contains(n) {
+                cluster.push(n.clone());
+            }
+        }
+        if cluster.len() >= min_size {
+            for m in &cluster {
+                claimed.insert(m.clone());
+            }
+            clusters.push(cluster);
+        }
+    }
+
+    clusters
 }
 
 /// Memory statistics
