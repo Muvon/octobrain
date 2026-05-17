@@ -1143,6 +1143,39 @@ impl MemoryStore {
         Ok(results)
     }
 
+    /// Fetch all Working-state memories created on or after `since`. Used by
+    /// sleep consolidation to scope the clustering pass to recent activity.
+    pub async fn get_recent_working_memories(
+        &self,
+        since: chrono::DateTime<Utc>,
+    ) -> Result<Vec<Memory>> {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(key) = self.project_key.as_deref() {
+            parts.push(format!("project_key = '{}'", key.replace('\'', "''")));
+        }
+        if let Some(role) = self.role.as_deref() {
+            parts.push(format!("role = '{}'", role.replace('\'', "''")));
+        }
+        parts.push("state = 'working'".to_string());
+        parts.push(format!("created_at >= '{}'", since.to_rfc3339()));
+        let filter = parts.join(" AND ");
+
+        let mut q = self.memories_table.query();
+        if !filter.is_empty() {
+            q = q.only_if(filter);
+        }
+        let mut results = q.execute().await?;
+
+        let mut memories = Vec::new();
+        while let Some(batch) = results.try_next().await? {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            memories.extend(self.batch_to_memories(&batch)?);
+        }
+        Ok(memories)
+    }
+
     /// Store a memory relationship
     pub async fn store_relationship(&mut self, relationship: &MemoryRelationship) -> Result<()> {
         let batch = RecordBatch::try_new(
