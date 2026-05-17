@@ -72,6 +72,25 @@ top_k_candidates = 50
 # Default: 10
 final_top_k = 10
 
+[search.hyde]
+# Pseudo-relevance feedback (PRF / HyDE-lite) query expansion.
+# First pass retrieves top-K nearest neighbors, averages their embeddings into a
+# centroid, then blends `alpha * original_query + (1 - alpha) * centroid` and uses
+# the result for the actual search. Costs one extra LanceDB vector query in
+# exchange for typically +10-30% recall on long-tail / underspecified queries.
+# Default: false (opt-in until measured on your corpus)
+enabled = false
+
+# Number of nearest neighbors to average for the centroid.
+# Higher = more semantic averaging, lower = closer to original intent.
+# Default: 3
+top_k = 3
+
+# Blend weight on the original query embedding (0.0..1.0).
+# 1.0 = no expansion, 0.5 = even mix, 0.0 = full centroid replacement.
+# Default: 0.5
+alpha = 0.5
+
 [memory]
 # Maximum number of memories to keep in storage
 # Default: 10000
