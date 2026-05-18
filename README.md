@@ -225,7 +225,7 @@ Configuration is stored in `~/.local/share/octobrain/config.toml`. All options h
 
 | Section | Option | Default | Description |
 |---------|--------|---------|-------------|
-| `[embedding]` | `model` | `voyage:voyage-3.5-lite` | Embedding model (provider:model format) |
+| `[embedding]` | `model` | `fastembed:BAAI/bge-small-en-v1.5` | Embedding model (provider:model format). Default is a local fastembed model — no API key, runs on CPU. |
 | `[search]` | `similarity_threshold` | `0.3` | Minimum relevance (0.0-1.0) |
 | `[search.hybrid]` | `enabled` | `true` | Enable BM25 + vector fusion |
 | `[search.reranker]` | `enabled` | `false` | Enable cross-encoder reranking |
@@ -238,11 +238,18 @@ Configuration is stored in `~/.local/share/octobrain/config.toml`. All options h
 
 ```toml
 [embedding]
-# Local embeddings (no API key needed)
-model = "voyage:voyage-3.5-lite"  # Fast, accurate
-model = "openai:text-embedding-3-small"  # OpenAI
-model = "google:text-embedding-004"  # Google
-model = "jina:jina-embeddings-v2"  # Jina
+# Local models (no API key, runs on CPU, model auto-downloaded on first use)
+model = "fastembed:BAAI/bge-small-en-v1.5"                       # Default: fast + good quality, 384-dim
+model = "fastembed:sentence-transformers/all-MiniLM-L6-v2-quantized"  # Smallest (~22MB), fastest
+model = "fastembed:nomic-ai/nomic-embed-text-v1.5"               # 768-dim, 8192-token context
+model = "fastembed:BAAI/bge-base-en-v1.5"                        # Larger (~440MB), higher quality
+model = "fastembed:intfloat/multilingual-e5-small"               # Multilingual
+
+# Cloud providers (require API keys, generally higher quality)
+model = "voyage:voyage-3.5-lite"          # VOYAGE_API_KEY
+model = "openai:text-embedding-3-small"   # OPENAI_API_KEY
+model = "google:text-embedding-004"       # GOOGLE_API_KEY
+model = "jina:jina-embeddings-v3"         # JINA_API_KEY
 ```
 
 ### Full Configuration

@@ -28,7 +28,7 @@ pub struct EmbeddingConfig {
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            model: "voyage:voyage-3.5-lite".to_string(),
+            model: "fastembed:BAAI/bge-small-en-v1.5".to_string(),
             batch_size: 32,
             max_tokens_per_batch: 100000,
         }

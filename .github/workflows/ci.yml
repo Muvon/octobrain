@@ -9,6 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  SCCACHE_GHA_ENABLED: true
 
 jobs:
   check:
@@ -24,21 +25,20 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install protobuf compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
+        uses: arduino/setup-protoc@v3
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Run cargo check
-        run: cargo check --all-targets
+        env:
+          RUSTC_WRAPPER: sccache
+        run: cargo check --all-targets --all-features
 
   fmt:
     name: Rustfmt
@@ -51,15 +51,6 @@ jobs:
         uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run cargo fmt
         run: cargo fmt --all -- --check
@@ -77,21 +68,20 @@ jobs:
           components: clippy
 
       - name: Install protobuf compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
+        uses: arduino/setup-protoc@v3
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Run cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        env:
+          RUSTC_WRAPPER: sccache
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
     name: Test Suite
@@ -111,97 +101,167 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
-          targets: ${{ matrix.target }}
+
+      # On macos-latest the runner ships a preinstalled rust that can collide
+      # with the toolchain dtolnay/rust-toolchain just installed — leaving
+      # `cargo` resolving to the `rustup-init` binary rather than the proxy.
+      - name: Verify Rust toolchain
+        shell: bash
+        run: |
+          set -x
+          echo "PATH=$PATH"
+          for bin in cargo rustc rustup rustup-init; do
+            command -v "$bin" || true
+          done
+          ls -la "$HOME/.cargo/bin/" || true
+          file "$HOME/.cargo/bin/cargo" || true
+          rustup default "${{ matrix.rust }}" || true
+          rustup show || true
+          cargo --version
+          rustc --version
 
       - name: Install protobuf compiler
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ matrix.rust }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.rust }}-cargo-
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      # Linux glibc: csukuangfj ships a single bundled libonnxruntime.a — ort-sys's
+      # single-file shortcut links it directly. ubuntu-latest is glibc-based so
+      # the glibc2_17-built static archive is ABI-compatible.
+      # Windows MSVC: nothing to download — ort-sys's download-binaries feature
+      # pulls pyke's prebuilts automatically; we only flip RUSTFLAGS below.
+      # macOS aarch64: pyke prebuilts work out of the box.
+      - name: Download ONNX Runtime static library (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          ORT_VERSION="1.24.2"
+          ORT_ASSET="onnxruntime-linux-x64-static_lib-${ORT_VERSION}-glibc2_17"
+          curl -sL "https://github.com/csukuangfj/onnxruntime-libs/releases/download/v${ORT_VERSION}/${ORT_ASSET}.zip" -o /tmp/ort.zip
+          unzip -q /tmp/ort.zip -d /tmp/ort
+          echo "ORT_LIB_LOCATION=/tmp/ort/${ORT_ASSET}/lib" >> "$GITHUB_ENV"
 
       - name: Run tests
         shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cargo test --verbose --no-default-features
-          else
-            cargo test --verbose
-          fi
+        env:
+          RUSTC_WRAPPER: sccache
+          # Windows MSVC: ORT prebuilts (pyke download-binaries) are compiled
+          # with /MD (dynamic CRT). Rust on MSVC defaults to /MT → __imp_*
+          # unresolved-symbol link errors. Switch Rust to dynamic CRT.
+          # (esaxx-rs is also /MT via hardcoded static_crt(true); patched via
+          # [patch.crates-io] in Cargo.toml to a vendored copy with /MD.)
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=-crt-static' || '' }}
+        run: cargo test --verbose --all-features
 
-  feature-matrix:
-    name: Feature Matrix (Linux)
-    runs-on: ubuntu-latest
+  musl-build:
+    name: Musl Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: true
       matrix:
-        features:
-          - ""
-          - "fastembed"
-          - "huggingface"
-          - "fastembed,huggingface"
         include:
-          - features: ""
-            cache_key: "none"
-          - features: "fastembed"
-            cache_key: "fastembed"
-          - features: "huggingface"
-            cache_key: "huggingface"
-          - features: "fastembed,huggingface"
-            cache_key: "fastembed-huggingface"
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-22.04-arm
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.95.0
+      # Cache the static ONNX Runtime build (45–60 min cold) between runs.
+      - name: Cache ONNX Runtime static build
+        uses: actions/cache@v4
+        with:
+          path: onnxruntime-src
+          key: onnxruntime-1.24.2-${{ matrix.target }}-alpine3.22-v6
 
-      - name: Install protobuf compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
-
-      - name: Cache dependencies
+      - name: Cache cargo registry and target
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-features-${{ matrix.cache_key }}-${{ hashFiles('**/Cargo.lock') }}
+          key: docker-alpine-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-features-${{ matrix.cache_key }}-
+            docker-alpine-${{ matrix.target }}-cargo-
 
-      - name: Check with features
+      - name: Build in Alpine (mirrors release pipeline)
         run: |
-          if [ -z "${{ matrix.features }}" ]; then
-            echo "Checking with no features..."
-            cargo check --all-targets
-          else
-            echo "Checking with features: ${{ matrix.features }}"
-            cargo check --features "${{ matrix.features }}" --all-targets
-          fi
+          mkdir -p onnxruntime-src
+          chmod -R 777 onnxruntime-src
 
-      - name: Test with features
-        run: |
-          if [ -z "${{ matrix.features }}" ]; then
-            echo "Testing with no features..."
-            cargo test --verbose
-          else
-            echo "Testing with features: ${{ matrix.features }}"
-            cargo test --verbose --features "${{ matrix.features }}"
-          fi
+          docker run --rm \
+            --user 0:0 \
+            -v "$(pwd):/workspace" \
+            -w /workspace \
+            rust:1.95.0-alpine3.22 \
+            sh -c '
+              set -eu
+              apk add --no-cache \
+                git perl bash musl-dev openssl-dev openssl-libs-static \
+                pkgconfig gcc g++ \
+                cmake make linux-headers python3 py3-pip patch
+
+              mkdir -p /tmp/include
+              cat > /tmp/include/execinfo.h << "EOF"
+          #ifndef _EXECINFO_H
+          #define _EXECINFO_H
+          #include <stddef.h>
+          static inline int backtrace(void **buffer, int size) { (void)buffer; (void)size; return 0; }
+          static inline char **backtrace_symbols(void *const *buffer, int size) { (void)buffer; (void)size; return NULL; }
+          static inline void backtrace_symbols_fd(void *const *buffer, int size, int fd) { (void)buffer; (void)size; (void)fd; }
+          #endif
+          EOF
+              export C_INCLUDE_PATH=/tmp/include
+              export CPLUS_INCLUDE_PATH=/tmp/include
+
+              rustup target add ${{ matrix.target }}
+
+              ORT_SRC=/workspace/onnxruntime-src
+              ORT_LIB_LOCATION="$ORT_SRC/build/Release"
+              if [ ! -f "$ORT_LIB_LOCATION/_deps/re2-build/libre2.a" ]; then
+                echo "==> Building ONNX Runtime 1.24.2 from source (static, musl)"
+                rm -rf "$ORT_SRC"
+                git clone --single-branch --branch v1.24.2 --recursive \
+                  https://github.com/microsoft/onnxruntime.git "$ORT_SRC"
+                cd "$ORT_SRC"
+                ./build.sh \
+                  --config Release \
+                  --build_dir build \
+                  --parallel \
+                  --skip_tests \
+                  --skip_submodule_sync \
+                  --allow_running_as_root \
+                  --compile_no_warning_as_error \
+                  --no_kleidiai \
+                  --no_sve \
+                  --cmake_extra_defines \
+                    CMAKE_POSITION_INDEPENDENT_CODE=ON \
+                    onnxruntime_BUILD_UNIT_TESTS=OFF \
+                    onnxruntime_BUILD_SHARED_LIB=OFF \
+                    onnxruntime_USE_KLEIDIAI=OFF
+                cmake --build "$ORT_LIB_LOCATION" --target re2 -j
+                cd /workspace
+              else
+                echo "==> Using cached ONNX Runtime static build"
+              fi
+
+              apk add --no-cache protobuf-dev
+
+              export ORT_LIB_LOCATION="$ORT_LIB_LOCATION"
+              export RUSTFLAGS="-C link-arg=-lgcc"
+              cargo build --target ${{ matrix.target }}
+            '
 
   security:
     name: Security Audit
@@ -212,8 +272,6 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          components: rustfmt, clippy
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
@@ -230,30 +288,38 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          components: rustfmt, clippy
 
       - name: Install protobuf compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin --locked
 
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-coverage-
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
 
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Download ONNX Runtime static library
+        shell: bash
+        run: |
+          ORT_VERSION="1.24.2"
+          ORT_ASSET="onnxruntime-linux-x64-static_lib-${ORT_VERSION}-glibc2_17"
+          curl -sL "https://github.com/csukuangfj/onnxruntime-libs/releases/download/v${ORT_VERSION}/${ORT_ASSET}.zip" -o /tmp/ort.zip
+          unzip -q /tmp/ort.zip -d /tmp/ort
+          echo "ORT_LIB_LOCATION=/tmp/ort/${ORT_ASSET}/lib" >> "$GITHUB_ENV"
+
+      # `--engine llvm` uses LLVM source-based coverage instead of the default
+      # ptrace engine. Ptrace requires `-Clink-dead-code`, which forces
+      # monomorphizations of dead-code paths and trips pulp's CheckSameSize
+      # const-eval assertion. llvm coverage doesn't need link-dead-code.
       - name: Generate code coverage
-        run: cargo tarpaulin --no-default-features --verbose --workspace --timeout 120 --out xml
+        env:
+          RUSTC_WRAPPER: sccache
+        run: cargo tarpaulin --engine llvm --verbose --all-features --workspace --timeout 120 --out xml
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
