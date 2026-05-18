@@ -1,0 +1,30 @@
+# Run: from repo root, `make -C benches longmemeval`.
+# Compose uses the repo root as build context so the Dockerfile can COPY the
+# whole crate into the rust-builder stage.
+
+services:
+  bench:
+    build:
+      context: ../..        # repo root — Cargo.toml + src/ + benches/
+      dockerfile: benches/docker/Dockerfile
+    image: octobrain-bench:latest
+    env_file:
+      - ../.env
+    volumes:
+      # Persist datasets, octobrain DB, and results across runs.
+      - bench-data:/data/bench
+      - octobrain-data:/data/octobrain
+      - ../results:/data/results
+      # Mount benches/ over /bench so script + adapter changes don't require
+      # a rebuild — pip-installed Python deps live in /usr/local/lib so this
+      # mount doesn't mask them. Only the Rust binary lives outside (in
+      # /usr/local/bin/octobrain) and stays baked into the image.
+      - ../scripts:/bench/scripts
+      - ../adapters:/bench/adapters
+    # Stdin attached so smoke-test shells work. Override command with `make smoke` etc.
+    stdin_open: true
+    tty: true
+
+volumes:
+  bench-data:
+  octobrain-data:
