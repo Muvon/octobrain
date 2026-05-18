@@ -14,6 +14,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  SCCACHE_GHA_ENABLED: true
 
 jobs:
   create-release:
@@ -158,47 +159,166 @@ jobs:
       with:
         targets: ${{ matrix.target }}
 
-    - name: Install protobuf compiler (macOS)
-      if: startsWith(matrix.os, 'macos')
-      run: brew install protobuf
+    - name: Install protobuf compiler
+      uses: arduino/setup-protoc@v3
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Install protobuf compiler (Windows)
-      if: startsWith(matrix.os, 'windows')
+    - name: Cache Rust artifacts
+      uses: Swatinem/rust-cache@v2
+
+    - name: Run sccache-cache
+      uses: mozilla-actions/sccache-action@v0.0.9
+
+    - name: Create swap space for memory-intensive builds
+      if: matrix.target == 'aarch64-unknown-linux-musl'
       run: |
-        choco install protoc
+        echo "=== Before ==="
+        free -h
+        swapon --show
 
-    - name: Cache dependencies
+        EXISTING=$(swapon --noheadings --show=NAME | head -1 || true)
+        if [ -n "$EXISTING" ]; then
+          sudo swapoff "$EXISTING" || true
+          sudo rm -f "$EXISTING"
+        fi
+
+        SWAP_PATH="/mnt/swapfile"
+        sudo fallocate -l 16G "$SWAP_PATH" 2>/dev/null || \
+          sudo dd if=/dev/zero of="$SWAP_PATH" bs=1M count=16384
+        sudo chmod 600 "$SWAP_PATH"
+        sudo mkswap "$SWAP_PATH"
+        sudo swapon "$SWAP_PATH"
+
+        echo "=== After ==="
+        free -h
+        swapon --show
+
+    # Cache the static ONNX Runtime build for musl targets where pyke ships no
+    # prebuilts. Cache full source+build tree because ort-sys's full static-link
+    # branch needs build/_deps/ subtrees for re2/abseil/protobuf/etc.
+    - name: Cache ONNX Runtime static build
+      if: endsWith(matrix.target, '-unknown-linux-musl')
       uses: actions/cache@v4
       with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ endsWith(matrix.target, '-unknown-linux-musl') && 'docker-alpine' || runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ endsWith(matrix.target, '-unknown-linux-musl') && 'docker-alpine' || runner.os }}-${{ matrix.target }}-cargo-
-          ${{ endsWith(matrix.target, '-unknown-linux-musl') && 'docker-alpine' || runner.os }}-cargo-
+        path: onnxruntime-src
+        key: onnxruntime-1.24.2-${{ matrix.target }}-alpine3.22-v6
 
     - name: Build binary
       shell: sh
       run: |
         if [ "${{ runner.os }}" = "Linux" ]; then
-          # Use official Rust Docker image for Linux builds
-          # Disable default features: ort-sys has no prebuilt binaries for musl targets
+          # Linux musl: build ONNX Runtime statically from source inside Alpine,
+          # then build octobrain with fastembed enabled, linking ort-sys against
+          # the local static build via ORT_LIB_LOCATION. Pyke ships no musl
+          # prebuilts, so this is the only supported path. ORT 1.24.2 matches
+          # ort-sys 2.0.0-rc.12 / fastembed's api-24 feature.
+          mkdir -p onnxruntime-src
+          chmod -R 777 onnxruntime-src
+
           docker run --rm \
+            --user 0:0 \
             -v "$(pwd):/workspace" \
             -w /workspace \
-            rust:1.95.0-alpine3.23 \
-            sh -c "
-              apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig gcc g++ protobuf-dev && \
-              rustup target add ${{ matrix.target }} && \
-              cargo build --release --target ${{ matrix.target }} --no-default-features
-            "
+            rust:1.95.0-alpine3.22 \
+            sh -c '
+              set -eu
+              # No protobuf-dev: it pulls in abseil-cpp-dev transitively, which
+              # makes ORT'\''s CMake skip its bundled abseil and (because re2
+              # depends on bundled absl targets) drop re2 from the build entirely.
+              # ort-sys 2.0.0-rc.12 hardcodes static links to ~25 absl_*, re2,
+              # protobuf libs at fixed _deps/ paths, so all three must be built
+              # by ORT, not the system. Without the system packages ORT
+              # FetchContent'\''s and compiles all three from source.
+              apk add --no-cache \
+                git perl bash musl-dev openssl-dev openssl-libs-static \
+                pkgconfig gcc g++ \
+                cmake make linux-headers python3 py3-pip patch
+
+              # Provide stub execinfo.h — musl lacks it and Alpine 3.17+ removed
+              # libexecinfo. ORT'\''s stacktrace.cc unconditionally includes it on
+              # non-Android POSIX. The stub provides no-op backtrace functions.
+              mkdir -p /tmp/include
+              cat > /tmp/include/execinfo.h << "EOF"
+        #ifndef _EXECINFO_H
+        #define _EXECINFO_H
+        #include <stddef.h>
+        static inline int backtrace(void **buffer, int size) { (void)buffer; (void)size; return 0; }
+        static inline char **backtrace_symbols(void *const *buffer, int size) { (void)buffer; (void)size; return NULL; }
+        static inline void backtrace_symbols_fd(void *const *buffer, int size, int fd) { (void)buffer; (void)size; (void)fd; }
+        #endif
+        EOF
+              export C_INCLUDE_PATH=/tmp/include
+              export CPLUS_INCLUDE_PATH=/tmp/include
+
+              rustup target add ${{ matrix.target }}
+
+              ORT_SRC=/workspace/onnxruntime-src
+              ORT_LIB_LOCATION="$ORT_SRC/build/Release"
+              # libre2.a is the late marker — re2 is built last in the bundled
+              # dep graph (after abseil + protobuf), so its presence proves the
+              # full static tree is in place.
+              if [ ! -f "$ORT_LIB_LOCATION/_deps/re2-build/libre2.a" ]; then
+                echo "==> Building ONNX Runtime 1.24.2 from source (static, musl)"
+                rm -rf "$ORT_SRC"
+                git clone --single-branch --branch v1.24.2 --recursive \
+                  https://github.com/microsoft/onnxruntime.git "$ORT_SRC"
+                cd "$ORT_SRC"
+                ./build.sh \
+                  --config Release \
+                  --build_dir build \
+                  --parallel \
+                  --skip_tests \
+                  --skip_submodule_sync \
+                  --allow_running_as_root \
+                  --compile_no_warning_as_error \
+                  --no_kleidiai \
+                  --no_sve \
+                  --cmake_extra_defines \
+                    CMAKE_POSITION_INDEPENDENT_CODE=ON \
+                    onnxruntime_BUILD_UNIT_TESTS=OFF \
+                    onnxruntime_BUILD_SHARED_LIB=OFF \
+                    onnxruntime_USE_KLEIDIAI=OFF
+                # ORT'\''s static build (.a archives, --skip_tests) never link an
+                # executable, so target_link_libraries deps like re2::re2 don'\''t
+                # trigger compilation — re2 is FetchContent-populated but its
+                # CMake target stays unbuilt. ort-sys 2.0.0-rc.12 hardcodes a
+                # static link to it. Explicitly drive the re2 target inside ORT'\''s
+                # configured build tree (uses bundled abseil from the same tree).
+                cmake --build "$ORT_LIB_LOCATION" --target re2 -j
+                cd /workspace
+              else
+                echo "==> Using cached ONNX Runtime static build"
+              fi
+
+              # Install protobuf-dev AFTER ORT build: lance-encoding build.rs
+              # needs the well-known .proto includes (google/protobuf/empty.proto)
+              # which only ship in protobuf-dev. Installing it earlier would pull
+              # abseil-cpp-dev and make ORT CMake skip its bundled abseil + drop
+              # re2. By this point ORT artifacts already exist, and cargo only
+              # links pre-built .a files via ORT_LIB_LOCATION.
+              apk add --no-cache protobuf-dev
+
+              export ORT_LIB_LOCATION="$ORT_LIB_LOCATION"
+              # GCC 15 (Alpine 3.23) introduced __cpu_features2 in libgcc.
+              # ORT'\''s cpuid_info.cc.o references it; musl static link needs
+              # libgcc.a explicitly or the symbol is undefined at link time.
+              export RUSTFLAGS="-C link-arg=-lgcc"
+              cargo build --release --target ${{ matrix.target }}
+            '
         elif [ "${{ runner.os }}" = "Windows" ]; then
-          # Windows: fastembed/huggingface (esaxx-rs/ort) don't link cleanly on MSVC
-          cargo build --release --target ${{ matrix.target }} --no-default-features
+          # Windows MSVC: pyke's prebuilt ORT static lib is compiled with /MD
+          # (dynamic CRT). Rust on MSVC defaults to /MT (static CRT) →
+          # __imp_* unresolved symbol errors at link time. Switch Rust to
+          # dynamic CRT to match. vcruntime140.dll is present on all Windows
+          # hosts. (esaxx-rs is also /MT via hardcoded static_crt(true);
+          # patched via [patch.crates-io] in Cargo.toml to a vendored copy
+          # with /MD.)
+          export RUSTFLAGS="-C target-feature=-crt-static"
+          cargo build --release --target ${{ matrix.target }}
         else
-          # macOS: build with default features (fastembed + huggingface work fine)
+          # macOS aarch64: pyke ships prebuilts. Build with default features
+          # (fastembed + huggingface) natively.
           cargo build --release --target ${{ matrix.target }}
         fi
 

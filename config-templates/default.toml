@@ -4,9 +4,23 @@
 
 [embedding]
 # Embedding model for memory operations
-# Format: provider:model (e.g., voyage:voyage-3.5-lite, openai:text-embedding-3-small)
-# Default: voyage:voyage-3.5-lite
-model = "voyage:voyage-3.5-lite"
+# Format: provider:model
+#
+# Default is a LOCAL model (no API key, runs on CPU, ~133MB first download):
+#   fastembed:BAAI/bge-small-en-v1.5  — 384-dim, ~62 MTEB, fast + good quality
+#
+# Other local options (fastembed, no API key):
+#   fastembed:sentence-transformers/all-MiniLM-L6-v2-quantized  (22MB, fastest)
+#   fastembed:nomic-ai/nomic-embed-text-v1.5  (768-dim, 8192-ctx, 274MB)
+#   fastembed:BAAI/bge-base-en-v1.5  (768-dim, ~440MB)
+#   fastembed:intfloat/multilingual-e5-small  (384-dim, multilingual)
+#
+# Cloud providers (require API keys, generally higher quality):
+#   voyage:voyage-3.5-lite           VOYAGE_API_KEY
+#   openai:text-embedding-3-small    OPENAI_API_KEY
+#   google:text-embedding-004        GOOGLE_API_KEY
+#   jina:jina-embeddings-v3          JINA_API_KEY
+model = "fastembed:BAAI/bge-small-en-v1.5"
 
 # Batch size for embedding generation (number of texts to process at once)
 # Default: 32
