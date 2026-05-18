@@ -688,7 +688,9 @@ async fn execute_memory_command(
 
         MemoryCommand::Consolidate { goal_id, summary } => {
             println!("🎯 Consolidating goal '{}'...", goal_id);
-            let consolidated = memory_manager.consolidate_goal(&goal_id, summary).await?;
+            let consolidated = memory_manager
+                .consolidate_goal(&goal_id, None, summary)
+                .await?;
             println!(
                 "✅ Consolidated → memory ID: {}\n   Title: {}\n   Importance: {:.3}",
                 consolidated.id, consolidated.title, consolidated.metadata.importance

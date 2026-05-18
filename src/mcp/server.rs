@@ -362,18 +362,6 @@ pub struct ForgetParams {
     pub role: Option<String>,
 }
 
-/// Consolidate tool parameters
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ConsolidateParams {
-    /// ID of the Goal memory to close. Memory type must be Goal.
-    pub goal_id: String,
-    /// Optional explicit summary text for the consolidated parent memory.
-    /// When omitted, octobrain synthesizes a deterministic summary from the
-    /// source memory titles.
-    #[schemars(length(max = 4000))]
-    pub summary: Option<String>,
-}
-
 /// Command for the knowledge tool
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -419,7 +407,7 @@ pub struct KnowledgeParams {
 impl McpServer {
     #[tool(
         name = "memorize",
-        description = "Store information, insights, or context in memory. Call remember first to avoid duplicates. Set source='user_confirmed' for user-stated facts (importance 0.8-1.0), 'agent_inferred' for AI conclusions (0.3-0.6). Skip transient state or things easily re-derived."
+        description = "Store information, insights, or context in memory. Call remember first to avoid duplicates. Set source='user_confirmed' for user-stated facts (importance 0.8-1.0), 'agent_inferred' for AI conclusions (0.3-0.6). Skip transient state or things easily re-derived.\n\nUse related_to[] to link the new memory to existing ones in the same call. Relationship types: related_to, depends_on, supersedes, similar, conflicts, implements, extends, achieves, closes.\n\nGoal workflow:\n1. memorize a 'goal' type memory for the task — captures intent\n2. For each contributing memory: memorize with related_to=[{target_id: goal_id, relationship_type: 'achieves'}]\n3. When the task closes: memorize the completion / lesson-learned note with related_to=[{target_id: goal_id, relationship_type: 'closes'}]. This triggers automatic consolidation — your closing memo becomes the consolidated parent, all Achieves sources transition to Consolidated state with dampened importance (still queryable for audit). Importance of the closing memo is bumped to max(sources) * 1.1. No separate consolidate call needed."
     )]
     async fn memorize(
         &self,
@@ -503,26 +491,6 @@ impl McpServer {
         }
 
         provider.execute_forget(&args).await.map_err(|e| {
-            McpError::internal_error(
-                e.message,
-                Some(serde_json::to_value(e.operation).unwrap_or_default()),
-            )
-        })
-    }
-
-    #[tool(
-        name = "consolidate",
-        description = "Close a Goal memory by summarizing all source memories that Achieve it into a new consolidated parent memory. Sources transition to Consolidated state with dampened importance but remain queryable for audit. Use when a task / project / intent completes and you want its supporting context compressed into a single retrievable insight. The new memory inherits importance = max(sources) * 1.1 (clamped). Provide a summary if you want full control over the consolidated content; omit it to get a deterministic synthesis of source titles. To link memories to a Goal before consolidating, use the `related_to` parameter on `memorize` with `relationship_type: \"achieves\"`."
-    )]
-    async fn consolidate(
-        &self,
-        Parameters(params): Parameters<ConsolidateParams>,
-    ) -> Result<String, McpError> {
-        let provider = self.get_or_init_memory().await?;
-        let args = serde_json::to_value(&params).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize params: {}", e), None)
-        })?;
-        provider.execute_consolidate(&args).await.map_err(|e| {
             McpError::internal_error(
                 e.message,
                 Some(serde_json::to_value(e.operation).unwrap_or_default()),
