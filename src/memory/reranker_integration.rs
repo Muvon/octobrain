@@ -46,6 +46,7 @@ use crate::memory::types::MemorySearchResult;
 use anyhow::Result;
 
 /// Reranker integration wrapper
+#[derive(Clone)]
 pub struct RerankerIntegration {
     pub config: RerankerConfig,
 }

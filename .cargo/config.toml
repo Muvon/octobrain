@@ -1,0 +1,54 @@
+# Cargo configuration for cross-compilation and optimization
+
+# Linux musl targets for static linking
+[target.x86_64-unknown-linux-musl]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=-static",
+]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=-static",
+    # Disable fp16: rustc incorrectly reports this feature as enabled on some
+    # aarch64 CI runners, causing gemm-common to emit fullfp16 instructions
+    # the CPU doesn't support (rustc issue #95122).
+    "-C", "target-feature=-fp16",
+]
+
+# Windows MSVC targets: keep +crt-static at the .cargo/config level (matches
+# octocode). Release/CI pipelines override to -crt-static at build time via
+# RUSTFLAGS so Rust matches pyke's /MD-built ORT prebuilts.
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+]
+
+# macOS targets (dynamic linking)
+[target.aarch64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-undefined",
+    "-C", "link-arg=dynamic_lookup",
+]
+
+[target.x86_64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-undefined",
+    "-C", "link-arg=dynamic_lookup",
+]
+
+[registry]
+default = "crates-io"
+
+[registry.crates-io]
+protocol = "sparse"
+
+[net]
+retry = 2
+git-fetch-with-cli = true

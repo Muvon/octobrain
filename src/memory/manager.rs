@@ -13,17 +13,29 @@
 // limitations under the License.
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{Duration, Utc};
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tokio::sync::Mutex as AsyncMutex;
+use tokio::task::JoinHandle;
 
 use super::git_utils::{FileFate, GitUtils, RenameMap};
 use super::store::MemoryStore;
 use super::types::{
     Memory, MemoryConfig, MemoryMetadata, MemoryQuery, MemoryRelationship, MemorySearchResult,
-    MemorySource, MemoryType, RelationshipType,
+    MemorySource, MemoryState, MemoryType, RelationshipType,
 };
 use crate::config::Config;
 use crate::embedding::{create_embedding_provider_from_parts, parse_provider_model};
+
+/// How often (in memorize calls) to run LanceDB maintenance.
+/// 250 is small enough that the unindexed delta never gets large enough to
+/// dominate search time, but large enough that the optimize+compact overhead
+/// amortizes well across writes. Empirical: at 500 the delta scan is the
+/// dominant search cost; at 100 the maintenance cost dominates the write path.
+const MAINTENANCE_EVERY_N_WRITES: usize = 250;
 
 /// Parameters for the memorize() call — groups the optional fields to stay under clippy's arg limit.
 #[derive(Debug)]
@@ -38,10 +50,34 @@ pub struct MemorizeParams {
 }
 /// High-level memory management interface
 pub struct MemoryManager {
-    store: MemoryStore,
+    /// Wrapped in Arc so fire-and-forget background tasks (currently:
+    /// post-memorize auto-linking) can hold their own clone of the store
+    /// for as long as they need. All MemoryStore mutating methods now
+    /// take `&self` via internal LanceDB `Table` mutability, so no top-
+    /// level lock is needed — concurrent reads + writes are safe.
+    store: Arc<MemoryStore>,
     config: MemoryConfig,
     /// Path to the stale-check marker file for incremental git scanning
     stale_check_marker: PathBuf,
+    /// Path to the sleep-consolidation marker file; stores last-run RFC3339 timestamp.
+    /// Lazy auto-consolidation is gated by `(now - last_run) >= interval_hours`.
+    sleep_consolidation_marker: PathBuf,
+    /// JoinHandles for in-flight fire-and-forget auto-link tasks. memorize
+    /// pushes here when spawning; consolidate_goal drains (awaits) before
+    /// running so a goal-close never races against in-flight auto-links of
+    /// its source memories. Cosmetic for normal retrieval — but important
+    /// for goal consolidation correctness.
+    pending_auto_links: Arc<AsyncMutex<Vec<JoinHandle<()>>>>,
+    /// Number of memorize calls since startup. Used to trigger periodic
+    /// LanceDB maintenance (incremental index optimization + file compaction)
+    /// — without this, every insert grows an unindexed "delta" region that
+    /// vector search has to scan linearly, AND creates a new small file
+    /// (LanceDB is append-only). Both progressively slow down ingest.
+    memorize_counter: Arc<AtomicUsize>,
+    /// Single in-flight maintenance task. Held here so we (a) don't spawn
+    /// overlapping maintenance runs and (b) can await it from
+    /// consolidate_goal so retrieval there sees a fully-merged index.
+    pending_maintenance: Arc<AsyncMutex<Option<JoinHandle<()>>>>,
 }
 
 impl MemoryManager {
@@ -68,12 +104,11 @@ impl MemoryManager {
         // Use shared memory database path (single DB for all projects)
         let db_path = crate::storage::get_memory_database_path()?;
 
-        // Marker file for incremental stale-check: {db_dir}/.stale_check_{project_hash}
-        let marker_name = format!(
-            ".stale_check_{}",
-            project_key.as_deref().unwrap_or("default")
-        );
-        let stale_check_marker = db_path.join(marker_name);
+        // Marker files: {db_dir}/.{kind}_{project_key}
+        let project_label = project_key.as_deref().unwrap_or("default");
+        let stale_check_marker = db_path.join(format!(".stale_check_{}", project_label));
+        let sleep_consolidation_marker =
+            db_path.join(format!(".sleep_consolidation_{}", project_label));
 
         // Create embedding provider using model from config
         let model_string = &config.embedding.model;
@@ -92,17 +127,70 @@ impl MemoryManager {
         .await?;
 
         let mut manager = Self {
-            store,
+            store: Arc::new(store),
             config: memory_config,
             stale_check_marker,
+            sleep_consolidation_marker,
+            pending_auto_links: Arc::new(AsyncMutex::new(Vec::new())),
+            memorize_counter: Arc::new(AtomicUsize::new(0)),
+            pending_maintenance: Arc::new(AsyncMutex::new(None)),
         };
 
         // Lazy cleanup of stale file references on init (like knowledge session cleanup)
         if manager.config.stale_ref_cleanup_enabled {
             manager.cleanup_stale_references().await.ok();
         }
+        // Lazy autonomous sleep consolidation: marker-gated, no cron required.
+        // Mirrors the cleanup pattern — best-effort, errors swallowed so a slow or
+        // failed consolidation pass never blocks the manager from initializing.
+        if manager.config.sleep_consolidation_enabled {
+            manager.maybe_sleep_consolidate().await.ok();
+        }
 
         Ok(manager)
+    }
+
+    /// Read the timestamp of the last sleep-consolidation pass from the marker file.
+    fn read_sleep_marker(&self) -> Option<chrono::DateTime<Utc>> {
+        let raw = std::fs::read_to_string(&self.sleep_consolidation_marker).ok()?;
+        chrono::DateTime::parse_from_rfc3339(raw.trim())
+            .ok()
+            .map(|d| d.with_timezone(&Utc))
+    }
+
+    /// Write the current time as the last sleep-consolidation pass.
+    fn write_sleep_marker(&self) {
+        std::fs::write(&self.sleep_consolidation_marker, Utc::now().to_rfc3339()).ok();
+    }
+
+    /// Decide whether to run sleep consolidation based on the marker file.
+    /// Runs if no marker exists OR `now - last_run >= interval_hours`.
+    /// Always updates the marker on a successful run.
+    async fn maybe_sleep_consolidate(&mut self) -> Result<()> {
+        let interval_hours = self.config.sleep_consolidation_interval_hours.max(1) as i64;
+        let due = match self.read_sleep_marker() {
+            Some(last) => (Utc::now() - last).num_hours() >= interval_hours,
+            None => true, // first run for this project
+        };
+        if !due {
+            return Ok(());
+        }
+
+        let threshold = self.config.sleep_consolidation_threshold;
+        let min_size = self.config.sleep_consolidation_min_cluster_size;
+        let max_age_days = self.config.sleep_consolidation_max_age_days;
+
+        let consolidated = self
+            .sleep_consolidate(threshold, min_size, max_age_days)
+            .await?;
+        if !consolidated.is_empty() {
+            tracing::info!(
+                "Lazy sleep consolidation: produced {} consolidated parent(s)",
+                consolidated.len()
+            );
+        }
+        self.write_sleep_marker();
+        Ok(())
     }
 
     /// Read the last commit we scanned for stale references.
@@ -347,15 +435,106 @@ impl MemoryManager {
 
         let memory = Memory::new(memory_type, title, content, Some(metadata));
 
-        // Store the memory
+        // Store the memory — caller waits only for this.
         self.store.store_memory(&memory).await?;
 
-        // Auto-link to similar memories and file-sharing memories if enabled
+        // Bump write counter; trigger periodic LanceDB maintenance when due.
+        // Maintenance is cheap when there's nothing new to optimize, and
+        // critical for keeping vector search O(log N) instead of O(N) as the
+        // unindexed delta grows.
+        let n = self.memorize_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        if n.is_multiple_of(MAINTENANCE_EVERY_N_WRITES) {
+            self.spawn_maintenance_if_idle();
+        }
+
+        // Auto-link runs fire-and-forget on a tokio task so memorize returns
+        // immediately. consolidate_goal drains pending handles before running,
+        // so a goal-close never races against in-flight auto-links of its
+        // own sources. Errors logged via tracing::warn from inside the task.
         if self.config.auto_linking_enabled {
-            self.auto_link_memory(&memory.id).await?;
+            let store = self.store.clone();
+            let config = self.config.clone();
+            let memory_id = memory.id.clone();
+            let handle = tokio::spawn(async move {
+                if let Err(e) = auto_link_memory_impl(store, config, &memory_id).await {
+                    tracing::warn!(
+                        "fire-and-forget auto-link for memory '{}' failed: {}",
+                        memory_id,
+                        e
+                    );
+                }
+            });
+            // Track the handle so consolidate_goal can wait for completion.
+            self.pending_auto_links.lock().await.push(handle);
         }
 
         Ok(memory)
+    }
+
+    /// Await all in-flight fire-and-forget auto-link tasks and drain the
+    /// handle list. Called by `consolidate_goal` (and any other operation
+    /// that depends on the relationship graph being fully built) so we
+    /// never race against background work. Tasks that have already
+    /// completed are joined trivially.
+    async fn drain_pending_auto_links(&self) {
+        let handles: Vec<JoinHandle<()>> = {
+            let mut guard = self.pending_auto_links.lock().await;
+            std::mem::take(&mut *guard)
+        };
+        for h in handles {
+            // JoinHandle returns Result<()>; the inner function already
+            // logged any operational error, so we only care about panics.
+            if let Err(e) = h.await {
+                if e.is_panic() {
+                    tracing::warn!("auto-link task panicked: {}", e);
+                }
+            }
+        }
+        self.drain_pending_maintenance().await;
+    }
+
+    /// Await an in-flight maintenance task if one is running. Called from
+    /// `drain_pending_auto_links` so retrieval after a `consolidate_goal`
+    /// sees a fully-merged index.
+    async fn drain_pending_maintenance(&self) {
+        let handle = {
+            let mut guard = self.pending_maintenance.lock().await;
+            guard.take()
+        };
+        if let Some(h) = handle {
+            if let Err(e) = h.await {
+                if e.is_panic() {
+                    tracing::warn!("maintenance task panicked: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Spawn a LanceDB maintenance pass (incremental index optimize + file
+    /// compaction) if one isn't already in flight. If the previous
+    /// maintenance handle is still running we skip — it'll absorb the new
+    /// rows when it next runs, so we never starve maintenance. If the
+    /// previous handle finished, we replace it. Best-effort: errors inside
+    /// the task are logged but never propagated to memorize.
+    fn spawn_maintenance_if_idle(&self) {
+        let store = self.store.clone();
+        let pending = self.pending_maintenance.clone();
+        tokio::spawn(async move {
+            let mut guard = pending.lock().await;
+            // Replace finished handles so a new pass can run; skip while one
+            // is still mid-flight.
+            if let Some(ref h) = *guard {
+                if !h.is_finished() {
+                    return;
+                }
+            }
+            let handle = tokio::spawn(async move {
+                if let Err(e) = store.run_maintenance().await {
+                    tracing::warn!("LanceDB maintenance pass failed: {}", e);
+                }
+            });
+            *guard = Some(handle);
+        });
     }
 
     /// Remember (search) memories based on query
@@ -671,123 +850,425 @@ impl MemoryManager {
         Ok(related_memories)
     }
 
-    /// Automatically link a memory to similar memories based on semantic similarity
-    /// Creates bidirectional AutoLinked relationships
-    pub async fn auto_link_memory(&mut self, memory_id: &str) -> Result<Vec<MemoryRelationship>> {
-        if !self.config.auto_linking_enabled {
+    /// Event-based consolidation: close a Goal memory by folding all source
+    /// memories that `Achieves` it into a single consolidated parent.
+    ///
+    /// Two parent-selection modes:
+    /// * `parent_id = Some(id)` — promote an existing memory to be the parent.
+    ///   Triggered by `memorize` when the agent creates a `Closes` relationship —
+    ///   the agent's just-stored "completion note" becomes the consolidated parent.
+    ///   Its content is the lesson-learned text; importance gets bumped to the
+    ///   consolidation level. `summary` is ignored in this mode.
+    /// * `parent_id = None` — synthesize a fresh Insight memory as parent.
+    ///   Triggered by the CLI admin override (`octobrain memory consolidate`).
+    ///   `summary` becomes the parent content (or a deterministic title-list).
+    ///
+    /// Both modes:
+    /// 1. Validate the goal exists and is of type Goal
+    /// 2. Gather all Working sources with Achieves(→ goal); skip already-Consolidated
+    /// 3. Compute consolidated_importance = max(sources, parent if any) * 1.1, clamped
+    /// 4. Promote/create the parent at that importance
+    /// 5. Add Closes(parent → goal) and AutoLinked(parent → each source)
+    /// 6. Transition each source: state → Consolidated, importance *= 0.2 (partial UPDATE)
+    pub async fn consolidate_goal(
+        &mut self,
+        goal_id: &str,
+        parent_id: Option<String>,
+        summary: Option<String>,
+    ) -> Result<Memory> {
+        // Wait for any in-flight auto-link tasks to finish before we walk the
+        // relationship graph. Otherwise sources just memorized but not yet
+        // auto-linked could be missed by `Achieves` lookups.
+        self.drain_pending_auto_links().await;
+
+        let goal = self
+            .store
+            .get_memory(goal_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Goal memory '{}' not found", goal_id))?;
+        if goal.memory_type != MemoryType::Goal {
+            return Err(anyhow::anyhow!(
+                "Memory '{}' is type {} — consolidate_goal requires MemoryType::Goal",
+                goal_id,
+                goal.memory_type
+            ));
+        }
+
+        // Find Achieves relationships targeting this goal (source → goal).
+        let achievers: Vec<MemoryRelationship> = self
+            .store
+            .get_memory_relationships(goal_id)
+            .await?
+            .into_iter()
+            .filter(|r| {
+                matches!(r.relationship_type, RelationshipType::Achieves) && r.target_id == goal_id
+            })
+            .collect();
+
+        if achievers.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Goal '{}' has no Achieves source memories to consolidate",
+                goal_id
+            ));
+        }
+
+        // Load Working sources. Skip already-Consolidated AND skip the parent itself
+        // (the parent must not appear in its own source list — that would demote it).
+        let parent_id_ref = parent_id.as_deref();
+        let mut sources: Vec<Memory> = Vec::with_capacity(achievers.len());
+        for rel in &achievers {
+            if Some(rel.source_id.as_str()) == parent_id_ref {
+                continue;
+            }
+            if let Some(m) = self.store.get_memory(&rel.source_id).await? {
+                if m.metadata.state == MemoryState::Working {
+                    sources.push(m);
+                }
+            }
+        }
+        if sources.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Goal '{}' has Achieves relationships but no Working source memories",
+                goal_id
+            ));
+        }
+
+        // Consolidated importance: 10% above the strongest source, clamped to [0,1].
+        let max_src_importance: f32 = sources
+            .iter()
+            .map(|m| m.metadata.importance)
+            .fold(0.0_f32, f32::max);
+        let consolidated_importance = (max_src_importance * 1.1).clamp(0.0, 1.0);
+
+        // Materialize the parent: either promote an existing memory (memorize-with-Closes
+        // path) or create a fresh Insight (CLI admin path).
+        let parent = if let Some(pid) = parent_id_ref {
+            let mut existing = self
+                .store
+                .get_memory(pid)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Parent memory '{}' not found", pid))?;
+            // Bump persisted importance to the consolidation level via partial UPDATE
+            // so the embedding stays put.
+            self.store
+                .update_state_and_importance(pid, MemoryState::Working, consolidated_importance)
+                .await?;
+            existing.metadata.importance = consolidated_importance;
+            existing
+        } else {
+            let content = summary.unwrap_or_else(|| {
+                let titles: Vec<&str> = sources.iter().map(|m| m.title.as_str()).collect();
+                format!(
+                    "Consolidation of goal '{}' — synthesized from {} source memories:\n- {}",
+                    goal.title,
+                    sources.len(),
+                    titles.join("\n- ")
+                )
+            });
+            let mut meta = MemoryMetadata {
+                importance: consolidated_importance,
+                source: goal.metadata.source.clone(),
+                ..Default::default()
+            };
+            meta.tags.push("consolidated".to_string());
+            meta.tags.push(format!("goal:{}", goal_id));
+            meta.decay = super::types::MemoryDecay::new(consolidated_importance);
+            let new_parent = Memory::new(
+                MemoryType::Insight,
+                format!("Consolidation: {}", goal.title),
+                content,
+                Some(meta),
+            );
+            self.store.store_memory(&new_parent).await?;
+            new_parent
+        };
+
+        // Closes(parent → goal). For the memorize-with-Closes path the relationship
+        // already exists (the agent put it there), but recording it from the manager
+        // path keeps the CLI mode complete. Duplicate is acceptable — relationships
+        // are not deduped, and the additional row is informative.
+        if parent_id_ref.is_none() {
+            let closes = MemoryRelationship {
+                id: uuid::Uuid::new_v4().to_string(),
+                source_id: parent.id.clone(),
+                target_id: goal_id.to_string(),
+                relationship_type: RelationshipType::Closes,
+                strength: 1.0,
+                description: format!("Closes goal via consolidation of {} sources", sources.len()),
+                created_at: Utc::now(),
+            };
+            self.store.store_relationship(&closes).await?;
+        }
+
+        // Provenance: link parent → each source so the chain is queryable.
+        for src in &sources {
+            let link = MemoryRelationship {
+                id: uuid::Uuid::new_v4().to_string(),
+                source_id: parent.id.clone(),
+                target_id: src.id.clone(),
+                relationship_type: RelationshipType::AutoLinked,
+                strength: 0.9,
+                description: "Source absorbed by consolidation".to_string(),
+                created_at: Utc::now(),
+            };
+            self.store.store_relationship(&link).await?;
+        }
+
+        // Archive sources: state → Consolidated, importance *= 0.2 via partial UPDATE.
+        for src in &sources {
+            let new_importance = src.metadata.importance * 0.2;
+            self.store
+                .update_state_and_importance(&src.id, MemoryState::Consolidated, new_importance)
+                .await?;
+        }
+
+        tracing::info!(
+            "Consolidated goal '{}' ({}): {} sources → parent {} (importance={:.3}, {})",
+            goal.title,
+            goal_id,
+            sources.len(),
+            parent.id,
+            consolidated_importance,
+            if parent_id_ref.is_some() {
+                "promoted-existing"
+            } else {
+                "synthesized-new"
+            },
+        );
+
+        Ok(parent)
+    }
+
+    /// Sleep consolidation: batch-find clusters of similar recent memories and
+    /// fold each cluster into a consolidated parent via the same goal-anchored
+    /// pipeline `consolidate_goal` uses.
+    ///
+    /// Process:
+    /// 1. Fetch all Working-state memories created in the last `max_age_days`
+    /// 2. For each candidate (in order), search for similar candidates above
+    ///    `similarity_threshold` and form a cluster {candidate} ∪ neighbors,
+    ///    excluding anything already assigned to another cluster
+    /// 3. For each cluster of size ≥ `min_cluster_size`, synthesize an
+    ///    ephemeral `Goal` memory, link cluster members via `Achieves`, then
+    ///    call `consolidate_goal`. The synthetic goal becomes part of the
+    ///    permanent provenance chain — no special teardown needed.
+    ///
+    /// Returns the consolidated memories produced. Empty vec when nothing
+    /// clusters tightly enough at the given threshold.
+    pub async fn sleep_consolidate(
+        &mut self,
+        similarity_threshold: f32,
+        min_cluster_size: usize,
+        max_age_days: u32,
+    ) -> Result<Vec<Memory>> {
+        if min_cluster_size < 2 {
+            return Err(anyhow::anyhow!(
+                "min_cluster_size must be >= 2, got {}",
+                min_cluster_size
+            ));
+        }
+
+        let cutoff = Utc::now() - Duration::days(max_age_days as i64);
+        let candidates = self.store.get_recent_working_memories(cutoff).await?;
+        if candidates.len() < min_cluster_size {
             return Ok(Vec::new());
         }
 
-        // 1. Get the memory
-        let memory = self
-            .store
-            .get_memory(memory_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Memory not found: {}", memory_id))?;
+        // For each candidate, find similar Working memories above threshold.
+        // We collect (id, neighbor_ids) pairs then run pure clustering on them.
+        let candidate_ids: HashSet<String> = candidates.iter().map(|m| m.id.clone()).collect();
+        let mut neighborhoods: Vec<(String, Vec<String>)> = Vec::with_capacity(candidates.len());
+        for cand in &candidates {
+            let query = MemoryQuery {
+                query_text: Some(cand.get_searchable_text()),
+                limit: Some(self.config.max_auto_links_per_memory.max(min_cluster_size) * 2),
+                min_relevance: Some(similarity_threshold),
+                ..Default::default()
+            };
+            let hits = self.store.search_memories(&query).await?;
+            let neighbors: Vec<String> = hits
+                .into_iter()
+                .filter(|r| r.memory.id != cand.id && candidate_ids.contains(&r.memory.id))
+                .map(|r| r.memory.id)
+                .collect();
+            neighborhoods.push((cand.id.clone(), neighbors));
+        }
 
-        // 2. Search for similar memories with high threshold
-        let query = MemoryQuery {
-            query_text: Some(memory.get_searchable_text()),
-            limit: Some(self.config.max_auto_links_per_memory * 2), // Get more candidates
-            min_relevance: Some(self.config.auto_link_threshold),
-            ..Default::default()
+        let clusters = build_clusters(&neighborhoods, min_cluster_size);
+        if clusters.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let now = Utc::now();
+        let mut consolidated = Vec::with_capacity(clusters.len());
+        for cluster in clusters {
+            // Synthesize an ephemeral Goal so we can reuse consolidate_goal verbatim.
+            let goal_meta = MemoryMetadata {
+                importance: 0.5,
+                source: MemorySource::AgentInferred,
+                ..Default::default()
+            };
+            let goal = Memory::new(
+                MemoryType::Goal,
+                format!("Sleep cluster {}", now.format("%Y-%m-%d %H:%M:%S")),
+                format!(
+                    "Auto-detected cluster of {} similar memories created in the last {} days, \
+                     similarity ≥ {:.2}",
+                    cluster.len(),
+                    max_age_days,
+                    similarity_threshold
+                ),
+                Some(goal_meta),
+            );
+            self.store.store_memory(&goal).await?;
+
+            for member_id in &cluster {
+                let achieves = MemoryRelationship {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    source_id: member_id.clone(),
+                    target_id: goal.id.clone(),
+                    relationship_type: RelationshipType::Achieves,
+                    strength: 1.0,
+                    description: "Sleep consolidation cluster member".to_string(),
+                    created_at: now,
+                };
+                self.store.store_relationship(&achieves).await?;
+            }
+
+            match self.consolidate_goal(&goal.id, None, None).await {
+                Ok(m) => consolidated.push(m),
+                Err(e) => tracing::warn!(
+                    "Sleep consolidation: cluster {:?} failed to consolidate: {}",
+                    cluster,
+                    e
+                ),
+            }
+        }
+
+        Ok(consolidated)
+    }
+
+    /// Automatically link a memory to similar memories based on semantic similarity.
+    /// Creates bidirectional AutoLinked relationships. Synchronous: the caller
+    /// awaits completion. For fire-and-forget use, `memorize` spawns
+    /// `auto_link_memory_impl` directly on a tokio task.
+    pub async fn auto_link_memory(&self, memory_id: &str) -> Result<Vec<MemoryRelationship>> {
+        auto_link_memory_impl(self.store.clone(), self.config.clone(), memory_id).await
+    }
+}
+
+/// Free-function implementation of auto-linking so it can be spawned on a tokio
+/// task that doesn't borrow `self`. Takes an `Arc<MemoryStore>` (cheap clone)
+/// and a snapshot of the `MemoryConfig`. Both the method version above and the
+/// fire-and-forget path in `memorize` delegate here, so behavior stays consistent.
+pub(crate) async fn auto_link_memory_impl(
+    store: Arc<MemoryStore>,
+    config: MemoryConfig,
+    memory_id: &str,
+) -> Result<Vec<MemoryRelationship>> {
+    if !config.auto_linking_enabled {
+        return Ok(Vec::new());
+    }
+
+    // 1. Get the memory
+    let memory = store
+        .get_memory(memory_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Memory not found: {}", memory_id))?;
+
+    // 2. Search for similar memories with high threshold
+    let query = MemoryQuery {
+        query_text: Some(memory.get_searchable_text()),
+        limit: Some(config.max_auto_links_per_memory * 2), // Get more candidates
+        min_relevance: Some(config.auto_link_threshold),
+        ..Default::default()
+    };
+
+    let similar = store.search_memories(&query).await?;
+
+    // 3. Create bidirectional similarity relationships
+    let mut relationships = Vec::new();
+    let mut link_count = 0;
+
+    for result in similar.iter() {
+        if result.memory.id == memory_id {
+            continue;
+        }
+        if link_count >= config.max_auto_links_per_memory {
+            break;
+        }
+
+        let forward_rel = MemoryRelationship {
+            id: uuid::Uuid::new_v4().to_string(),
+            source_id: memory_id.to_string(),
+            target_id: result.memory.id.clone(),
+            relationship_type: RelationshipType::AutoLinked,
+            strength: result.relevance_score,
+            description: format!("Auto-linked (similarity: {:.2})", result.relevance_score),
+            created_at: Utc::now(),
         };
+        store.store_relationship(&forward_rel).await?;
+        relationships.push(forward_rel);
 
-        let similar = self.store.search_memories(&query).await?;
-
-        // 3. Create bidirectional similarity relationships
-        let mut relationships = Vec::new();
-        let mut link_count = 0;
-
-        for result in similar.iter() {
-            // Skip self-linking
-            if result.memory.id == memory_id {
-                continue;
-            }
-
-            // Stop if we've reached max links
-            if link_count >= self.config.max_auto_links_per_memory {
-                break;
-            }
-
-            // Create forward link (source -> target)
-            let forward_rel = MemoryRelationship {
+        if config.bidirectional_links {
+            let backward_rel = MemoryRelationship {
                 id: uuid::Uuid::new_v4().to_string(),
-                source_id: memory_id.to_string(),
-                target_id: result.memory.id.clone(),
+                source_id: result.memory.id.clone(),
+                target_id: memory_id.to_string(),
                 relationship_type: RelationshipType::AutoLinked,
                 strength: result.relevance_score,
                 description: format!("Auto-linked (similarity: {:.2})", result.relevance_score),
                 created_at: Utc::now(),
             };
-
-            self.store.store_relationship(&forward_rel).await?;
-            relationships.push(forward_rel);
-
-            // Create backward link if bidirectional (target -> source)
-            if self.config.bidirectional_links {
-                let backward_rel = MemoryRelationship {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    source_id: result.memory.id.clone(),
-                    target_id: memory_id.to_string(),
-                    relationship_type: RelationshipType::AutoLinked,
-                    strength: result.relevance_score,
-                    description: format!("Auto-linked (similarity: {:.2})", result.relevance_score),
-                    created_at: Utc::now(),
-                };
-
-                self.store.store_relationship(&backward_rel).await?;
-                relationships.push(backward_rel);
-            }
-
-            link_count += 1;
+            store.store_relationship(&backward_rel).await?;
+            relationships.push(backward_rel);
         }
-
-        // 4. File-based relationships: link memories that share related files
-        //    Only consider files that still exist on disk to avoid linking via dead references
-        let live_files: Vec<String> = memory
-            .metadata
-            .related_files
-            .iter()
-            .filter(|f| GitUtils::file_exists(f))
-            .cloned()
-            .collect();
-        if !live_files.is_empty() {
-            let file_query = MemoryQuery {
-                related_files: Some(live_files),
-                limit: Some(10),
-                ..Default::default()
-            };
-
-            let file_related = self.store.search_memories(&file_query).await?;
-            for result in file_related {
-                if result.memory.id == memory_id {
-                    continue;
-                }
-                // Skip if already linked by similarity pass
-                if relationships.iter().any(|r: &MemoryRelationship| {
-                    r.target_id == result.memory.id || r.source_id == result.memory.id
-                }) {
-                    continue;
-                }
-
-                let file_rel = MemoryRelationship {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    source_id: memory_id.to_string(),
-                    target_id: result.memory.id.clone(),
-                    relationship_type: RelationshipType::RelatedTo,
-                    strength: 0.7,
-                    description: "Shares related files".to_string(),
-                    created_at: Utc::now(),
-                };
-                self.store.store_relationship(&file_rel).await?;
-                relationships.push(file_rel);
-            }
-        }
-
-        Ok(relationships)
+        link_count += 1;
     }
 
+    // 4. File-based relationships: link memories that share related files —
+    //    only files still alive on disk, to avoid linking through dead refs.
+    let live_files: Vec<String> = memory
+        .metadata
+        .related_files
+        .iter()
+        .filter(|f| GitUtils::file_exists(f))
+        .cloned()
+        .collect();
+    if !live_files.is_empty() {
+        let file_query = MemoryQuery {
+            related_files: Some(live_files),
+            limit: Some(10),
+            ..Default::default()
+        };
+        let file_related = store.search_memories(&file_query).await?;
+        for result in file_related {
+            if result.memory.id == memory_id {
+                continue;
+            }
+            if relationships.iter().any(|r: &MemoryRelationship| {
+                r.target_id == result.memory.id || r.source_id == result.memory.id
+            }) {
+                continue;
+            }
+            let file_rel = MemoryRelationship {
+                id: uuid::Uuid::new_v4().to_string(),
+                source_id: memory_id.to_string(),
+                target_id: result.memory.id.clone(),
+                relationship_type: RelationshipType::RelatedTo,
+                strength: 0.7,
+                description: "Shares related files".to_string(),
+                created_at: Utc::now(),
+            };
+            store.store_relationship(&file_rel).await?;
+            relationships.push(file_rel);
+        }
+    }
+
+    Ok(relationships)
+}
+
+impl MemoryManager {
     /// Get memory graph starting from a memory ID with specified depth
     /// Uses BFS to traverse relationships and build a graph
     pub async fn get_memory_graph(
@@ -914,6 +1395,42 @@ impl MemoryManager {
     pub fn disable_reranker(&mut self) {
         self.store.disable_reranker();
     }
+}
+
+/// Greedy clustering on a candidate / neighbors list.
+///
+/// Each candidate is visited in input order. If it hasn't already been claimed
+/// by an earlier cluster, it forms a new candidate cluster = {self} ∪ {unclaimed
+/// neighbors}. Clusters smaller than `min_size` are discarded. Members claimed
+/// by an accepted cluster cannot join later ones — output clusters are disjoint.
+///
+/// Pure function so it can be unit-tested without LanceDB.
+pub(crate) fn build_clusters(
+    candidates: &[(String, Vec<String>)],
+    min_size: usize,
+) -> Vec<Vec<String>> {
+    let mut claimed: HashSet<String> = HashSet::new();
+    let mut clusters: Vec<Vec<String>> = Vec::new();
+
+    for (id, neighbors) in candidates {
+        if claimed.contains(id) {
+            continue;
+        }
+        let mut cluster: Vec<String> = vec![id.clone()];
+        for n in neighbors {
+            if n != id && !claimed.contains(n) && !cluster.contains(n) {
+                cluster.push(n.clone());
+            }
+        }
+        if cluster.len() >= min_size {
+            for m in &cluster {
+                claimed.insert(m.clone());
+            }
+            clusters.push(cluster);
+        }
+    }
+
+    clusters
 }
 
 /// Memory statistics

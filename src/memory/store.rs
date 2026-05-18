@@ -17,7 +17,7 @@ use chrono::Utc;
 use std::sync::Arc;
 
 // Arrow imports
-use arrow_array::{Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray};
+use arrow_array::{Array, FixedSizeListArray, Float32Array, Int32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 
 // LanceDB imports
@@ -27,7 +27,7 @@ use lancedb::{
     connect,
     index::Index,
     query::{ExecutableQuery, QueryBase, QueryExecutionOptions},
-    table::OptimizeAction,
+    table::{NewColumnTransform, OptimizeAction},
     Connection, DistanceType, Table,
 };
 
@@ -35,6 +35,30 @@ use lancedb::{
 /// Based on: https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf
 /// "Experiments indicate that k = 60 was near-optimal"
 const RRF_K: f32 = 60.0;
+
+/// Rocchio query expansion: `alpha * query + (1 - alpha) * centroid`, then L2-normalized.
+///
+/// Pure-math helper extracted so it can be unit-tested without LanceDB. `alpha` is clamped
+/// to [0.0, 1.0]. The output is normalized so cosine similarity over the blended vector
+/// matches the geometry the rest of the search path expects.
+pub(crate) fn rocchio_blend(query: &[f32], centroid: &[f32], alpha: f32) -> Vec<f32> {
+    debug_assert_eq!(query.len(), centroid.len());
+    let alpha = alpha.clamp(0.0, 1.0);
+    let mut blended: Vec<f32> = query
+        .iter()
+        .zip(centroid.iter())
+        .map(|(q, c)| alpha * q + (1.0 - alpha) * c)
+        .collect();
+
+    let norm: f32 = blended.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        let inv = 1.0 / norm;
+        for v in blended.iter_mut() {
+            *v *= inv;
+        }
+    }
+    blended
+}
 
 use super::reranker_integration::RerankerIntegration;
 use super::types::{Memory, MemoryConfig, MemoryQuery, MemoryRelationship, MemorySearchResult};
@@ -107,7 +131,12 @@ pub struct MemoryStore {
     config: MemoryConfig,
     main_config: crate::config::Config,
     vector_dim: usize,
-    reranker_integration: Option<RerankerIntegration>,
+    // Wrapped in a std::sync::Mutex so enable/disable_reranker can mutate it
+    // via `&self`, which lets the whole `MemoryStore` be shared as `Arc<Self>`
+    // — needed for fire-and-forget auto-linking from `MemoryManager::memorize`.
+    // The lock is only held for the brief enable/disable mutation and during
+    // the rerank call itself; never held across awaits inside async work.
+    reranker_integration: std::sync::Mutex<Option<RerankerIntegration>>,
     project_key: Option<String>,
     role: Option<String>,
 }
@@ -128,6 +157,7 @@ impl MemoryStore {
         main_config: crate::config::Config,
         reranker_integration: Option<RerankerIntegration>,
     ) -> Result<Self> {
+        let reranker_integration = std::sync::Mutex::new(reranker_integration);
         let db = connect(db_path).execute().await?;
 
         // Get vector dimension from the embedding provider by testing with a short text
@@ -150,6 +180,14 @@ impl MemoryStore {
             Field::new("related_files", DataType::Utf8, true),
             Field::new("git_commit", DataType::Utf8, true),
             Field::new("source", DataType::Utf8, false),
+            // Decay state, persisted so retrieval ranking actually differentiates memories.
+            // Int32 (not UInt32) so the migration SQL `CAST(0 AS INT)` is portable across
+            // DataFusion SQL-parser versions, and to match what the writer produces below.
+            Field::new("access_count", DataType::Int32, false),
+            Field::new("last_accessed", DataType::Utf8, false),
+            // Lifecycle state for goal-anchored consolidation. Stores `MemoryState`
+            // as a lowercase string ("working" | "consolidated" | "archived").
+            Field::new("state", DataType::Utf8, false),
             Field::new(
                 "embedding",
                 DataType::FixedSizeList(
@@ -166,6 +204,11 @@ impl MemoryStore {
         // Cache table handles — opened once, reused for the lifetime of this store
         let memories_table = db.open_table("memories").execute().await?;
         let relationships_table = db.open_table("memory_relationships").execute().await?;
+
+        // Migrate existing tables that pre-date the access_count / last_accessed columns.
+        // New tables created above already have them; this only adds them where missing.
+        Self::migrate_decay_columns(&memories_table).await?;
+        Self::migrate_state_column(&memories_table).await?;
 
         // Build relationship schema once — reused for every relationship write
         let rel_schema = Arc::new(Schema::new(vec![
@@ -196,6 +239,59 @@ impl MemoryStore {
         store.ensure_optimal_index().await?;
 
         Ok(store)
+    }
+
+    /// Add `access_count` and `last_accessed` columns to pre-existing memory tables that
+    /// were created before the decay-persistence change. New tables already have them
+    /// via the schema in `new()`. Defaults: access_count=0, last_accessed=created_at.
+    async fn migrate_decay_columns(table: &Table) -> Result<()> {
+        let schema = table.schema().await?;
+        let has_access_count = schema.field_with_name("access_count").is_ok();
+        let has_last_accessed = schema.field_with_name("last_accessed").is_ok();
+
+        let mut transforms: Vec<(String, String)> = Vec::new();
+        if !has_access_count {
+            transforms.push(("access_count".to_string(), "CAST(0 AS INT)".to_string()));
+        }
+        if !has_last_accessed {
+            transforms.push(("last_accessed".to_string(), "created_at".to_string()));
+        }
+
+        if transforms.is_empty() {
+            return Ok(());
+        }
+
+        tracing::info!(
+            "Migrating memories table: adding {} decay column(s)",
+            transforms.len()
+        );
+        table
+            .add_columns(NewColumnTransform::SqlExpressions(transforms), None)
+            .await
+            .context("Failed to add decay columns to existing memories table")?;
+        Ok(())
+    }
+
+    /// Add the `state` column to pre-existing memory tables created before the
+    /// lifecycle-state / goal-consolidation change. Default value is `'working'`
+    /// so all legacy memories remain fully active.
+    async fn migrate_state_column(table: &Table) -> Result<()> {
+        let schema = table.schema().await?;
+        if schema.field_with_name("state").is_ok() {
+            return Ok(());
+        }
+        tracing::info!("Migrating memories table: adding 'state' column");
+        table
+            .add_columns(
+                NewColumnTransform::SqlExpressions(vec![(
+                    "state".to_string(),
+                    "'working'".to_string(),
+                )]),
+                None,
+            )
+            .await
+            .context("Failed to add state column to existing memories table")?;
+        Ok(())
     }
 
     /// Initialize memory and relationship tables (static — called once from new())
@@ -315,7 +411,7 @@ impl MemoryStore {
     }
 
     /// Store a memory
-    pub async fn store_memory(&mut self, memory: &Memory) -> Result<()> {
+    pub async fn store_memory(&self, memory: &Memory) -> Result<()> {
         // Generate embedding using the optimized single embedding function for better performance
         let searchable_text = memory.get_searchable_text();
 
@@ -339,7 +435,7 @@ impl MemoryStore {
 
     /// Store a memory with a pre-computed embedding (for batch operations)
     async fn store_memory_with_embedding(
-        &mut self,
+        &self,
         memory: &Memory,
         embedding: Vec<f32>,
     ) -> Result<()> {
@@ -379,6 +475,15 @@ impl MemoryStore {
                 Arc::new(StringArray::from(vec![files_json])),
                 Arc::new(StringArray::from(vec![memory.metadata.git_commit.clone()])),
                 Arc::new(StringArray::from(vec![memory.metadata.source.to_string()])),
+                Arc::new(Int32Array::from(vec![
+                    memory.metadata.decay.access_count as i32,
+                ])),
+                Arc::new(StringArray::from(vec![memory
+                    .metadata
+                    .decay
+                    .last_accessed
+                    .to_rfc3339()])),
+                Arc::new(StringArray::from(vec![memory.metadata.state.to_string()])),
                 Arc::new(embedding_array),
             ],
         )?;
@@ -398,13 +503,13 @@ impl MemoryStore {
     }
 
     /// Update an existing memory
-    pub async fn update_memory(&mut self, memory: &Memory) -> Result<()> {
+    pub async fn update_memory(&self, memory: &Memory) -> Result<()> {
         // Just use store_memory as it handles updates by deleting and re-inserting
         self.store_memory(memory).await
     }
 
     /// Delete a memory by ID
-    pub async fn delete_memory(&mut self, memory_id: &str) -> Result<()> {
+    pub async fn delete_memory(&self, memory_id: &str) -> Result<()> {
         self.memories_table
             .delete(&format!(
                 "id = '{}' AND project_key = '{}'",
@@ -424,6 +529,28 @@ impl MemoryStore {
             .await
             .ok();
 
+        Ok(())
+    }
+
+    /// Periodic ingest-time maintenance. Combines:
+    ///
+    /// 1. `ensure_optimal_index` — builds the IVF_PQ index once row count
+    ///    crosses the threshold (1000 rows by default).
+    /// 2. `Table::optimize(OptimizeAction::All)` — folds newly-inserted rows
+    ///    into the existing index incrementally (cheap, no retraining) AND
+    ///    compacts the many small files LanceDB writes per insert.
+    ///
+    /// Without this called periodically during a high-write workload (e.g.
+    /// ingesting ~25K memories), vector search progressively slows down
+    /// because new rows live in an unindexed "delta" that gets linearly
+    /// scanned alongside the indexed region. Per LanceDB docs:
+    /// <https://lancedb.com/docs/indexing/reindexing/>
+    pub async fn run_maintenance(&self) -> Result<()> {
+        self.ensure_optimal_index().await?;
+        // OptimizeAction::All = Compact + Index incremental + Prune. The
+        // Index part is the one that absorbs the unindexed delta into the
+        // existing IVF index without retraining. Compact merges small files.
+        self.memories_table.optimize(OptimizeAction::All).await?;
         Ok(())
     }
 
@@ -533,14 +660,24 @@ impl MemoryStore {
     /// If reranker is enabled, it is applied as a final post-processing step on
     /// whichever search path ran (hybrid or vector).
     pub async fn search_memories(&self, query: &MemoryQuery) -> Result<Vec<MemorySearchResult>> {
-        // Determine if reranker should run (needs non-empty query text)
-        let reranker_query_text = self
+        // Determine if reranker should run (needs non-empty query text).
+        // Read the enabled flag under a short critical section — we drop the
+        // guard before any await to keep this safe with the sync Mutex.
+        let reranker_enabled = self
             .reranker_integration
-            .as_ref()
-            .filter(|r| r.config.enabled)
-            .and(query.query_text.as_deref())
-            .filter(|t| !t.trim().is_empty())
-            .map(|t| t.to_string());
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|r| r.config.enabled))
+            .unwrap_or(false);
+        let reranker_query_text = if reranker_enabled {
+            query
+                .query_text
+                .as_deref()
+                .filter(|t| !t.trim().is_empty())
+                .map(|t| t.to_string())
+        } else {
+            None
+        };
 
         // Fetch candidates from the appropriate search path
         let candidates = if self.main_config.search.hybrid.enabled && query.query_text.is_some() {
@@ -564,17 +701,107 @@ impl MemoryStore {
             self.vector_search(&extended_query).await?
         } else {
             // Standard vector search, no reranker
-            return self.vector_search(query).await;
+            let results = self.vector_search(query).await?;
+            self.record_accesses_best_effort(&results).await;
+            return Ok(results);
         };
 
-        // Apply reranker as a post-processing step if enabled
-        if let (Some(ref query_text), Some(ref reranker)) =
-            (reranker_query_text, &self.reranker_integration)
-        {
-            return reranker.rerank_memories(query_text, candidates).await;
-        }
+        // Apply reranker as a post-processing step if enabled. We clone the
+        // RerankerIntegration out of the mutex (it's cheap — just config + a
+        // small wrapper) so the lock isn't held across the await.
+        let reranker_clone = if reranker_query_text.is_some() {
+            self.reranker_integration
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().cloned())
+        } else {
+            None
+        };
+        let final_results =
+            if let (Some(query_text), Some(reranker)) = (reranker_query_text, reranker_clone) {
+                reranker.rerank_memories(&query_text, candidates).await?
+            } else {
+                candidates
+            };
 
-        Ok(candidates)
+        self.record_accesses_best_effort(&final_results).await;
+        Ok(final_results)
+    }
+
+    /// Bump access_count and last_accessed for the memories that this query actually
+    /// returned to the caller. Best-effort: failures are logged and swallowed because
+    /// failing a search just because the bookkeeping write failed would be worse than
+    /// silently missing one access tick.
+    ///
+    /// Uses LanceDB partial column update so the embedding column is never rewritten —
+    /// no re-embedding cost on the read path.
+    async fn record_accesses_best_effort(&self, results: &[MemorySearchResult]) {
+        if results.is_empty() {
+            return;
+        }
+        let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
+        if let Err(e) = self.record_accesses(&ids).await {
+            tracing::warn!("record_accesses failed (search still succeeded): {}", e);
+        }
+    }
+
+    /// Apply a lifecycle transition + importance change to one memory without
+    /// touching its embedding column. Used by goal-anchored consolidation when
+    /// source memories are archived (state → Consolidated, importance dampened).
+    pub async fn update_state_and_importance(
+        &self,
+        id: &str,
+        new_state: super::types::MemoryState,
+        new_importance: f32,
+    ) -> Result<()> {
+        let project = self
+            .project_key
+            .as_deref()
+            .unwrap_or("default")
+            .replace('\'', "''");
+        let id_escaped = id.replace('\'', "''");
+        let predicate = format!("id = '{}' AND project_key = '{}'", id_escaped, project);
+        let clamped = new_importance.clamp(0.0, 1.0);
+
+        self.memories_table
+            .update()
+            .only_if(predicate)
+            .column("state", format!("'{}'", new_state))
+            .column("importance", format!("CAST({} AS FLOAT)", clamped))
+            .execute()
+            .await
+            .context("partial update of state/importance failed")?;
+        Ok(())
+    }
+
+    /// Bump access_count and last_accessed for the given memory IDs.
+    /// Partial update: embedding column is untouched.
+    async fn record_accesses(&self, ids: &[&str]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let id_list = ids
+            .iter()
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let project = self
+            .project_key
+            .as_deref()
+            .unwrap_or("default")
+            .replace('\'', "''");
+        let predicate = format!("id IN ({}) AND project_key = '{}'", id_list, project);
+        let now_literal = format!("'{}'", Utc::now().to_rfc3339());
+
+        self.memories_table
+            .update()
+            .only_if(predicate)
+            .column("access_count", "access_count + 1")
+            .column("last_accessed", now_literal)
+            .execute()
+            .await
+            .context("partial update of access_count/last_accessed failed")?;
+        Ok(())
     }
 
     /// Standard vector search with temporal importance decay.
@@ -595,9 +822,12 @@ impl MemoryStore {
             build_scalar_predicate(self.project_key.as_deref(), self.role.as_deref(), query);
 
         if let Some(ref query_text) = query.query_text {
-            let query_embedding = self
+            let raw_embedding = self
                 .embedding_provider
                 .generate_embedding(query_text)
+                .await?;
+            let query_embedding = self
+                .expand_query_embedding(raw_embedding, &predicate)
                 .await?;
 
             let mut db_query = self
@@ -635,6 +865,8 @@ impl MemoryStore {
                     let current_importance = memory.get_current_importance(
                         self.config.decay_enabled,
                         self.config.min_importance_threshold,
+                        self.config.decay_half_life_days,
+                        self.config.access_boost_factor,
                     );
                     let trust_multiplier = memory.metadata.source.trust_multiplier();
                     let final_score = vector_similarity * current_importance * trust_multiplier;
@@ -672,6 +904,8 @@ impl MemoryStore {
                     let relevance_score = memory.get_current_importance(
                         self.config.decay_enabled,
                         self.config.min_importance_threshold,
+                        self.config.decay_half_life_days,
+                        self.config.access_boost_factor,
                     );
 
                     if relevance_score >= min_relevance {
@@ -702,10 +936,14 @@ impl MemoryStore {
                         let a_imp = a.memory.get_current_importance(
                             self.config.decay_enabled,
                             self.config.min_importance_threshold,
+                            self.config.decay_half_life_days,
+                            self.config.access_boost_factor,
                         );
                         let b_imp = b.memory.get_current_importance(
                             self.config.decay_enabled,
                             self.config.min_importance_threshold,
+                            self.config.decay_half_life_days,
+                            self.config.access_boost_factor,
                         );
                         a_imp
                             .partial_cmp(&b_imp)
@@ -750,6 +988,70 @@ impl MemoryStore {
         (-decay_rate).exp()
     }
 
+    /// Pseudo-relevance feedback (Rocchio) query expansion.
+    /// First-pass vector retrieval → centroid of top-K embeddings → blend with original query.
+    /// Returns the input embedding unchanged when HyDE is disabled or no neighbors exist.
+    async fn expand_query_embedding(
+        &self,
+        query_embedding: Vec<f32>,
+        predicate: &str,
+    ) -> Result<Vec<f32>> {
+        let hyde = &self.main_config.search.hyde;
+        if !hyde.enabled || hyde.top_k == 0 || hyde.alpha >= 1.0 {
+            return Ok(query_embedding);
+        }
+
+        let mut q = self
+            .memories_table
+            .vector_search(query_embedding.as_slice())?
+            .distance_type(DistanceType::Cosine)
+            .limit(hyde.top_k);
+        if !predicate.is_empty() {
+            q = q.only_if(predicate);
+        }
+        let mut results = q.execute().await?;
+
+        let dim = query_embedding.len();
+        let mut centroid = vec![0.0_f32; dim];
+        let mut count = 0usize;
+
+        while let Some(batch) = results.try_next().await? {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            let Some(emb_col) = batch.column_by_name("embedding") else {
+                continue;
+            };
+            let Some(list_arr) = emb_col.as_any().downcast_ref::<FixedSizeListArray>() else {
+                continue;
+            };
+            for i in 0..list_arr.len() {
+                let vec_arr = list_arr.value(i);
+                let Some(f32_arr) = vec_arr.as_any().downcast_ref::<Float32Array>() else {
+                    continue;
+                };
+                if f32_arr.len() != dim {
+                    continue; // skip mismatched-dim rows defensively
+                }
+                for (j, c) in centroid.iter_mut().enumerate() {
+                    *c += f32_arr.value(j);
+                }
+                count += 1;
+            }
+        }
+
+        if count == 0 {
+            return Ok(query_embedding);
+        }
+
+        let inv = 1.0 / count as f32;
+        for c in centroid.iter_mut() {
+            *c *= inv;
+        }
+
+        Ok(rocchio_blend(&query_embedding, &centroid, hyde.alpha))
+    }
+
     /// Convert MemoryQuery to HybridSearchQuery using config weights
     fn convert_to_hybrid_query(&self, query: &MemoryQuery) -> super::types::HybridSearchQuery {
         let hybrid_config = &self.main_config.search.hybrid;
@@ -787,7 +1089,7 @@ impl MemoryStore {
             .unwrap_or(self.config.max_search_results);
         let min_relevance = query.filters.min_relevance.unwrap_or(0.0);
 
-        let query_embedding = self
+        let raw_embedding = self
             .embedding_provider
             .generate_embedding(query_text)
             .await?;
@@ -798,6 +1100,10 @@ impl MemoryStore {
             self.role.as_deref(),
             &query.filters,
         );
+
+        let query_embedding = self
+            .expand_query_embedding(raw_embedding, &predicate)
+            .await?;
 
         let mut db_query = self
             .memories_table
@@ -848,6 +1154,8 @@ impl MemoryStore {
                 let importance_score = memory.get_current_importance(
                     self.config.decay_enabled,
                     self.config.min_importance_threshold,
+                    self.config.decay_half_life_days,
+                    self.config.access_boost_factor,
                 );
 
                 // RRF already fuses vector + BM25; recency and importance are additive signals
@@ -882,8 +1190,41 @@ impl MemoryStore {
         Ok(results)
     }
 
+    /// Fetch all Working-state memories created on or after `since`. Used by
+    /// sleep consolidation to scope the clustering pass to recent activity.
+    pub async fn get_recent_working_memories(
+        &self,
+        since: chrono::DateTime<Utc>,
+    ) -> Result<Vec<Memory>> {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(key) = self.project_key.as_deref() {
+            parts.push(format!("project_key = '{}'", key.replace('\'', "''")));
+        }
+        if let Some(role) = self.role.as_deref() {
+            parts.push(format!("role = '{}'", role.replace('\'', "''")));
+        }
+        parts.push("state = 'working'".to_string());
+        parts.push(format!("created_at >= '{}'", since.to_rfc3339()));
+        let filter = parts.join(" AND ");
+
+        let mut q = self.memories_table.query();
+        if !filter.is_empty() {
+            q = q.only_if(filter);
+        }
+        let mut results = q.execute().await?;
+
+        let mut memories = Vec::new();
+        while let Some(batch) = results.try_next().await? {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            memories.extend(self.batch_to_memories(&batch)?);
+        }
+        Ok(memories)
+    }
+
     /// Store a memory relationship
-    pub async fn store_relationship(&mut self, relationship: &MemoryRelationship) -> Result<()> {
+    pub async fn store_relationship(&self, relationship: &MemoryRelationship) -> Result<()> {
         let batch = RecordBatch::try_new(
             self.rel_schema.clone(),
             vec![
@@ -953,7 +1294,7 @@ impl MemoryStore {
     }
 
     /// Delete all AutoLinked relationships for a memory (used before re-linking on update)
-    pub async fn delete_auto_linked_relationships(&mut self, memory_id: &str) -> Result<()> {
+    pub async fn delete_auto_linked_relationships(&self, memory_id: &str) -> Result<()> {
         self.relationships_table
             .delete(&format!(
                 "(source_id = '{}' OR target_id = '{}') AND relationship_type = 'auto_linked' AND project_key = '{}'",
@@ -1050,7 +1391,7 @@ impl MemoryStore {
     }
 
     /// Clean up old memories based on configuration
-    pub async fn cleanup_old_memories(&mut self) -> Result<usize> {
+    pub async fn cleanup_old_memories(&self) -> Result<usize> {
         if let Some(cleanup_days) = self.config.auto_cleanup_days {
             let cutoff_date = Utc::now() - chrono::Duration::days(cleanup_days as i64);
             let cutoff_str = cutoff_date.to_rfc3339();
@@ -1154,6 +1495,21 @@ impl MemoryStore {
         let source_array = batch
             .column_by_name("source")
             .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+
+        // Decay columns are present on tables migrated by migrate_decay_columns(); fall
+        // back to defaults (count=0, last_accessed=created_at) if absent (e.g. mid-migration).
+        let access_count_array = batch
+            .column_by_name("access_count")
+            .and_then(|col| col.as_any().downcast_ref::<Int32Array>());
+        let last_accessed_array = batch
+            .column_by_name("last_accessed")
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+        // State column is added by migrate_state_column on existing tables; default to
+        // Working if absent so legacy rows keep their normal retrieval behavior.
+        let state_array = batch
+            .column_by_name("state")
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+
         for i in 0..num_rows {
             let memory_type =
                 super::types::MemoryType::from(memory_type_array.value(i).to_string());
@@ -1180,13 +1536,35 @@ impl MemoryStore {
                 .map(|arr| super::types::MemorySource::from(arr.value(i).to_string()))
                 .unwrap_or_default();
 
+            let created_at =
+                DateTime::parse_from_rfc3339(created_at_array.value(i))?.with_timezone(&Utc);
+
+            let access_count = access_count_array
+                .map(|a| a.value(i).max(0) as u32)
+                .unwrap_or(0);
+            let last_accessed = last_accessed_array
+                .and_then(|a| DateTime::parse_from_rfc3339(a.value(i)).ok())
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or(created_at);
+
+            let importance = importance_array.value(i);
+            let mut decay = super::types::MemoryDecay::new(importance);
+            decay.access_count = access_count;
+            decay.last_accessed = last_accessed;
+
+            let state = state_array
+                .map(|a| super::types::MemoryState::from(a.value(i).to_string()))
+                .unwrap_or_default();
+
             let metadata = super::types::MemoryMetadata {
                 git_commit,
-                importance: importance_array.value(i),
+                importance,
                 confidence: confidence_array.value(i),
                 tags,
                 related_files,
                 source,
+                decay,
+                state,
                 ..Default::default()
             };
 
@@ -1195,8 +1573,7 @@ impl MemoryStore {
                 memory_type,
                 title: title_array.value(i).to_string(),
                 content: content_array.value(i).to_string(),
-                created_at: DateTime::parse_from_rfc3339(created_at_array.value(i))?
-                    .with_timezone(&Utc),
+                created_at,
                 updated_at: DateTime::parse_from_rfc3339(updated_at_array.value(i))?
                     .with_timezone(&Utc),
                 metadata,
@@ -1253,16 +1630,10 @@ impl MemoryStore {
             .ok_or_else(|| anyhow::anyhow!("created_at column not found or wrong type"))?;
 
         for i in 0..num_rows {
-            let relationship_type = match type_array.value(i) {
-                "RelatedTo" => super::types::RelationshipType::RelatedTo,
-                "DependsOn" => super::types::RelationshipType::DependsOn,
-                "Supersedes" => super::types::RelationshipType::Supersedes,
-                "Similar" => super::types::RelationshipType::Similar,
-                "Conflicts" => super::types::RelationshipType::Conflicts,
-                "Implements" => super::types::RelationshipType::Implements,
-                "Extends" => super::types::RelationshipType::Extends,
-                other => super::types::RelationshipType::Custom(other.to_string()),
-            };
+            // From<&str> understands both the snake_case form emitted by Display
+            // (canonical, written by store_relationship) and the legacy CamelCase
+            // form so existing rows round-trip correctly.
+            let relationship_type = super::types::RelationshipType::from(type_array.value(i));
 
             let relationship = MemoryRelationship {
                 id: id_array.value(i).to_string(),
@@ -1306,7 +1677,7 @@ impl MemoryStore {
     }
 
     /// Clear all memory data for the current project
-    pub async fn clear_all_memory_data(&mut self) -> Result<usize> {
+    pub async fn clear_all_memory_data(&self) -> Result<usize> {
         // Get current counts before deletion (scoped to project)
         let memory_count = self.get_memory_count().await.unwrap_or(0);
 
@@ -1369,28 +1740,36 @@ impl MemoryStore {
         }
     }
 
-    /// Enable reranker with optional model override
-    pub fn enable_reranker(&mut self, model: Option<String>) {
-        if let Some(ref mut reranker) = self.reranker_integration {
-            // Update existing reranker config
+    /// Enable reranker with optional model override.
+    /// Takes `&self` (mutates via interior `Mutex`) so `MemoryStore` can be
+    /// shared as `Arc<Self>` for fire-and-forget tasks.
+    pub fn enable_reranker(&self, model: Option<String>) {
+        let mut guard = match self.reranker_integration.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(), // recover from poisoning — config-only data
+        };
+        if let Some(ref mut reranker) = *guard {
             if let Some(m) = model {
                 reranker.config.model = m;
             }
             reranker.config.enabled = true;
         } else {
-            // Create new reranker integration
             let mut config = self.main_config.search.reranker.clone();
             config.enabled = true;
             if let Some(m) = model {
                 config.model = m;
             }
-            self.reranker_integration = Some(RerankerIntegration::new(config));
+            *guard = Some(RerankerIntegration::new(config));
         }
     }
 
     /// Disable reranker
-    pub fn disable_reranker(&mut self) {
-        if let Some(ref mut reranker) = self.reranker_integration {
+    pub fn disable_reranker(&self) {
+        let mut guard = match self.reranker_integration.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(ref mut reranker) = *guard {
             reranker.config.enabled = false;
         }
     }

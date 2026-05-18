@@ -685,6 +685,45 @@ async fn execute_memory_command(
                 }
             }
         }
+
+        MemoryCommand::Consolidate { goal_id, summary } => {
+            println!("🎯 Consolidating goal '{}'...", goal_id);
+            let consolidated = memory_manager
+                .consolidate_goal(&goal_id, None, summary)
+                .await?;
+            println!(
+                "✅ Consolidated → memory ID: {}\n   Title: {}\n   Importance: {:.3}",
+                consolidated.id, consolidated.title, consolidated.metadata.importance
+            );
+        }
+
+        MemoryCommand::SleepConsolidate {
+            threshold,
+            min_size,
+            max_age_days,
+        } => {
+            println!(
+                "💤 Sleep consolidation: threshold={:.2}, min_size={}, max_age_days={}",
+                threshold, min_size, max_age_days
+            );
+            let consolidated = memory_manager
+                .sleep_consolidate(threshold, min_size, max_age_days)
+                .await?;
+            if consolidated.is_empty() {
+                println!(
+                    "ℹ️  No clusters tight enough at threshold {:.2} — nothing consolidated.",
+                    threshold
+                );
+            } else {
+                println!("✅ Consolidated {} cluster(s):", consolidated.len());
+                for m in &consolidated {
+                    println!(
+                        "  • {} (id={}, importance={:.3})",
+                        m.title, m.id, m.metadata.importance
+                    );
+                }
+            }
+        }
     }
 
     Ok(())

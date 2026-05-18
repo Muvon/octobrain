@@ -195,11 +195,41 @@ impl MemoryProvider {
             .with_details(format!("Path: {}", self.working_directory.display())));
         }
 
+        // Pre-parse related_to specs (if any) so we fail fast on bad input before
+        // committing the memorize.
+        let related_specs: Vec<(String, crate::memory::types::RelationshipType, f32, String)> =
+            arguments
+                .get("related_to")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let obj = item.as_object()?;
+                            let target_id = obj.get("target_id")?.as_str()?.to_string();
+                            let rel_type_str = obj.get("relationship_type")?.as_str()?;
+                            let rel_type =
+                                crate::memory::types::RelationshipType::from(rel_type_str);
+                            let strength = obj
+                                .get("strength")
+                                .and_then(|v| v.as_f64())
+                                .map(|v| (v as f32).clamp(0.0, 1.0))
+                                .unwrap_or(0.8);
+                            let description = obj
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Linked at memorize time")
+                                .to_string();
+                            Some((target_id, rel_type, strength, description))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
         let memory_result = {
             // Lock memory manager for storing - removed timeout to allow embedding generation to complete
             let mut manager_guard = self.memory_manager.lock().await;
 
-            manager_guard
+            let memory = manager_guard
                 .memorize(crate::memory::manager::MemorizeParams {
                     memory_type,
                     title: title.to_string(),
@@ -212,7 +242,49 @@ impl MemoryProvider {
                 .await
                 .map_err(|e| {
                     McpError::internal_error(format!("Failed to store memory: {}", e), "memorize")
-                })?
+                })?;
+
+            // Create requested relationships in the same call so the agent doesn't
+            // need a second round-trip for the common "store + link" pattern.
+            let mut created_rels = 0usize;
+            let mut close_targets: Vec<String> = Vec::new();
+            for (target_id, rel_type, strength, description) in &related_specs {
+                if manager_guard
+                    .create_relationship(
+                        memory.id.clone(),
+                        target_id.clone(),
+                        rel_type.clone(),
+                        *strength,
+                        description.clone(),
+                    )
+                    .await
+                    .is_ok()
+                {
+                    created_rels += 1;
+                    if matches!(rel_type, crate::memory::types::RelationshipType::Closes) {
+                        close_targets.push(target_id.clone());
+                    }
+                }
+            }
+
+            // Closes relationship triggers consolidation: the just-stored memory
+            // becomes the consolidated parent of the goal it closes. Best-effort —
+            // a failed consolidation logs a warning but doesn't fail the memorize.
+            let mut consolidated_count = 0usize;
+            for goal_id in &close_targets {
+                match manager_guard
+                    .consolidate_goal(goal_id, Some(memory.id.clone()), None)
+                    .await
+                {
+                    Ok(_) => consolidated_count += 1,
+                    Err(e) => tracing::warn!(
+                        "Closes-triggered consolidation of goal '{}' failed: {}",
+                        goal_id,
+                        e
+                    ),
+                }
+            }
+            (memory, created_rels, consolidated_count)
         };
 
         // Restore original directory regardless of result
@@ -223,11 +295,25 @@ impl MemoryProvider {
             );
         }
 
-        let memory = memory_result;
+        let (memory, created_rels, consolidated_count) = memory_result;
 
         // Return plain text response for MCP protocol compliance
-        // Return minimal response for MCP protocol compliance - just success and ID
-        Ok(format!("Memory stored: {}", memory.id))
+        let mut msg = format!("Memory stored: {}", memory.id);
+        if created_rels > 0 {
+            msg.push_str(&format!(
+                " (+ {} relationship{})",
+                created_rels,
+                if created_rels == 1 { "" } else { "s" }
+            ));
+        }
+        if consolidated_count > 0 {
+            msg.push_str(&format!(
+                " — consolidated {} goal{}",
+                consolidated_count,
+                if consolidated_count == 1 { "" } else { "s" }
+            ));
+        }
+        Ok(msg)
     }
 
     /// Execute the remember tool
@@ -580,185 +666,6 @@ impl MemoryProvider {
             }
         } else {
             Ok("❌ Either 'memory_id' or 'query' must be provided".to_string())
-        }
-    }
-
-    /// Execute the memory_graph tool
-    pub async fn execute_memory_graph(&self, arguments: &Value) -> Result<String, McpError> {
-        let memory_id = arguments
-            .get("memory_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::invalid_params("Missing required parameter 'memory_id'", "memory_graph")
-            })?;
-
-        // Validate memory ID
-        if memory_id.trim().is_empty() || memory_id.len() > 100 {
-            return Err(McpError::invalid_params(
-                "Invalid memory ID format",
-                "memory_graph",
-            ));
-        }
-
-        let depth = arguments
-            .get("depth")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(2)
-            .clamp(1, 5);
-
-        debug!(
-            memory_id = %memory_id,
-            depth = depth,
-            "Building memory graph"
-        );
-
-        let graph = {
-            let manager_guard = self.memory_manager.lock().await;
-            manager_guard
-                .get_memory_graph(memory_id, depth)
-                .await
-                .map_err(|e| {
-                    McpError::internal_error(
-                        format!("Failed to build memory graph: {}", e),
-                        "memory_graph",
-                    )
-                })?
-        };
-
-        if graph.memories.is_empty() {
-            return Ok(format!("Memory '{}' not found", memory_id));
-        }
-
-        // Format graph as text
-        let mut output = format!(
-            "📊 Memory Graph (root: {}, depth: {})\n\n",
-            graph.root, depth
-        );
-        output.push_str(&format!("Memories: {}\n", graph.memories.len()));
-        output.push_str(&format!("Relationships: {}\n\n", graph.relationships.len()));
-
-        // List memories
-        output.push_str("🧠 Memories in Graph:\n\n");
-        for (id, memory) in graph.memories.iter().take(20) {
-            // Limit for readability
-            output.push_str(&format!("[{}]\n", id));
-            output.push_str(&format!("  Title: {}\n", memory.title));
-            output.push_str(&format!("  Type: {}\n", memory.memory_type));
-            output.push_str(&format!(
-                "  Created: {}\n",
-                memory.created_at.format("%Y-%m-%d %H:%M")
-            ));
-
-            // Add snippet of content
-            let content_preview = if memory.content.len() > 100 {
-                format!("{}...", &memory.content[..100])
-            } else {
-                memory.content.clone()
-            };
-            output.push_str(&format!("  Content: {}\n\n", content_preview));
-        }
-
-        if graph.memories.len() > 20 {
-            output.push_str(&format!(
-                "... and {} more memories\n\n",
-                graph.memories.len() - 20
-            ));
-        }
-
-        // List relationships
-        if !graph.relationships.is_empty() {
-            output.push_str("🔗 Relationships:\n\n");
-            for rel in graph.relationships.iter().take(30) {
-                // Limit for readability
-                output.push_str(&format!(
-                    "  {} -> {} ({}, strength: {:.2})\n",
-                    rel.source_id, rel.target_id, rel.relationship_type, rel.strength
-                ));
-            }
-
-            if graph.relationships.len() > 30 {
-                output.push_str(&format!(
-                    "\n... and {} more relationships\n",
-                    graph.relationships.len() - 30
-                ));
-            }
-        }
-
-        // Apply token truncation
-        Ok(output)
-    }
-
-    /// Execute the relate tool — manually create a typed relationship between two memories
-    pub async fn execute_relate(&self, arguments: &Value) -> Result<String, McpError> {
-        let source_id = arguments
-            .get("source_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::invalid_params("Missing required parameter 'source_id'", "relate")
-            })?
-            .to_string();
-
-        let target_id = arguments
-            .get("target_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::invalid_params("Missing required parameter 'target_id'", "relate")
-            })?
-            .to_string();
-
-        let rel_type_str = arguments
-            .get("relationship_type")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::invalid_params("Missing required parameter 'relationship_type'", "relate")
-            })?;
-
-        let relationship_type = match rel_type_str {
-            "related_to" => crate::memory::types::RelationshipType::RelatedTo,
-            "depends_on" => crate::memory::types::RelationshipType::DependsOn,
-            "supersedes" => crate::memory::types::RelationshipType::Supersedes,
-            "similar" => crate::memory::types::RelationshipType::Similar,
-            "conflicts" => crate::memory::types::RelationshipType::Conflicts,
-            "implements" => crate::memory::types::RelationshipType::Implements,
-            "extends" => crate::memory::types::RelationshipType::Extends,
-            other => crate::memory::types::RelationshipType::Custom(other.to_string()),
-        };
-
-        let strength = arguments
-            .get("strength")
-            .and_then(|v| v.as_f64())
-            .map(|v| (v as f32).clamp(0.0, 1.0))
-            .unwrap_or(0.8);
-
-        let description = arguments
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let res = {
-            let mut manager_guard = self.memory_manager.lock().await;
-            manager_guard
-                .create_relationship(
-                    source_id,
-                    target_id,
-                    relationship_type,
-                    strength,
-                    description,
-                )
-                .await
-        };
-
-        match res {
-            Ok(rel) => Ok(format!(
-                "✅ Relationship created\nID: {}\n{} -> {} ({}, strength: {:.2})",
-                rel.id, rel.source_id, rel.target_id, rel.relationship_type, rel.strength
-            )),
-            Err(e) => Err(McpError::internal_error(
-                format!("Failed to create relationship: {}", e),
-                "relate",
-            )),
         }
     }
 }

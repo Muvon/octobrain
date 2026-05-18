@@ -4,9 +4,23 @@
 
 [embedding]
 # Embedding model for memory operations
-# Format: provider:model (e.g., voyage:voyage-3.5-lite, openai:text-embedding-3-small)
-# Default: voyage:voyage-3.5-lite
-model = "voyage:voyage-3.5-lite"
+# Format: provider:model
+#
+# Default is a LOCAL model (no API key, runs on CPU, ~133MB first download):
+#   fastembed:BAAI/bge-small-en-v1.5  — 384-dim, ~62 MTEB, fast + good quality
+#
+# Other local options (fastembed, no API key):
+#   fastembed:sentence-transformers/all-MiniLM-L6-v2-quantized  (22MB, fastest)
+#   fastembed:nomic-ai/nomic-embed-text-v1.5  (768-dim, 8192-ctx, 274MB)
+#   fastembed:BAAI/bge-base-en-v1.5  (768-dim, ~440MB)
+#   fastembed:intfloat/multilingual-e5-small  (384-dim, multilingual)
+#
+# Cloud providers (require API keys, generally higher quality):
+#   voyage:voyage-3.5-lite           VOYAGE_API_KEY
+#   openai:text-embedding-3-small    OPENAI_API_KEY
+#   google:text-embedding-004        GOOGLE_API_KEY
+#   jina:jina-embeddings-v3          JINA_API_KEY
+model = "fastembed:BAAI/bge-small-en-v1.5"
 
 # Batch size for embedding generation (number of texts to process at once)
 # Default: 32
@@ -71,6 +85,25 @@ top_k_candidates = 50
 # Number of results to return after reranking
 # Default: 10
 final_top_k = 10
+
+[search.hyde]
+# Pseudo-relevance feedback (PRF / HyDE-lite) query expansion.
+# First pass retrieves top-K nearest neighbors, averages their embeddings into a
+# centroid, then blends `alpha * original_query + (1 - alpha) * centroid` and uses
+# the result for the actual search. Costs one extra LanceDB vector query in
+# exchange for typically +10-30% recall on long-tail / underspecified queries.
+# No LLM dependency — pure embedding math. Default: true (autonomous improvement)
+enabled = true
+
+# Number of nearest neighbors to average for the centroid.
+# Higher = more semantic averaging, lower = closer to original intent.
+# Default: 3
+top_k = 3
+
+# Blend weight on the original query embedding (0.0..1.0).
+# 1.0 = no expansion, 0.5 = even mix, 0.0 = full centroid replacement.
+# Default: 0.5
+alpha = 0.5
 
 [memory]
 # Maximum number of memories to keep in storage
@@ -147,6 +180,32 @@ stale_ref_cleanup_enabled = true
 # Lower = harsher penalty. Memories with ALL files gone are deleted regardless.
 # Default: 0.3
 stale_ref_importance_penalty = 0.3
+
+# Sleep consolidation: lazy autonomous compression of similar recent memories.
+# Triggers on MemoryManager init via marker-file gating — no cron, no scheduler,
+# no manual call. Finds clusters of similar Working-state memories created in
+# the last N days, then folds each cluster into a consolidated parent via the
+# same goal-anchored pipeline. Best-effort: a failed pass never blocks init.
+# No LLM dependency.
+# Default: true
+sleep_consolidation_enabled = true
+
+# Hours between automatic sleep-consolidation passes. Marker file gates this.
+# Default: 24 (once a day)
+sleep_consolidation_interval_hours = 24
+
+# Cosine similarity threshold for two memories to share a cluster (0.0-1.0).
+# Higher = stricter clusters, lower = looser.
+# Default: 0.85
+sleep_consolidation_threshold = 0.85
+
+# Minimum number of memories required to form a cluster worth consolidating.
+# Default: 3
+sleep_consolidation_min_cluster_size = 3
+
+# Only consider Working-state memories created in the last N days.
+# Default: 7
+sleep_consolidation_max_age_days = 7
 
 [knowledge]
 # Size of each child chunk in characters — what gets embedded and matched.

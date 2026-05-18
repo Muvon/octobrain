@@ -124,6 +124,10 @@ pub enum MemoryType {
     Process,
     /// General insights, tips, and miscellaneous knowledge
     Insight,
+    /// A goal, task, or intent — the anchor for event-based consolidation.
+    /// When a Goal is closed via `consolidate_goal`, all memories linked to it
+    /// with `Achieves` are summarized into a consolidated parent and archived.
+    Goal,
 }
 
 impl std::fmt::Display for MemoryType {
@@ -150,6 +154,7 @@ impl std::fmt::Display for MemoryType {
             MemoryType::Communication => write!(f, "communication"),
             MemoryType::Process => write!(f, "process"),
             MemoryType::Insight => write!(f, "insight"),
+            MemoryType::Goal => write!(f, "goal"),
         }
     }
 }
@@ -177,7 +182,43 @@ impl From<String> for MemoryType {
             "integration" | "api" | "connector" => MemoryType::Integration,
             "communication" | "stakeholder" | "update" => MemoryType::Communication,
             "process" | "runbook" | "procedure" | "deployment" => MemoryType::Process,
+            "goal" | "intent" | "task" | "objective" => MemoryType::Goal,
             _ => MemoryType::Insight, // Default fallback
+        }
+    }
+}
+
+/// Lifecycle state of a memory.
+///
+/// `Working` is the default — the memory is active and participates fully in
+/// retrieval. When a goal is consolidated, its source memories transition to
+/// `Consolidated` (importance reduced, kept for audit) and a new consolidated
+/// parent memory is created. `Archived` is a manual tombstone state used by
+/// cleanup paths before hard delete.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum MemoryState {
+    #[default]
+    Working,
+    Consolidated,
+    Archived,
+}
+
+impl std::fmt::Display for MemoryState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemoryState::Working => write!(f, "working"),
+            MemoryState::Consolidated => write!(f, "consolidated"),
+            MemoryState::Archived => write!(f, "archived"),
+        }
+    }
+}
+
+impl From<String> for MemoryState {
+    fn from(s: String) -> Self {
+        match s.to_lowercase().as_str() {
+            "consolidated" => MemoryState::Consolidated,
+            "archived" => MemoryState::Archived,
+            _ => MemoryState::Working,
         }
     }
 }
@@ -191,7 +232,9 @@ pub struct MemoryDecay {
     pub access_count: u32,
     /// Last time this memory was accessed
     pub last_accessed: DateTime<Utc>,
-    /// Decay rate (higher = faster decay)
+    /// Per-memory decay rate multiplier. The effective half-life for this memory is
+    /// `config.decay_half_life_days / decay_rate`. Default 1.0 → unchanged behavior;
+    /// 2.0 → decays twice as fast (critical / ephemeral); 0.5 → twice as slow (long-lived).
     pub decay_rate: f32,
 }
 
@@ -207,34 +250,40 @@ impl MemoryDecay {
         }
     }
 
-    /// Calculate current importance based on temporal decay and access reinforcement
-    /// Formula: importance = base_importance * exp(-decay_rate * days_since_access / 30) * ln(access_count + 1)
-    pub fn calculate_current_importance(&self, min_threshold: f32) -> f32 {
+    /// Calculate current importance using config-driven half-life decay and bounded access boost.
+    ///
+    /// Formula: `importance = base_importance * 0.5^(days/half_life) * (1 + boost_factor * ln(1 + access_count))`
+    ///
+    /// `base_importance` is passed in (rather than read from `self.base_importance`) so the
+    /// canonical stored `metadata.importance` is the single source of truth. The field on
+    /// MemoryDecay is kept only for serde back-compat with stored memories.
+    ///
+    /// - At `days_since_access == half_life_days`, the time term is exactly 0.5.
+    /// - At `access_count == 0`, the boost term is exactly 1.0 — zero-access memories are
+    ///   governed by base*time_decay alone (not silently zeroed out as the previous
+    ///   `ln(access_count + 1)` formulation did).
+    /// - `access_boost_factor` scales the logarithmic growth per access; 0 disables the boost.
+    pub fn calculate_current_importance(
+        &self,
+        base_importance: f32,
+        min_threshold: f32,
+        half_life_days: u32,
+        access_boost_factor: f32,
+    ) -> f32 {
         let now = Utc::now();
         let days_since_access = (now - self.last_accessed).num_days() as f32;
 
-        // Exponential decay over time (normalized to 30-day periods)
-        let time_decay = (-self.decay_rate * days_since_access / 30.0).exp();
+        // Effective half-life = config half-life scaled by this memory's decay_rate.
+        // decay_rate=1.0 (default) → unchanged; >1 → faster decay; <1 → slower decay.
+        let base_half_life = half_life_days.max(1) as f32;
+        let rate = self.decay_rate.max(0.1); // guard against zero/negative
+        let effective_half_life = (base_half_life / rate).max(1.0);
+        let time_decay = 0.5_f32.powf(days_since_access / effective_half_life);
 
-        // Access reinforcement using logarithmic scaling
-        let access_boost = (self.access_count as f32 + 1.0).ln();
+        let access_boost = 1.0 + access_boost_factor * (self.access_count as f32).ln_1p();
 
-        // Combined score with minimum threshold
-        let current_importance = self.base_importance * time_decay * access_boost;
+        let current_importance = base_importance * time_decay * access_boost;
         current_importance.max(min_threshold)
-    }
-
-    /// Record an access to this memory
-    #[allow(dead_code)]
-    pub fn record_access(&mut self) {
-        self.access_count += 1;
-        self.last_accessed = Utc::now();
-    }
-
-    /// Update base importance (e.g., when memory is manually updated)
-    #[allow(dead_code)]
-    pub fn update_base_importance(&mut self, new_importance: f32) {
-        self.base_importance = new_importance.clamp(0.0, 1.0);
     }
 }
 
@@ -265,6 +314,9 @@ pub struct MemoryMetadata {
     pub decay: MemoryDecay,
     /// Trust tier — who/what created this memory
     pub source: MemorySource,
+    /// Lifecycle state — Working by default, transitions to Consolidated on goal close.
+    #[serde(default)]
+    pub state: MemoryState,
 }
 
 impl Default for MemoryMetadata {
@@ -279,6 +331,7 @@ impl Default for MemoryMetadata {
             custom_fields: HashMap::new(),
             decay: MemoryDecay::new(0.5),
             source: MemorySource::AgentInferred,
+            state: MemoryState::Working,
         }
     }
 }
@@ -356,24 +409,28 @@ impl Memory {
         )
     }
 
-    /// Get current importance considering temporal decay
-    pub fn get_current_importance(&self, decay_enabled: bool, min_threshold: f32) -> f32 {
+    /// Get current importance considering temporal decay.
+    /// `half_life_days` and `access_boost_factor` should come from MemoryConfig.
+    /// The stored `metadata.importance` is the canonical base_importance.
+    pub fn get_current_importance(
+        &self,
+        decay_enabled: bool,
+        min_threshold: f32,
+        half_life_days: u32,
+        access_boost_factor: f32,
+    ) -> f32 {
         if decay_enabled {
-            self.metadata
-                .decay
-                .calculate_current_importance(min_threshold)
+            self.metadata.decay.calculate_current_importance(
+                self.metadata.importance,
+                min_threshold,
+                half_life_days,
+                access_boost_factor,
+            )
         } else {
             self.metadata.importance
         }
     }
 
-    /// Record access to this memory (for decay reinforcement)
-    #[allow(dead_code)]
-    pub fn record_access(&mut self) {
-        self.metadata.decay.record_access();
-    }
-
-    /// Add a tag if it doesn't exist
     /// Add a tag if it doesn't exist
     pub fn add_tag(&mut self, tag: String) {
         if !self.metadata.tags.contains(&tag) {
@@ -578,6 +635,12 @@ pub enum RelationshipType {
     Extends,
     /// Automatically detected relationship (via auto-linking)
     AutoLinked,
+    /// Source memory contributes to / advances a Goal memory.
+    /// Used by goal-anchored consolidation.
+    Achieves,
+    /// Source memory (a consolidated parent) closes / summarizes a Goal memory.
+    /// Marks the goal as completed and the consolidation event.
+    Closes,
     /// Custom relationship type
     Custom(String),
 }
@@ -593,7 +656,31 @@ impl std::fmt::Display for RelationshipType {
             RelationshipType::Implements => write!(f, "implements"),
             RelationshipType::Extends => write!(f, "extends"),
             RelationshipType::AutoLinked => write!(f, "auto_linked"),
+            RelationshipType::Achieves => write!(f, "achieves"),
+            RelationshipType::Closes => write!(f, "closes"),
             RelationshipType::Custom(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+impl From<&str> for RelationshipType {
+    /// Parse a stored relationship_type string back into the enum.
+    /// Accepts both the snake_case forms emitted by Display (canonical) and the
+    /// CamelCase forms used by an earlier round-trip path so legacy rows still
+    /// round-trip correctly. Unknown strings become `Custom`.
+    fn from(s: &str) -> Self {
+        match s {
+            "related_to" | "RelatedTo" => RelationshipType::RelatedTo,
+            "depends_on" | "DependsOn" => RelationshipType::DependsOn,
+            "supersedes" | "Supersedes" => RelationshipType::Supersedes,
+            "similar" | "Similar" => RelationshipType::Similar,
+            "conflicts" | "Conflicts" => RelationshipType::Conflicts,
+            "implements" | "Implements" => RelationshipType::Implements,
+            "extends" | "Extends" => RelationshipType::Extends,
+            "auto_linked" | "AutoLinked" => RelationshipType::AutoLinked,
+            "achieves" | "Achieves" => RelationshipType::Achieves,
+            "closes" | "Closes" => RelationshipType::Closes,
+            other => RelationshipType::Custom(other.to_string()),
         }
     }
 }
@@ -604,6 +691,26 @@ fn default_stale_ref_cleanup_enabled() -> bool {
 
 fn default_stale_ref_importance_penalty() -> f32 {
     0.3
+}
+
+fn default_sleep_consolidation_enabled() -> bool {
+    true
+}
+
+fn default_sleep_consolidation_interval_hours() -> u32 {
+    24
+}
+
+fn default_sleep_consolidation_threshold() -> f32 {
+    0.85
+}
+
+fn default_sleep_consolidation_min_cluster_size() -> usize {
+    3
+}
+
+fn default_sleep_consolidation_max_age_days() -> u32 {
+    7
 }
 
 /// Configuration for memory system
@@ -643,6 +750,24 @@ pub struct MemoryConfig {
     /// Memories where ALL files are gone are deleted entirely.
     #[serde(default = "default_stale_ref_importance_penalty")]
     pub stale_ref_importance_penalty: f32,
+
+    /// Sleep consolidation: lazy, autonomous batch compression of similar recent
+    /// memories. Runs on MemoryManager init when the marker-file gate says enough
+    /// time has passed — no cron, no scheduler, no manual call required.
+    #[serde(default = "default_sleep_consolidation_enabled")]
+    pub sleep_consolidation_enabled: bool,
+    /// Hours between automatic sleep-consolidation passes. Marker file gates this.
+    #[serde(default = "default_sleep_consolidation_interval_hours")]
+    pub sleep_consolidation_interval_hours: u32,
+    /// Cosine similarity threshold for clustering memories during auto-consolidation.
+    #[serde(default = "default_sleep_consolidation_threshold")]
+    pub sleep_consolidation_threshold: f32,
+    /// Minimum cluster size to consolidate.
+    #[serde(default = "default_sleep_consolidation_min_cluster_size")]
+    pub sleep_consolidation_min_cluster_size: usize,
+    /// Only consider Working-state memories created in the last N days.
+    #[serde(default = "default_sleep_consolidation_max_age_days")]
+    pub sleep_consolidation_max_age_days: u32,
 }
 
 impl Default for MemoryConfig {
@@ -663,6 +788,11 @@ impl Default for MemoryConfig {
             bidirectional_links: true,
             stale_ref_cleanup_enabled: true,
             stale_ref_importance_penalty: 0.3, // Multiply importance by 0.3 per missing file
+            sleep_consolidation_enabled: true,
+            sleep_consolidation_interval_hours: 24,
+            sleep_consolidation_threshold: 0.85,
+            sleep_consolidation_min_cluster_size: 3,
+            sleep_consolidation_max_age_days: 7,
         }
     }
 }
