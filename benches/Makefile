@@ -26,6 +26,9 @@ memora: ## Run the Memora forgetting-aware benchmark (placeholder until impl)
 smoke: ## Run LongMemEval on a 5-question slice — checks the wiring works
 	$(COMPOSE) run --rm -e MAX_QUESTIONS=5 bench longmemeval
 
+tune: ## 60-question slice for retrieval-knob tuning (samples all 6 categories)
+	$(COMPOSE) run --rm -e MAX_QUESTIONS=60 bench longmemeval
+
 resume: ## Re-score an existing hypothesis.jsonl. Usage: make resume RUN=/data/results/longmemeval-<ts>
 	@if [ -z "$(RUN)" ]; then \
 		echo "Usage: make resume RUN=/data/results/longmemeval-<timestamp>" >&2; \
