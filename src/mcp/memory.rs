@@ -247,6 +247,7 @@ impl MemoryProvider {
             // Create requested relationships in the same call so the agent doesn't
             // need a second round-trip for the common "store + link" pattern.
             let mut created_rels = 0usize;
+            let mut close_targets: Vec<String> = Vec::new();
             for (target_id, rel_type, strength, description) in &related_specs {
                 if manager_guard
                     .create_relationship(
@@ -260,9 +261,30 @@ impl MemoryProvider {
                     .is_ok()
                 {
                     created_rels += 1;
+                    if matches!(rel_type, crate::memory::types::RelationshipType::Closes) {
+                        close_targets.push(target_id.clone());
+                    }
                 }
             }
-            (memory, created_rels)
+
+            // Closes relationship triggers consolidation: the just-stored memory
+            // becomes the consolidated parent of the goal it closes. Best-effort —
+            // a failed consolidation logs a warning but doesn't fail the memorize.
+            let mut consolidated_count = 0usize;
+            for goal_id in &close_targets {
+                match manager_guard
+                    .consolidate_goal(goal_id, Some(memory.id.clone()), None)
+                    .await
+                {
+                    Ok(_) => consolidated_count += 1,
+                    Err(e) => tracing::warn!(
+                        "Closes-triggered consolidation of goal '{}' failed: {}",
+                        goal_id,
+                        e
+                    ),
+                }
+            }
+            (memory, created_rels, consolidated_count)
         };
 
         // Restore original directory regardless of result
@@ -273,19 +295,25 @@ impl MemoryProvider {
             );
         }
 
-        let (memory, created_rels) = memory_result;
+        let (memory, created_rels, consolidated_count) = memory_result;
 
         // Return plain text response for MCP protocol compliance
+        let mut msg = format!("Memory stored: {}", memory.id);
         if created_rels > 0 {
-            Ok(format!(
-                "Memory stored: {} (+ {} relationship{})",
-                memory.id,
+            msg.push_str(&format!(
+                " (+ {} relationship{})",
                 created_rels,
                 if created_rels == 1 { "" } else { "s" }
-            ))
-        } else {
-            Ok(format!("Memory stored: {}", memory.id))
+            ));
         }
+        if consolidated_count > 0 {
+            msg.push_str(&format!(
+                " — consolidated {} goal{}",
+                consolidated_count,
+                if consolidated_count == 1 { "" } else { "s" }
+            ));
+        }
+        Ok(msg)
     }
 
     /// Execute the remember tool
@@ -638,43 +666,6 @@ impl MemoryProvider {
             }
         } else {
             Ok("❌ Either 'memory_id' or 'query' must be provided".to_string())
-        }
-    }
-
-    /// Execute the consolidate tool: close a Goal memory by summarizing all
-    /// Achieves sources into a new consolidated parent.
-    pub async fn execute_consolidate(&self, arguments: &Value) -> Result<String, McpError> {
-        let goal_id = arguments
-            .get("goal_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::invalid_params("Missing required parameter 'goal_id'", "consolidate")
-            })?
-            .to_string();
-
-        let summary = arguments
-            .get("summary")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let res = {
-            let mut manager_guard = self.memory_manager.lock().await;
-            manager_guard.consolidate_goal(&goal_id, summary).await
-        };
-
-        match res {
-            Ok(m) => Ok(format!(
-                "✅ Goal '{}' consolidated\n   New memory ID: {}\n   Title: {}\n   Importance: {:.3}\n   Tags: {}",
-                goal_id,
-                m.id,
-                m.title,
-                m.metadata.importance,
-                m.metadata.tags.join(", ")
-            )),
-            Err(e) => Err(McpError::internal_error(
-                format!("Failed to consolidate goal: {}", e),
-                "consolidate",
-            )),
         }
     }
 }

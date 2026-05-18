@@ -724,22 +724,30 @@ impl MemoryManager {
         Ok(related_memories)
     }
 
-    /// Event-based consolidation: close a Goal memory by summarizing all source
-    /// memories that `Achieves` it into a new consolidated parent.
+    /// Event-based consolidation: close a Goal memory by folding all source
+    /// memories that `Achieves` it into a single consolidated parent.
     ///
-    /// Flow:
+    /// Two parent-selection modes:
+    /// * `parent_id = Some(id)` — promote an existing memory to be the parent.
+    ///   Triggered by `memorize` when the agent creates a `Closes` relationship —
+    ///   the agent's just-stored "completion note" becomes the consolidated parent.
+    ///   Its content is the lesson-learned text; importance gets bumped to the
+    ///   consolidation level. `summary` is ignored in this mode.
+    /// * `parent_id = None` — synthesize a fresh Insight memory as parent.
+    ///   Triggered by the CLI admin override (`octobrain memory consolidate`).
+    ///   `summary` becomes the parent content (or a deterministic title-list).
+    ///
+    /// Both modes:
     /// 1. Validate the goal exists and is of type Goal
-    /// 2. Find all memories with an `Achieves` relationship targeting this goal
-    /// 3. Synthesize a consolidated memory (importance = max(sources) * 1.1, clamped)
-    /// 4. Link consolidated → goal with `Closes`; link consolidated → each source with `AutoLinked`
-    /// 5. Transition each source to `MemoryState::Consolidated` with importance × 0.2
-    ///    via a partial column UPDATE (embedding untouched)
-    ///
-    /// `summary` lets the caller supply an LLM-generated summary; if `None` the
-    /// consolidated memory's content is a deterministic synthesis of source titles.
+    /// 2. Gather all Working sources with Achieves(→ goal); skip already-Consolidated
+    /// 3. Compute consolidated_importance = max(sources, parent if any) * 1.1, clamped
+    /// 4. Promote/create the parent at that importance
+    /// 5. Add Closes(parent → goal) and AutoLinked(parent → each source)
+    /// 6. Transition each source: state → Consolidated, importance *= 0.2 (partial UPDATE)
     pub async fn consolidate_goal(
         &mut self,
         goal_id: &str,
+        parent_id: Option<String>,
         summary: Option<String>,
     ) -> Result<Memory> {
         let goal = self
@@ -773,10 +781,14 @@ impl MemoryManager {
             ));
         }
 
-        // Load the source memories. Skip any that have already been consolidated
-        // (idempotent: re-running consolidate_goal won't re-process archived sources).
+        // Load Working sources. Skip already-Consolidated AND skip the parent itself
+        // (the parent must not appear in its own source list — that would demote it).
+        let parent_id_ref = parent_id.as_deref();
         let mut sources: Vec<Memory> = Vec::with_capacity(achievers.len());
         for rel in &achievers {
+            if Some(rel.source_id.as_str()) == parent_id_ref {
+                continue;
+            }
             if let Some(m) = self.store.get_memory(&rel.source_id).await? {
                 if m.metadata.state == MemoryState::Working {
                     sources.push(m);
@@ -797,50 +809,71 @@ impl MemoryManager {
             .fold(0.0_f32, f32::max);
         let consolidated_importance = (max_src_importance * 1.1).clamp(0.0, 1.0);
 
-        let consolidated_content = summary.unwrap_or_else(|| {
-            let titles: Vec<&str> = sources.iter().map(|m| m.title.as_str()).collect();
-            format!(
-                "Consolidation of goal '{}' — synthesized from {} source memories:\n- {}",
-                goal.title,
-                sources.len(),
-                titles.join("\n- ")
-            )
-        });
-
-        let mut consolidated_meta = MemoryMetadata {
-            importance: consolidated_importance,
-            source: goal.metadata.source.clone(),
-            ..Default::default()
+        // Materialize the parent: either promote an existing memory (memorize-with-Closes
+        // path) or create a fresh Insight (CLI admin path).
+        let parent = if let Some(pid) = parent_id_ref {
+            let mut existing = self
+                .store
+                .get_memory(pid)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Parent memory '{}' not found", pid))?;
+            // Bump persisted importance to the consolidation level via partial UPDATE
+            // so the embedding stays put.
+            self.store
+                .update_state_and_importance(pid, MemoryState::Working, consolidated_importance)
+                .await?;
+            existing.metadata.importance = consolidated_importance;
+            existing
+        } else {
+            let content = summary.unwrap_or_else(|| {
+                let titles: Vec<&str> = sources.iter().map(|m| m.title.as_str()).collect();
+                format!(
+                    "Consolidation of goal '{}' — synthesized from {} source memories:\n- {}",
+                    goal.title,
+                    sources.len(),
+                    titles.join("\n- ")
+                )
+            });
+            let mut meta = MemoryMetadata {
+                importance: consolidated_importance,
+                source: goal.metadata.source.clone(),
+                ..Default::default()
+            };
+            meta.tags.push("consolidated".to_string());
+            meta.tags.push(format!("goal:{}", goal_id));
+            meta.decay = super::types::MemoryDecay::new(consolidated_importance);
+            let new_parent = Memory::new(
+                MemoryType::Insight,
+                format!("Consolidation: {}", goal.title),
+                content,
+                Some(meta),
+            );
+            self.store.store_memory(&new_parent).await?;
+            new_parent
         };
-        consolidated_meta.tags.push("consolidated".to_string());
-        consolidated_meta.tags.push(format!("goal:{}", goal_id));
-        consolidated_meta.decay = super::types::MemoryDecay::new(consolidated_importance);
 
-        let consolidated = Memory::new(
-            MemoryType::Insight,
-            format!("Consolidation: {}", goal.title),
-            consolidated_content,
-            Some(consolidated_meta),
-        );
-        self.store.store_memory(&consolidated).await?;
+        // Closes(parent → goal). For the memorize-with-Closes path the relationship
+        // already exists (the agent put it there), but recording it from the manager
+        // path keeps the CLI mode complete. Duplicate is acceptable — relationships
+        // are not deduped, and the additional row is informative.
+        if parent_id_ref.is_none() {
+            let closes = MemoryRelationship {
+                id: uuid::Uuid::new_v4().to_string(),
+                source_id: parent.id.clone(),
+                target_id: goal_id.to_string(),
+                relationship_type: RelationshipType::Closes,
+                strength: 1.0,
+                description: format!("Closes goal via consolidation of {} sources", sources.len()),
+                created_at: Utc::now(),
+            };
+            self.store.store_relationship(&closes).await?;
+        }
 
-        // Close-relationship marks the consolidation event.
-        let closes = MemoryRelationship {
-            id: uuid::Uuid::new_v4().to_string(),
-            source_id: consolidated.id.clone(),
-            target_id: goal_id.to_string(),
-            relationship_type: RelationshipType::Closes,
-            strength: 1.0,
-            description: format!("Closes goal via consolidation of {} sources", sources.len()),
-            created_at: Utc::now(),
-        };
-        self.store.store_relationship(&closes).await?;
-
-        // Provenance: link consolidated → each source so the chain is queryable.
+        // Provenance: link parent → each source so the chain is queryable.
         for src in &sources {
             let link = MemoryRelationship {
                 id: uuid::Uuid::new_v4().to_string(),
-                source_id: consolidated.id.clone(),
+                source_id: parent.id.clone(),
                 target_id: src.id.clone(),
                 relationship_type: RelationshipType::AutoLinked,
                 strength: 0.9,
@@ -850,8 +883,7 @@ impl MemoryManager {
             self.store.store_relationship(&link).await?;
         }
 
-        // Archive sources: dampen importance, transition state — partial UPDATE,
-        // no embedding regen, no full row rewrite.
+        // Archive sources: state → Consolidated, importance *= 0.2 via partial UPDATE.
         for src in &sources {
             let new_importance = src.metadata.importance * 0.2;
             self.store
@@ -860,15 +892,20 @@ impl MemoryManager {
         }
 
         tracing::info!(
-            "Consolidated goal '{}' ({}): {} sources → new memory {} (importance={:.3})",
+            "Consolidated goal '{}' ({}): {} sources → parent {} (importance={:.3}, {})",
             goal.title,
             goal_id,
             sources.len(),
-            consolidated.id,
+            parent.id,
             consolidated_importance,
+            if parent_id_ref.is_some() {
+                "promoted-existing"
+            } else {
+                "synthesized-new"
+            },
         );
 
-        Ok(consolidated)
+        Ok(parent)
     }
 
     /// Sleep consolidation: batch-find clusters of similar recent memories and
@@ -967,7 +1004,7 @@ impl MemoryManager {
                 self.store.store_relationship(&achieves).await?;
             }
 
-            match self.consolidate_goal(&goal.id, None).await {
+            match self.consolidate_goal(&goal.id, None, None).await {
                 Ok(m) => consolidated.push(m),
                 Err(e) => tracing::warn!(
                     "Sleep consolidation: cluster {:?} failed to consolidate: {}",
