@@ -195,11 +195,41 @@ impl MemoryProvider {
             .with_details(format!("Path: {}", self.working_directory.display())));
         }
 
+        // Pre-parse related_to specs (if any) so we fail fast on bad input before
+        // committing the memorize.
+        let related_specs: Vec<(String, crate::memory::types::RelationshipType, f32, String)> =
+            arguments
+                .get("related_to")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let obj = item.as_object()?;
+                            let target_id = obj.get("target_id")?.as_str()?.to_string();
+                            let rel_type_str = obj.get("relationship_type")?.as_str()?;
+                            let rel_type =
+                                crate::memory::types::RelationshipType::from(rel_type_str);
+                            let strength = obj
+                                .get("strength")
+                                .and_then(|v| v.as_f64())
+                                .map(|v| (v as f32).clamp(0.0, 1.0))
+                                .unwrap_or(0.8);
+                            let description = obj
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Linked at memorize time")
+                                .to_string();
+                            Some((target_id, rel_type, strength, description))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
         let memory_result = {
             // Lock memory manager for storing - removed timeout to allow embedding generation to complete
             let mut manager_guard = self.memory_manager.lock().await;
 
-            manager_guard
+            let memory = manager_guard
                 .memorize(crate::memory::manager::MemorizeParams {
                     memory_type,
                     title: title.to_string(),
@@ -212,7 +242,27 @@ impl MemoryProvider {
                 .await
                 .map_err(|e| {
                     McpError::internal_error(format!("Failed to store memory: {}", e), "memorize")
-                })?
+                })?;
+
+            // Create requested relationships in the same call so the agent doesn't
+            // need a second round-trip for the common "store + link" pattern.
+            let mut created_rels = 0usize;
+            for (target_id, rel_type, strength, description) in &related_specs {
+                if manager_guard
+                    .create_relationship(
+                        memory.id.clone(),
+                        target_id.clone(),
+                        rel_type.clone(),
+                        *strength,
+                        description.clone(),
+                    )
+                    .await
+                    .is_ok()
+                {
+                    created_rels += 1;
+                }
+            }
+            (memory, created_rels)
         };
 
         // Restore original directory regardless of result
@@ -223,11 +273,19 @@ impl MemoryProvider {
             );
         }
 
-        let memory = memory_result;
+        let (memory, created_rels) = memory_result;
 
         // Return plain text response for MCP protocol compliance
-        // Return minimal response for MCP protocol compliance - just success and ID
-        Ok(format!("Memory stored: {}", memory.id))
+        if created_rels > 0 {
+            Ok(format!(
+                "Memory stored: {} (+ {} relationship{})",
+                memory.id,
+                created_rels,
+                if created_rels == 1 { "" } else { "s" }
+            ))
+        } else {
+            Ok(format!("Memory stored: {}", memory.id))
+        }
     }
 
     /// Execute the remember tool
@@ -583,235 +641,14 @@ impl MemoryProvider {
         }
     }
 
-    /// Execute the memory_graph tool
-    pub async fn execute_memory_graph(&self, arguments: &Value) -> Result<String, McpError> {
-        let memory_id = arguments
-            .get("memory_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::invalid_params("Missing required parameter 'memory_id'", "memory_graph")
-            })?;
-
-        // Validate memory ID
-        if memory_id.trim().is_empty() || memory_id.len() > 100 {
-            return Err(McpError::invalid_params(
-                "Invalid memory ID format",
-                "memory_graph",
-            ));
-        }
-
-        let depth = arguments
-            .get("depth")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(2)
-            .clamp(1, 5);
-
-        debug!(
-            memory_id = %memory_id,
-            depth = depth,
-            "Building memory graph"
-        );
-
-        let graph = {
-            let manager_guard = self.memory_manager.lock().await;
-            manager_guard
-                .get_memory_graph(memory_id, depth)
-                .await
-                .map_err(|e| {
-                    McpError::internal_error(
-                        format!("Failed to build memory graph: {}", e),
-                        "memory_graph",
-                    )
-                })?
-        };
-
-        if graph.memories.is_empty() {
-            return Ok(format!("Memory '{}' not found", memory_id));
-        }
-
-        // Format graph as text
-        let mut output = format!(
-            "📊 Memory Graph (root: {}, depth: {})\n\n",
-            graph.root, depth
-        );
-        output.push_str(&format!("Memories: {}\n", graph.memories.len()));
-        output.push_str(&format!("Relationships: {}\n\n", graph.relationships.len()));
-
-        // List memories
-        output.push_str("🧠 Memories in Graph:\n\n");
-        for (id, memory) in graph.memories.iter().take(20) {
-            // Limit for readability
-            output.push_str(&format!("[{}]\n", id));
-            output.push_str(&format!("  Title: {}\n", memory.title));
-            output.push_str(&format!("  Type: {}\n", memory.memory_type));
-            output.push_str(&format!(
-                "  Created: {}\n",
-                memory.created_at.format("%Y-%m-%d %H:%M")
-            ));
-
-            // Add snippet of content
-            let content_preview = if memory.content.len() > 100 {
-                format!("{}...", &memory.content[..100])
-            } else {
-                memory.content.clone()
-            };
-            output.push_str(&format!("  Content: {}\n\n", content_preview));
-        }
-
-        if graph.memories.len() > 20 {
-            output.push_str(&format!(
-                "... and {} more memories\n\n",
-                graph.memories.len() - 20
-            ));
-        }
-
-        // List relationships
-        if !graph.relationships.is_empty() {
-            output.push_str("🔗 Relationships:\n\n");
-            for rel in graph.relationships.iter().take(30) {
-                // Limit for readability
-                output.push_str(&format!(
-                    "  {} -> {} ({}, strength: {:.2})\n",
-                    rel.source_id, rel.target_id, rel.relationship_type, rel.strength
-                ));
-            }
-
-            if graph.relationships.len() > 30 {
-                output.push_str(&format!(
-                    "\n... and {} more relationships\n",
-                    graph.relationships.len() - 30
-                ));
-            }
-        }
-
-        // Apply token truncation
-        Ok(output)
-    }
-
-    /// Execute the relate tool — manually create a typed relationship between two memories
-    pub async fn execute_relate(&self, arguments: &Value) -> Result<String, McpError> {
-        let source_id = arguments
-            .get("source_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::invalid_params("Missing required parameter 'source_id'", "relate")
-            })?
-            .to_string();
-
-        let target_id = arguments
-            .get("target_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::invalid_params("Missing required parameter 'target_id'", "relate")
-            })?
-            .to_string();
-
-        let rel_type_str = arguments
-            .get("relationship_type")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                McpError::invalid_params("Missing required parameter 'relationship_type'", "relate")
-            })?;
-
-        // From<&str> handles both snake_case and CamelCase legacy forms.
-        let relationship_type = crate::memory::types::RelationshipType::from(rel_type_str);
-
-        let strength = arguments
-            .get("strength")
-            .and_then(|v| v.as_f64())
-            .map(|v| (v as f32).clamp(0.0, 1.0))
-            .unwrap_or(0.8);
-
-        let description = arguments
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let res = {
-            let mut manager_guard = self.memory_manager.lock().await;
-            manager_guard
-                .create_relationship(
-                    source_id,
-                    target_id,
-                    relationship_type,
-                    strength,
-                    description,
-                )
-                .await
-        };
-
-        match res {
-            Ok(rel) => Ok(format!(
-                "✅ Relationship created\nID: {}\n{} -> {} ({}, strength: {:.2})",
-                rel.id, rel.source_id, rel.target_id, rel.relationship_type, rel.strength
-            )),
-            Err(e) => Err(McpError::internal_error(
-                format!("Failed to create relationship: {}", e),
-                "relate",
-            )),
-        }
-    }
-
-    /// Execute the sleep_consolidate tool: batch-find clusters of recent similar
-    /// memories and fold each into a consolidated parent.
-    pub async fn execute_sleep_consolidate(&self, arguments: &Value) -> Result<String, McpError> {
-        let threshold = arguments
-            .get("threshold")
-            .and_then(|v| v.as_f64())
-            .map(|v| (v as f32).clamp(0.0, 1.0))
-            .unwrap_or(0.85);
-
-        let min_size = arguments
-            .get("min_size")
-            .and_then(|v| v.as_u64())
-            .map(|v| v.clamp(2, 50) as usize)
-            .unwrap_or(3);
-
-        let max_age_days = arguments
-            .get("max_age_days")
-            .and_then(|v| v.as_u64())
-            .map(|v| v.clamp(1, 365) as u32)
-            .unwrap_or(7);
-
-        let res = {
-            let mut manager_guard = self.memory_manager.lock().await;
-            manager_guard
-                .sleep_consolidate(threshold, min_size, max_age_days)
-                .await
-        };
-
-        match res {
-            Ok(memories) if memories.is_empty() => Ok(format!(
-                "ℹ️ No clusters tight enough at threshold {:.2} — nothing consolidated.",
-                threshold
-            )),
-            Ok(memories) => {
-                let mut out = format!("✅ Consolidated {} cluster(s):\n", memories.len());
-                for m in &memories {
-                    out.push_str(&format!(
-                        "  • {} (id={}, importance={:.3})\n",
-                        m.title, m.id, m.metadata.importance
-                    ));
-                }
-                Ok(out)
-            }
-            Err(e) => Err(McpError::internal_error(
-                format!("Sleep consolidation failed: {}", e),
-                "sleep_consolidate",
-            )),
-        }
-    }
-
-    /// Execute the consolidate_goal tool: close a Goal memory by summarizing all
+    /// Execute the consolidate tool: close a Goal memory by summarizing all
     /// Achieves sources into a new consolidated parent.
-    pub async fn execute_consolidate_goal(&self, arguments: &Value) -> Result<String, McpError> {
+    pub async fn execute_consolidate(&self, arguments: &Value) -> Result<String, McpError> {
         let goal_id = arguments
             .get("goal_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                McpError::invalid_params("Missing required parameter 'goal_id'", "consolidate_goal")
+                McpError::invalid_params("Missing required parameter 'goal_id'", "consolidate")
             })?
             .to_string();
 
@@ -836,7 +673,7 @@ impl MemoryProvider {
             )),
             Err(e) => Err(McpError::internal_error(
                 format!("Failed to consolidate goal: {}", e),
-                "consolidate_goal",
+                "consolidate",
             )),
         }
     }
