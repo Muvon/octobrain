@@ -85,7 +85,9 @@ pub struct HydeConfig {
 impl Default for HydeConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            // Default ON: autonomous improvement, no LLM dependency. Costs one
+            // extra LanceDB vector query per search; lifts long-tail recall.
+            enabled: true,
             top_k: 3,
             alpha: 0.5,
         }

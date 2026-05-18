@@ -693,6 +693,26 @@ fn default_stale_ref_importance_penalty() -> f32 {
     0.3
 }
 
+fn default_sleep_consolidation_enabled() -> bool {
+    true
+}
+
+fn default_sleep_consolidation_interval_hours() -> u32 {
+    24
+}
+
+fn default_sleep_consolidation_threshold() -> f32 {
+    0.85
+}
+
+fn default_sleep_consolidation_min_cluster_size() -> usize {
+    3
+}
+
+fn default_sleep_consolidation_max_age_days() -> u32 {
+    7
+}
+
 /// Configuration for memory system
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
@@ -730,6 +750,24 @@ pub struct MemoryConfig {
     /// Memories where ALL files are gone are deleted entirely.
     #[serde(default = "default_stale_ref_importance_penalty")]
     pub stale_ref_importance_penalty: f32,
+
+    /// Sleep consolidation: lazy, autonomous batch compression of similar recent
+    /// memories. Runs on MemoryManager init when the marker-file gate says enough
+    /// time has passed — no cron, no scheduler, no manual call required.
+    #[serde(default = "default_sleep_consolidation_enabled")]
+    pub sleep_consolidation_enabled: bool,
+    /// Hours between automatic sleep-consolidation passes. Marker file gates this.
+    #[serde(default = "default_sleep_consolidation_interval_hours")]
+    pub sleep_consolidation_interval_hours: u32,
+    /// Cosine similarity threshold for clustering memories during auto-consolidation.
+    #[serde(default = "default_sleep_consolidation_threshold")]
+    pub sleep_consolidation_threshold: f32,
+    /// Minimum cluster size to consolidate.
+    #[serde(default = "default_sleep_consolidation_min_cluster_size")]
+    pub sleep_consolidation_min_cluster_size: usize,
+    /// Only consider Working-state memories created in the last N days.
+    #[serde(default = "default_sleep_consolidation_max_age_days")]
+    pub sleep_consolidation_max_age_days: u32,
 }
 
 impl Default for MemoryConfig {
@@ -750,6 +788,11 @@ impl Default for MemoryConfig {
             bidirectional_links: true,
             stale_ref_cleanup_enabled: true,
             stale_ref_importance_penalty: 0.3, // Multiply importance by 0.3 per missing file
+            sleep_consolidation_enabled: true,
+            sleep_consolidation_interval_hours: 24,
+            sleep_consolidation_threshold: 0.85,
+            sleep_consolidation_min_cluster_size: 3,
+            sleep_consolidation_max_age_days: 7,
         }
     }
 }
