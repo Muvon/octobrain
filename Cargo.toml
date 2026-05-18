@@ -18,6 +18,8 @@ exclude = [
     ".github/*",
     "docs/*",
     "scripts/*",
+    "benches/*",
+    ".docker-cache/*",
     "*.md",
     "!README.md"
 ]
