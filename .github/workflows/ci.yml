@@ -259,7 +259,14 @@ jobs:
               apk add --no-cache protobuf-dev
 
               export ORT_LIB_LOCATION="$ORT_LIB_LOCATION"
-              export RUSTFLAGS="-C link-arg=-lgcc"
+              # -C target-feature=-fp16: rustc incorrectly reports fp16 as enabled on
+              # some aarch64 runners, causing gemm-common to emit fullfp16 instructions
+              # the CPU doesn't support. Explicitly disable it for aarch64 musl builds.
+              case "${{ matrix.target }}" in
+                aarch64-*) EXTRA_FEATURES="-C target-feature=-fp16" ;;
+                *)         EXTRA_FEATURES="" ;;
+              esac
+              export RUSTFLAGS="-C link-arg=-lgcc $EXTRA_FEATURES"
               cargo build --target ${{ matrix.target }}
             '
 
