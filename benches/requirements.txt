@@ -1,0 +1,13 @@
+# Pinned for reproducibility. Bump deliberately, not opportunistically.
+openai==1.59.5
+mcp==1.2.0
+httpx==0.28.1
+tqdm==4.67.1
+python-dotenv==1.0.1
+tiktoken==0.8.0
+
+# Required by upstream LongMemEval's evaluate_qa.py (matches requirements-lite.txt).
+# Baking these in so a scorer crash never wastes a paid ingest+answer run.
+backoff==2.2.1
+numpy==1.26.3
+nltk==3.9.1
