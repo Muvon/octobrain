@@ -78,8 +78,8 @@ final_top_k = 10
 # centroid, then blends `alpha * original_query + (1 - alpha) * centroid` and uses
 # the result for the actual search. Costs one extra LanceDB vector query in
 # exchange for typically +10-30% recall on long-tail / underspecified queries.
-# Default: false (opt-in until measured on your corpus)
-enabled = false
+# No LLM dependency — pure embedding math. Default: true (autonomous improvement)
+enabled = true
 
 # Number of nearest neighbors to average for the centroid.
 # Higher = more semantic averaging, lower = closer to original intent.
@@ -166,6 +166,32 @@ stale_ref_cleanup_enabled = true
 # Lower = harsher penalty. Memories with ALL files gone are deleted regardless.
 # Default: 0.3
 stale_ref_importance_penalty = 0.3
+
+# Sleep consolidation: lazy autonomous compression of similar recent memories.
+# Triggers on MemoryManager init via marker-file gating — no cron, no scheduler,
+# no manual call. Finds clusters of similar Working-state memories created in
+# the last N days, then folds each cluster into a consolidated parent via the
+# same goal-anchored pipeline. Best-effort: a failed pass never blocks init.
+# No LLM dependency.
+# Default: true
+sleep_consolidation_enabled = true
+
+# Hours between automatic sleep-consolidation passes. Marker file gates this.
+# Default: 24 (once a day)
+sleep_consolidation_interval_hours = 24
+
+# Cosine similarity threshold for two memories to share a cluster (0.0-1.0).
+# Higher = stricter clusters, lower = looser.
+# Default: 0.85
+sleep_consolidation_threshold = 0.85
+
+# Minimum number of memories required to form a cluster worth consolidating.
+# Default: 3
+sleep_consolidation_min_cluster_size = 3
+
+# Only consider Working-state memories created in the last N days.
+# Default: 7
+sleep_consolidation_max_age_days = 7
 
 [knowledge]
 # Size of each child chunk in characters — what gets embedded and matched.

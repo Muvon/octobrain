@@ -43,6 +43,9 @@ pub struct MemoryManager {
     config: MemoryConfig,
     /// Path to the stale-check marker file for incremental git scanning
     stale_check_marker: PathBuf,
+    /// Path to the sleep-consolidation marker file; stores last-run RFC3339 timestamp.
+    /// Lazy auto-consolidation is gated by `(now - last_run) >= interval_hours`.
+    sleep_consolidation_marker: PathBuf,
 }
 
 impl MemoryManager {
@@ -69,12 +72,11 @@ impl MemoryManager {
         // Use shared memory database path (single DB for all projects)
         let db_path = crate::storage::get_memory_database_path()?;
 
-        // Marker file for incremental stale-check: {db_dir}/.stale_check_{project_hash}
-        let marker_name = format!(
-            ".stale_check_{}",
-            project_key.as_deref().unwrap_or("default")
-        );
-        let stale_check_marker = db_path.join(marker_name);
+        // Marker files: {db_dir}/.{kind}_{project_key}
+        let project_label = project_key.as_deref().unwrap_or("default");
+        let stale_check_marker = db_path.join(format!(".stale_check_{}", project_label));
+        let sleep_consolidation_marker =
+            db_path.join(format!(".sleep_consolidation_{}", project_label));
 
         // Create embedding provider using model from config
         let model_string = &config.embedding.model;
@@ -96,14 +98,64 @@ impl MemoryManager {
             store,
             config: memory_config,
             stale_check_marker,
+            sleep_consolidation_marker,
         };
 
         // Lazy cleanup of stale file references on init (like knowledge session cleanup)
         if manager.config.stale_ref_cleanup_enabled {
             manager.cleanup_stale_references().await.ok();
         }
+        // Lazy autonomous sleep consolidation: marker-gated, no cron required.
+        // Mirrors the cleanup pattern — best-effort, errors swallowed so a slow or
+        // failed consolidation pass never blocks the manager from initializing.
+        if manager.config.sleep_consolidation_enabled {
+            manager.maybe_sleep_consolidate().await.ok();
+        }
 
         Ok(manager)
+    }
+
+    /// Read the timestamp of the last sleep-consolidation pass from the marker file.
+    fn read_sleep_marker(&self) -> Option<chrono::DateTime<Utc>> {
+        let raw = std::fs::read_to_string(&self.sleep_consolidation_marker).ok()?;
+        chrono::DateTime::parse_from_rfc3339(raw.trim())
+            .ok()
+            .map(|d| d.with_timezone(&Utc))
+    }
+
+    /// Write the current time as the last sleep-consolidation pass.
+    fn write_sleep_marker(&self) {
+        std::fs::write(&self.sleep_consolidation_marker, Utc::now().to_rfc3339()).ok();
+    }
+
+    /// Decide whether to run sleep consolidation based on the marker file.
+    /// Runs if no marker exists OR `now - last_run >= interval_hours`.
+    /// Always updates the marker on a successful run.
+    async fn maybe_sleep_consolidate(&mut self) -> Result<()> {
+        let interval_hours = self.config.sleep_consolidation_interval_hours.max(1) as i64;
+        let due = match self.read_sleep_marker() {
+            Some(last) => (Utc::now() - last).num_hours() >= interval_hours,
+            None => true, // first run for this project
+        };
+        if !due {
+            return Ok(());
+        }
+
+        let threshold = self.config.sleep_consolidation_threshold;
+        let min_size = self.config.sleep_consolidation_min_cluster_size;
+        let max_age_days = self.config.sleep_consolidation_max_age_days;
+
+        let consolidated = self
+            .sleep_consolidate(threshold, min_size, max_age_days)
+            .await?;
+        if !consolidated.is_empty() {
+            tracing::info!(
+                "Lazy sleep consolidation: produced {} consolidated parent(s)",
+                consolidated.len()
+            );
+        }
+        self.write_sleep_marker();
+        Ok(())
     }
 
     /// Read the last commit we scanned for stale references.

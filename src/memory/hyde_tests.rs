@@ -115,10 +115,12 @@ mod tests {
     }
 
     #[test]
-    fn test_hyde_config_default_is_disabled() {
-        // Default is OFF so production behavior is unchanged until users opt in.
+    fn test_hyde_config_default_is_enabled() {
+        // Default is ON: autonomous improvement, no LLM dependency.
+        // Costs one extra LanceDB vector query per search for typically
+        // +10-30% recall on long-tail queries.
         let cfg = HydeConfig::default();
-        assert!(!cfg.enabled);
+        assert!(cfg.enabled);
         assert_eq!(cfg.top_k, 3);
         assert!((cfg.alpha - 0.5).abs() < 0.001);
     }
