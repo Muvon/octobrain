@@ -131,7 +131,12 @@ pub struct MemoryStore {
     config: MemoryConfig,
     main_config: crate::config::Config,
     vector_dim: usize,
-    reranker_integration: Option<RerankerIntegration>,
+    // Wrapped in a std::sync::Mutex so enable/disable_reranker can mutate it
+    // via `&self`, which lets the whole `MemoryStore` be shared as `Arc<Self>`
+    // — needed for fire-and-forget auto-linking from `MemoryManager::memorize`.
+    // The lock is only held for the brief enable/disable mutation and during
+    // the rerank call itself; never held across awaits inside async work.
+    reranker_integration: std::sync::Mutex<Option<RerankerIntegration>>,
     project_key: Option<String>,
     role: Option<String>,
 }
@@ -152,6 +157,7 @@ impl MemoryStore {
         main_config: crate::config::Config,
         reranker_integration: Option<RerankerIntegration>,
     ) -> Result<Self> {
+        let reranker_integration = std::sync::Mutex::new(reranker_integration);
         let db = connect(db_path).execute().await?;
 
         // Get vector dimension from the embedding provider by testing with a short text
@@ -405,7 +411,7 @@ impl MemoryStore {
     }
 
     /// Store a memory
-    pub async fn store_memory(&mut self, memory: &Memory) -> Result<()> {
+    pub async fn store_memory(&self, memory: &Memory) -> Result<()> {
         // Generate embedding using the optimized single embedding function for better performance
         let searchable_text = memory.get_searchable_text();
 
@@ -429,7 +435,7 @@ impl MemoryStore {
 
     /// Store a memory with a pre-computed embedding (for batch operations)
     async fn store_memory_with_embedding(
-        &mut self,
+        &self,
         memory: &Memory,
         embedding: Vec<f32>,
     ) -> Result<()> {
@@ -497,13 +503,13 @@ impl MemoryStore {
     }
 
     /// Update an existing memory
-    pub async fn update_memory(&mut self, memory: &Memory) -> Result<()> {
+    pub async fn update_memory(&self, memory: &Memory) -> Result<()> {
         // Just use store_memory as it handles updates by deleting and re-inserting
         self.store_memory(memory).await
     }
 
     /// Delete a memory by ID
-    pub async fn delete_memory(&mut self, memory_id: &str) -> Result<()> {
+    pub async fn delete_memory(&self, memory_id: &str) -> Result<()> {
         self.memories_table
             .delete(&format!(
                 "id = '{}' AND project_key = '{}'",
@@ -632,14 +638,24 @@ impl MemoryStore {
     /// If reranker is enabled, it is applied as a final post-processing step on
     /// whichever search path ran (hybrid or vector).
     pub async fn search_memories(&self, query: &MemoryQuery) -> Result<Vec<MemorySearchResult>> {
-        // Determine if reranker should run (needs non-empty query text)
-        let reranker_query_text = self
+        // Determine if reranker should run (needs non-empty query text).
+        // Read the enabled flag under a short critical section — we drop the
+        // guard before any await to keep this safe with the sync Mutex.
+        let reranker_enabled = self
             .reranker_integration
-            .as_ref()
-            .filter(|r| r.config.enabled)
-            .and(query.query_text.as_deref())
-            .filter(|t| !t.trim().is_empty())
-            .map(|t| t.to_string());
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|r| r.config.enabled))
+            .unwrap_or(false);
+        let reranker_query_text = if reranker_enabled {
+            query
+                .query_text
+                .as_deref()
+                .filter(|t| !t.trim().is_empty())
+                .map(|t| t.to_string())
+        } else {
+            None
+        };
 
         // Fetch candidates from the appropriate search path
         let candidates = if self.main_config.search.hybrid.enabled && query.query_text.is_some() {
@@ -668,14 +684,23 @@ impl MemoryStore {
             return Ok(results);
         };
 
-        // Apply reranker as a post-processing step if enabled
-        let final_results = if let (Some(ref query_text), Some(ref reranker)) =
-            (reranker_query_text, &self.reranker_integration)
-        {
-            reranker.rerank_memories(query_text, candidates).await?
+        // Apply reranker as a post-processing step if enabled. We clone the
+        // RerankerIntegration out of the mutex (it's cheap — just config + a
+        // small wrapper) so the lock isn't held across the await.
+        let reranker_clone = if reranker_query_text.is_some() {
+            self.reranker_integration
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().cloned())
         } else {
-            candidates
+            None
         };
+        let final_results =
+            if let (Some(query_text), Some(reranker)) = (reranker_query_text, reranker_clone) {
+                reranker.rerank_memories(&query_text, candidates).await?
+            } else {
+                candidates
+            };
 
         self.record_accesses_best_effort(&final_results).await;
         Ok(final_results)
@@ -1177,7 +1202,7 @@ impl MemoryStore {
     }
 
     /// Store a memory relationship
-    pub async fn store_relationship(&mut self, relationship: &MemoryRelationship) -> Result<()> {
+    pub async fn store_relationship(&self, relationship: &MemoryRelationship) -> Result<()> {
         let batch = RecordBatch::try_new(
             self.rel_schema.clone(),
             vec![
@@ -1247,7 +1272,7 @@ impl MemoryStore {
     }
 
     /// Delete all AutoLinked relationships for a memory (used before re-linking on update)
-    pub async fn delete_auto_linked_relationships(&mut self, memory_id: &str) -> Result<()> {
+    pub async fn delete_auto_linked_relationships(&self, memory_id: &str) -> Result<()> {
         self.relationships_table
             .delete(&format!(
                 "(source_id = '{}' OR target_id = '{}') AND relationship_type = 'auto_linked' AND project_key = '{}'",
@@ -1344,7 +1369,7 @@ impl MemoryStore {
     }
 
     /// Clean up old memories based on configuration
-    pub async fn cleanup_old_memories(&mut self) -> Result<usize> {
+    pub async fn cleanup_old_memories(&self) -> Result<usize> {
         if let Some(cleanup_days) = self.config.auto_cleanup_days {
             let cutoff_date = Utc::now() - chrono::Duration::days(cleanup_days as i64);
             let cutoff_str = cutoff_date.to_rfc3339();
@@ -1630,7 +1655,7 @@ impl MemoryStore {
     }
 
     /// Clear all memory data for the current project
-    pub async fn clear_all_memory_data(&mut self) -> Result<usize> {
+    pub async fn clear_all_memory_data(&self) -> Result<usize> {
         // Get current counts before deletion (scoped to project)
         let memory_count = self.get_memory_count().await.unwrap_or(0);
 
@@ -1693,28 +1718,36 @@ impl MemoryStore {
         }
     }
 
-    /// Enable reranker with optional model override
-    pub fn enable_reranker(&mut self, model: Option<String>) {
-        if let Some(ref mut reranker) = self.reranker_integration {
-            // Update existing reranker config
+    /// Enable reranker with optional model override.
+    /// Takes `&self` (mutates via interior `Mutex`) so `MemoryStore` can be
+    /// shared as `Arc<Self>` for fire-and-forget tasks.
+    pub fn enable_reranker(&self, model: Option<String>) {
+        let mut guard = match self.reranker_integration.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(), // recover from poisoning — config-only data
+        };
+        if let Some(ref mut reranker) = *guard {
             if let Some(m) = model {
                 reranker.config.model = m;
             }
             reranker.config.enabled = true;
         } else {
-            // Create new reranker integration
             let mut config = self.main_config.search.reranker.clone();
             config.enabled = true;
             if let Some(m) = model {
                 config.model = m;
             }
-            self.reranker_integration = Some(RerankerIntegration::new(config));
+            *guard = Some(RerankerIntegration::new(config));
         }
     }
 
     /// Disable reranker
-    pub fn disable_reranker(&mut self) {
-        if let Some(ref mut reranker) = self.reranker_integration {
+    pub fn disable_reranker(&self) {
+        let mut guard = match self.reranker_integration.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(ref mut reranker) = *guard {
             reranker.config.enabled = false;
         }
     }
