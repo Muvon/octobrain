@@ -250,6 +250,27 @@ pub enum RelationshipKind {
     Implements,
     /// Builds on top of
     Extends,
+    /// This memory contributes to / advances a Goal memory.
+    /// Use when memorizing context tied to a goal — `consolidate(goal_id)` later
+    /// folds all Achieves sources into a single consolidated parent.
+    Achieves,
+}
+
+/// A relationship to create alongside a `memorize` call.
+/// Subsumes what the standalone `relate` tool used to do; one MCP round-trip
+/// stores the memory AND links it to existing memories.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RelationshipSpec {
+    /// ID of the target memory to link to
+    pub target_id: String,
+    /// Relationship type
+    pub relationship_type: RelationshipKind,
+    /// Relationship strength 0.0-1.0 (default 0.8 if omitted)
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub strength: Option<f32>,
+    /// Optional human description of why these memories are related
+    #[schemars(length(max = 200))]
+    pub description: Option<String>,
 }
 
 /// Search query: either a single string or an array of strings for broader coverage
@@ -290,6 +311,13 @@ pub struct MemorizeParams {
     pub project: Option<String>,
     /// Role tag to attach to this memory (e.g. 'developer', 'reviewer').
     pub role: Option<String>,
+    /// Optional: create typed relationships from this new memory to existing
+    /// memories in the same call. Subsumes the standalone relate tool.
+    /// Most common use: contributing toward a Goal via
+    /// `{ target_id: goal_id, relationship_type: "achieves" }`, then later
+    /// closing it with `consolidate(goal_id)`.
+    #[schemars(length(max = 20))]
+    pub related_to: Option<Vec<RelationshipSpec>>,
 }
 
 /// Remember tool parameters
@@ -334,19 +362,9 @@ pub struct ForgetParams {
     pub role: Option<String>,
 }
 
-/// Memory graph tool parameters
+/// Consolidate tool parameters
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct MemoryGraphParams {
-    /// Root memory ID
-    pub memory_id: String,
-    /// Traversal depth (default 2; use 3+ for broad exploration)
-    #[schemars(range(min = 1, max = 5))]
-    pub depth: Option<usize>,
-}
-
-/// Consolidate-goal tool parameters
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ConsolidateGoalParams {
+pub struct ConsolidateParams {
     /// ID of the Goal memory to close. Memory type must be Goal.
     pub goal_id: String,
     /// Optional explicit summary text for the consolidated parent memory.
@@ -354,38 +372,6 @@ pub struct ConsolidateGoalParams {
     /// source memory titles.
     #[schemars(length(max = 4000))]
     pub summary: Option<String>,
-}
-
-/// Sleep-consolidate tool parameters
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SleepConsolidateParams {
-    /// Cosine similarity threshold (0.0-1.0) for two memories to share a cluster.
-    /// Higher = stricter clusters (fewer, denser); lower = looser (more, fuzzier).
-    #[schemars(range(min = 0.0, max = 1.0))]
-    pub threshold: Option<f32>,
-    /// Minimum cluster size required to consolidate. Default 3.
-    #[schemars(range(min = 2, max = 50))]
-    pub min_size: Option<usize>,
-    /// Only consider Working-state memories created in the last N days. Default 7.
-    #[schemars(range(min = 1, max = 365))]
-    pub max_age_days: Option<u32>,
-}
-
-/// Relate tool parameters
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct RelateParams {
-    /// Source memory ID
-    pub source_id: String,
-    /// Target memory ID
-    pub target_id: String,
-    /// Relationship type: related_to (general), depends_on (A needs B), supersedes (A replaces B), similar (near-duplicate), conflicts (contradicts), implements (concrete of abstract), extends (builds on)
-    pub relationship_type: RelationshipKind,
-    /// Relationship strength 0.0-1.0
-    #[schemars(range(min = 0.0, max = 1.0))]
-    pub strength: Option<f32>,
-    /// Why these memories are related
-    #[schemars(length(max = 500))]
-    pub description: Option<String>,
 }
 
 /// Command for the knowledge tool
@@ -525,85 +511,18 @@ impl McpServer {
     }
 
     #[tool(
-        name = "memory_graph",
-        description = "Retrieve a memory and its connected neighbors as a graph. remember already includes 1-hop neighbors — use this only for deeper traversal (depth > 1) or to see the full relationship structure."
+        name = "consolidate",
+        description = "Close a Goal memory by summarizing all source memories that Achieve it into a new consolidated parent memory. Sources transition to Consolidated state with dampened importance but remain queryable for audit. Use when a task / project / intent completes and you want its supporting context compressed into a single retrievable insight. The new memory inherits importance = max(sources) * 1.1 (clamped). Provide a summary if you want full control over the consolidated content; omit it to get a deterministic synthesis of source titles. To link memories to a Goal before consolidating, use the `related_to` parameter on `memorize` with `relationship_type: \"achieves\"`."
     )]
-    async fn memory_graph(
+    async fn consolidate(
         &self,
-        Parameters(params): Parameters<MemoryGraphParams>,
-    ) -> Result<String, McpError> {
-        let provider = self.get_or_init_memory().await?;
-
-        let args = serde_json::to_value(&params).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize params: {}", e), None)
-        })?;
-
-        provider.execute_memory_graph(&args).await.map_err(|e| {
-            McpError::internal_error(
-                e.message,
-                Some(serde_json::to_value(e.operation).unwrap_or_default()),
-            )
-        })
-    }
-
-    #[tool(
-        name = "consolidate_goal",
-        description = "Close a Goal memory by summarizing all source memories that Achieve it into a new consolidated parent memory. Sources transition to Consolidated state with dampened importance but remain queryable for audit. Use when a task / project / intent completes and you want its supporting context compressed into a single retrievable insight. The new memory inherits importance = max(sources) * 1.1 (clamped). Provide a summary if you want full control over the consolidated content; omit it to get a deterministic synthesis of source titles."
-    )]
-    async fn consolidate_goal(
-        &self,
-        Parameters(params): Parameters<ConsolidateGoalParams>,
+        Parameters(params): Parameters<ConsolidateParams>,
     ) -> Result<String, McpError> {
         let provider = self.get_or_init_memory().await?;
         let args = serde_json::to_value(&params).map_err(|e| {
             McpError::internal_error(format!("Failed to serialize params: {}", e), None)
         })?;
-        provider.execute_consolidate_goal(&args).await.map_err(|e| {
-            McpError::internal_error(
-                e.message,
-                Some(serde_json::to_value(e.operation).unwrap_or_default()),
-            )
-        })
-    }
-
-    #[tool(
-        name = "sleep_consolidate",
-        description = "Batch-consolidate clusters of similar recent memories. Scans Working-state memories created in the last `max_age_days`, groups ones with mutual cosine similarity ≥ `threshold` into clusters of at least `min_size`, and folds each cluster into a consolidated parent via the same goal-anchored pipeline as `consolidate_goal`. Use periodically (e.g. once a day) to compress redundant episodic memories into summarized abstractions. Defaults: threshold=0.85, min_size=3, max_age_days=7."
-    )]
-    async fn sleep_consolidate(
-        &self,
-        Parameters(params): Parameters<SleepConsolidateParams>,
-    ) -> Result<String, McpError> {
-        let provider = self.get_or_init_memory().await?;
-        let args = serde_json::to_value(&params).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize params: {}", e), None)
-        })?;
-        provider
-            .execute_sleep_consolidate(&args)
-            .await
-            .map_err(|e| {
-                McpError::internal_error(
-                    e.message,
-                    Some(serde_json::to_value(e.operation).unwrap_or_default()),
-                )
-            })
-    }
-
-    #[tool(
-        name = "relate",
-        description = "Create a typed relationship between two memories. Use when auto-linking missed a meaningful connection or you need a specific type. Types: related_to, depends_on, supersedes, similar, conflicts, implements, extends, achieves, closes. Strength 0.9+ = strong, 0.5-0.8 = moderate, <0.5 = weak."
-    )]
-    async fn relate(
-        &self,
-        Parameters(params): Parameters<RelateParams>,
-    ) -> Result<String, McpError> {
-        let provider = self.get_or_init_memory().await?;
-
-        let args = serde_json::to_value(&params).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize params: {}", e), None)
-        })?;
-
-        provider.execute_relate(&args).await.map_err(|e| {
+        provider.execute_consolidate(&args).await.map_err(|e| {
             McpError::internal_error(
                 e.message,
                 Some(serde_json::to_value(e.operation).unwrap_or_default()),
