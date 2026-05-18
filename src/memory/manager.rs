@@ -30,6 +30,13 @@ use super::types::{
 use crate::config::Config;
 use crate::embedding::{create_embedding_provider_from_parts, parse_provider_model};
 
+/// How often (in memorize calls) to run LanceDB maintenance.
+/// 250 is small enough that the unindexed delta never gets large enough to
+/// dominate search time, but large enough that the optimize+compact overhead
+/// amortizes well across writes. Empirical: at 500 the delta scan is the
+/// dominant search cost; at 100 the maintenance cost dominates the write path.
+const MAINTENANCE_EVERY_N_WRITES: usize = 250;
+
 /// Parameters for the memorize() call — groups the optional fields to stay under clippy's arg limit.
 #[derive(Debug)]
 pub struct MemorizeParams {
@@ -61,6 +68,16 @@ pub struct MemoryManager {
     /// its source memories. Cosmetic for normal retrieval — but important
     /// for goal consolidation correctness.
     pending_auto_links: Arc<AsyncMutex<Vec<JoinHandle<()>>>>,
+    /// Number of memorize calls since startup. Used to trigger periodic
+    /// LanceDB maintenance (incremental index optimization + file compaction)
+    /// — without this, every insert grows an unindexed "delta" region that
+    /// vector search has to scan linearly, AND creates a new small file
+    /// (LanceDB is append-only). Both progressively slow down ingest.
+    memorize_counter: Arc<AtomicUsize>,
+    /// Single in-flight maintenance task. Held here so we (a) don't spawn
+    /// overlapping maintenance runs and (b) can await it from
+    /// consolidate_goal so retrieval there sees a fully-merged index.
+    pending_maintenance: Arc<AsyncMutex<Option<JoinHandle<()>>>>,
 }
 
 impl MemoryManager {
@@ -115,6 +132,8 @@ impl MemoryManager {
             stale_check_marker,
             sleep_consolidation_marker,
             pending_auto_links: Arc::new(AsyncMutex::new(Vec::new())),
+            memorize_counter: Arc::new(AtomicUsize::new(0)),
+            pending_maintenance: Arc::new(AsyncMutex::new(None)),
         };
 
         // Lazy cleanup of stale file references on init (like knowledge session cleanup)
@@ -419,6 +438,15 @@ impl MemoryManager {
         // Store the memory — caller waits only for this.
         self.store.store_memory(&memory).await?;
 
+        // Bump write counter; trigger periodic LanceDB maintenance when due.
+        // Maintenance is cheap when there's nothing new to optimize, and
+        // critical for keeping vector search O(log N) instead of O(N) as the
+        // unindexed delta grows.
+        let n = self.memorize_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        if n.is_multiple_of(MAINTENANCE_EVERY_N_WRITES) {
+            self.spawn_maintenance_if_idle();
+        }
+
         // Auto-link runs fire-and-forget on a tokio task so memorize returns
         // immediately. consolidate_goal drains pending handles before running,
         // so a goal-close never races against in-flight auto-links of its
@@ -462,6 +490,51 @@ impl MemoryManager {
                 }
             }
         }
+        self.drain_pending_maintenance().await;
+    }
+
+    /// Await an in-flight maintenance task if one is running. Called from
+    /// `drain_pending_auto_links` so retrieval after a `consolidate_goal`
+    /// sees a fully-merged index.
+    async fn drain_pending_maintenance(&self) {
+        let handle = {
+            let mut guard = self.pending_maintenance.lock().await;
+            guard.take()
+        };
+        if let Some(h) = handle {
+            if let Err(e) = h.await {
+                if e.is_panic() {
+                    tracing::warn!("maintenance task panicked: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Spawn a LanceDB maintenance pass (incremental index optimize + file
+    /// compaction) if one isn't already in flight. If the previous
+    /// maintenance handle is still running we skip — it'll absorb the new
+    /// rows when it next runs, so we never starve maintenance. If the
+    /// previous handle finished, we replace it. Best-effort: errors inside
+    /// the task are logged but never propagated to memorize.
+    fn spawn_maintenance_if_idle(&self) {
+        let store = self.store.clone();
+        let pending = self.pending_maintenance.clone();
+        tokio::spawn(async move {
+            let mut guard = pending.lock().await;
+            // Replace finished handles so a new pass can run; skip while one
+            // is still mid-flight.
+            if let Some(ref h) = *guard {
+                if !h.is_finished() {
+                    return;
+                }
+            }
+            let handle = tokio::spawn(async move {
+                if let Err(e) = store.run_maintenance().await {
+                    tracing::warn!("LanceDB maintenance pass failed: {}", e);
+                }
+            });
+            *guard = Some(handle);
+        });
     }
 
     /// Remember (search) memories based on query
