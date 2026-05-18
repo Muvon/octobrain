@@ -16,6 +16,10 @@ use anyhow::Result;
 use chrono::{Duration, Utc};
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tokio::sync::Mutex as AsyncMutex;
+use tokio::task::JoinHandle;
 
 use super::git_utils::{FileFate, GitUtils, RenameMap};
 use super::store::MemoryStore;
@@ -39,13 +43,24 @@ pub struct MemorizeParams {
 }
 /// High-level memory management interface
 pub struct MemoryManager {
-    store: MemoryStore,
+    /// Wrapped in Arc so fire-and-forget background tasks (currently:
+    /// post-memorize auto-linking) can hold their own clone of the store
+    /// for as long as they need. All MemoryStore mutating methods now
+    /// take `&self` via internal LanceDB `Table` mutability, so no top-
+    /// level lock is needed — concurrent reads + writes are safe.
+    store: Arc<MemoryStore>,
     config: MemoryConfig,
     /// Path to the stale-check marker file for incremental git scanning
     stale_check_marker: PathBuf,
     /// Path to the sleep-consolidation marker file; stores last-run RFC3339 timestamp.
     /// Lazy auto-consolidation is gated by `(now - last_run) >= interval_hours`.
     sleep_consolidation_marker: PathBuf,
+    /// JoinHandles for in-flight fire-and-forget auto-link tasks. memorize
+    /// pushes here when spawning; consolidate_goal drains (awaits) before
+    /// running so a goal-close never races against in-flight auto-links of
+    /// its source memories. Cosmetic for normal retrieval — but important
+    /// for goal consolidation correctness.
+    pending_auto_links: Arc<AsyncMutex<Vec<JoinHandle<()>>>>,
 }
 
 impl MemoryManager {
@@ -95,10 +110,11 @@ impl MemoryManager {
         .await?;
 
         let mut manager = Self {
-            store,
+            store: Arc::new(store),
             config: memory_config,
             stale_check_marker,
             sleep_consolidation_marker,
+            pending_auto_links: Arc::new(AsyncMutex::new(Vec::new())),
         };
 
         // Lazy cleanup of stale file references on init (like knowledge session cleanup)
@@ -400,15 +416,52 @@ impl MemoryManager {
 
         let memory = Memory::new(memory_type, title, content, Some(metadata));
 
-        // Store the memory
+        // Store the memory — caller waits only for this.
         self.store.store_memory(&memory).await?;
 
-        // Auto-link to similar memories and file-sharing memories if enabled
+        // Auto-link runs fire-and-forget on a tokio task so memorize returns
+        // immediately. consolidate_goal drains pending handles before running,
+        // so a goal-close never races against in-flight auto-links of its
+        // own sources. Errors logged via tracing::warn from inside the task.
         if self.config.auto_linking_enabled {
-            self.auto_link_memory(&memory.id).await?;
+            let store = self.store.clone();
+            let config = self.config.clone();
+            let memory_id = memory.id.clone();
+            let handle = tokio::spawn(async move {
+                if let Err(e) = auto_link_memory_impl(store, config, &memory_id).await {
+                    tracing::warn!(
+                        "fire-and-forget auto-link for memory '{}' failed: {}",
+                        memory_id,
+                        e
+                    );
+                }
+            });
+            // Track the handle so consolidate_goal can wait for completion.
+            self.pending_auto_links.lock().await.push(handle);
         }
 
         Ok(memory)
+    }
+
+    /// Await all in-flight fire-and-forget auto-link tasks and drain the
+    /// handle list. Called by `consolidate_goal` (and any other operation
+    /// that depends on the relationship graph being fully built) so we
+    /// never race against background work. Tasks that have already
+    /// completed are joined trivially.
+    async fn drain_pending_auto_links(&self) {
+        let handles: Vec<JoinHandle<()>> = {
+            let mut guard = self.pending_auto_links.lock().await;
+            std::mem::take(&mut *guard)
+        };
+        for h in handles {
+            // JoinHandle returns Result<()>; the inner function already
+            // logged any operational error, so we only care about panics.
+            if let Err(e) = h.await {
+                if e.is_panic() {
+                    tracing::warn!("auto-link task panicked: {}", e);
+                }
+            }
+        }
     }
 
     /// Remember (search) memories based on query
@@ -750,6 +803,11 @@ impl MemoryManager {
         parent_id: Option<String>,
         summary: Option<String>,
     ) -> Result<Memory> {
+        // Wait for any in-flight auto-link tasks to finish before we walk the
+        // relationship graph. Otherwise sources just memorized but not yet
+        // auto-linked could be missed by `Achieves` lookups.
+        self.drain_pending_auto_links().await;
+
         let goal = self
             .store
             .get_memory(goal_id)
@@ -1017,123 +1075,127 @@ impl MemoryManager {
         Ok(consolidated)
     }
 
-    /// Automatically link a memory to similar memories based on semantic similarity
-    /// Creates bidirectional AutoLinked relationships
-    pub async fn auto_link_memory(&mut self, memory_id: &str) -> Result<Vec<MemoryRelationship>> {
-        if !self.config.auto_linking_enabled {
-            return Ok(Vec::new());
+    /// Automatically link a memory to similar memories based on semantic similarity.
+    /// Creates bidirectional AutoLinked relationships. Synchronous: the caller
+    /// awaits completion. For fire-and-forget use, `memorize` spawns
+    /// `auto_link_memory_impl` directly on a tokio task.
+    pub async fn auto_link_memory(&self, memory_id: &str) -> Result<Vec<MemoryRelationship>> {
+        auto_link_memory_impl(self.store.clone(), self.config.clone(), memory_id).await
+    }
+}
+
+/// Free-function implementation of auto-linking so it can be spawned on a tokio
+/// task that doesn't borrow `self`. Takes an `Arc<MemoryStore>` (cheap clone)
+/// and a snapshot of the `MemoryConfig`. Both the method version above and the
+/// fire-and-forget path in `memorize` delegate here, so behavior stays consistent.
+pub(crate) async fn auto_link_memory_impl(
+    store: Arc<MemoryStore>,
+    config: MemoryConfig,
+    memory_id: &str,
+) -> Result<Vec<MemoryRelationship>> {
+    if !config.auto_linking_enabled {
+        return Ok(Vec::new());
+    }
+
+    // 1. Get the memory
+    let memory = store
+        .get_memory(memory_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Memory not found: {}", memory_id))?;
+
+    // 2. Search for similar memories with high threshold
+    let query = MemoryQuery {
+        query_text: Some(memory.get_searchable_text()),
+        limit: Some(config.max_auto_links_per_memory * 2), // Get more candidates
+        min_relevance: Some(config.auto_link_threshold),
+        ..Default::default()
+    };
+
+    let similar = store.search_memories(&query).await?;
+
+    // 3. Create bidirectional similarity relationships
+    let mut relationships = Vec::new();
+    let mut link_count = 0;
+
+    for result in similar.iter() {
+        if result.memory.id == memory_id {
+            continue;
+        }
+        if link_count >= config.max_auto_links_per_memory {
+            break;
         }
 
-        // 1. Get the memory
-        let memory = self
-            .store
-            .get_memory(memory_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Memory not found: {}", memory_id))?;
-
-        // 2. Search for similar memories with high threshold
-        let query = MemoryQuery {
-            query_text: Some(memory.get_searchable_text()),
-            limit: Some(self.config.max_auto_links_per_memory * 2), // Get more candidates
-            min_relevance: Some(self.config.auto_link_threshold),
-            ..Default::default()
+        let forward_rel = MemoryRelationship {
+            id: uuid::Uuid::new_v4().to_string(),
+            source_id: memory_id.to_string(),
+            target_id: result.memory.id.clone(),
+            relationship_type: RelationshipType::AutoLinked,
+            strength: result.relevance_score,
+            description: format!("Auto-linked (similarity: {:.2})", result.relevance_score),
+            created_at: Utc::now(),
         };
+        store.store_relationship(&forward_rel).await?;
+        relationships.push(forward_rel);
 
-        let similar = self.store.search_memories(&query).await?;
-
-        // 3. Create bidirectional similarity relationships
-        let mut relationships = Vec::new();
-        let mut link_count = 0;
-
-        for result in similar.iter() {
-            // Skip self-linking
-            if result.memory.id == memory_id {
-                continue;
-            }
-
-            // Stop if we've reached max links
-            if link_count >= self.config.max_auto_links_per_memory {
-                break;
-            }
-
-            // Create forward link (source -> target)
-            let forward_rel = MemoryRelationship {
+        if config.bidirectional_links {
+            let backward_rel = MemoryRelationship {
                 id: uuid::Uuid::new_v4().to_string(),
-                source_id: memory_id.to_string(),
-                target_id: result.memory.id.clone(),
+                source_id: result.memory.id.clone(),
+                target_id: memory_id.to_string(),
                 relationship_type: RelationshipType::AutoLinked,
                 strength: result.relevance_score,
                 description: format!("Auto-linked (similarity: {:.2})", result.relevance_score),
                 created_at: Utc::now(),
             };
-
-            self.store.store_relationship(&forward_rel).await?;
-            relationships.push(forward_rel);
-
-            // Create backward link if bidirectional (target -> source)
-            if self.config.bidirectional_links {
-                let backward_rel = MemoryRelationship {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    source_id: result.memory.id.clone(),
-                    target_id: memory_id.to_string(),
-                    relationship_type: RelationshipType::AutoLinked,
-                    strength: result.relevance_score,
-                    description: format!("Auto-linked (similarity: {:.2})", result.relevance_score),
-                    created_at: Utc::now(),
-                };
-
-                self.store.store_relationship(&backward_rel).await?;
-                relationships.push(backward_rel);
-            }
-
-            link_count += 1;
+            store.store_relationship(&backward_rel).await?;
+            relationships.push(backward_rel);
         }
-
-        // 4. File-based relationships: link memories that share related files
-        //    Only consider files that still exist on disk to avoid linking via dead references
-        let live_files: Vec<String> = memory
-            .metadata
-            .related_files
-            .iter()
-            .filter(|f| GitUtils::file_exists(f))
-            .cloned()
-            .collect();
-        if !live_files.is_empty() {
-            let file_query = MemoryQuery {
-                related_files: Some(live_files),
-                limit: Some(10),
-                ..Default::default()
-            };
-
-            let file_related = self.store.search_memories(&file_query).await?;
-            for result in file_related {
-                if result.memory.id == memory_id {
-                    continue;
-                }
-                // Skip if already linked by similarity pass
-                if relationships.iter().any(|r: &MemoryRelationship| {
-                    r.target_id == result.memory.id || r.source_id == result.memory.id
-                }) {
-                    continue;
-                }
-
-                let file_rel = MemoryRelationship {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    source_id: memory_id.to_string(),
-                    target_id: result.memory.id.clone(),
-                    relationship_type: RelationshipType::RelatedTo,
-                    strength: 0.7,
-                    description: "Shares related files".to_string(),
-                    created_at: Utc::now(),
-                };
-                self.store.store_relationship(&file_rel).await?;
-                relationships.push(file_rel);
-            }
-        }
-
-        Ok(relationships)
+        link_count += 1;
     }
 
+    // 4. File-based relationships: link memories that share related files —
+    //    only files still alive on disk, to avoid linking through dead refs.
+    let live_files: Vec<String> = memory
+        .metadata
+        .related_files
+        .iter()
+        .filter(|f| GitUtils::file_exists(f))
+        .cloned()
+        .collect();
+    if !live_files.is_empty() {
+        let file_query = MemoryQuery {
+            related_files: Some(live_files),
+            limit: Some(10),
+            ..Default::default()
+        };
+        let file_related = store.search_memories(&file_query).await?;
+        for result in file_related {
+            if result.memory.id == memory_id {
+                continue;
+            }
+            if relationships.iter().any(|r: &MemoryRelationship| {
+                r.target_id == result.memory.id || r.source_id == result.memory.id
+            }) {
+                continue;
+            }
+            let file_rel = MemoryRelationship {
+                id: uuid::Uuid::new_v4().to_string(),
+                source_id: memory_id.to_string(),
+                target_id: result.memory.id.clone(),
+                relationship_type: RelationshipType::RelatedTo,
+                strength: 0.7,
+                description: "Shares related files".to_string(),
+                created_at: Utc::now(),
+            };
+            store.store_relationship(&file_rel).await?;
+            relationships.push(file_rel);
+        }
+    }
+
+    Ok(relationships)
+}
+
+impl MemoryManager {
     /// Get memory graph starting from a memory ID with specified depth
     /// Uses BFS to traverse relationships and build a graph
     pub async fn get_memory_graph(
