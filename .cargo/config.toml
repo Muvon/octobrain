@@ -11,6 +11,10 @@ rustflags = [
 rustflags = [
     "-C", "target-feature=+crt-static",
     "-C", "link-arg=-static",
+    # Disable fp16: rustc incorrectly reports this feature as enabled on some
+    # aarch64 CI runners, causing gemm-common to emit fullfp16 instructions
+    # the CPU doesn't support (rustc issue #95122).
+    "-C", "target-feature=-fp16",
 ]
 
 # Windows MSVC targets: keep +crt-static at the .cargo/config level (matches
