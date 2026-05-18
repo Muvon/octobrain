@@ -1,6 +1,6 @@
 # Cargo configuration for cross-compilation and optimization
 
-# Linux musl targets: static CRT for fully-static binaries
+# Linux musl targets for static linking
 [target.x86_64-unknown-linux-musl]
 rustflags = [
     "-C", "target-feature=+crt-static",
@@ -13,21 +13,20 @@ rustflags = [
     "-C", "link-arg=-static",
 ]
 
-# Windows MSVC: dynamic CRT (-crt-static) so Rust matches ORT prebuilts.
-# Pyke's prebuilt onnxruntime is compiled with /MD (dynamic CRT). Rust on
-# MSVC defaults to /MT (static CRT) → __imp_* unresolved-symbol link errors.
-# vcruntime140.dll is present on all Windows hosts.
+# Windows MSVC targets: keep +crt-static at the .cargo/config level (matches
+# octocode). Release/CI pipelines override to -crt-static at build time via
+# RUSTFLAGS so Rust matches pyke's /MD-built ORT prebuilts.
 [target.x86_64-pc-windows-msvc]
 rustflags = [
-    "-C", "target-feature=-crt-static",
+    "-C", "target-feature=+crt-static",
 ]
 
 [target.aarch64-pc-windows-msvc]
 rustflags = [
-    "-C", "target-feature=-crt-static",
+    "-C", "target-feature=+crt-static",
 ]
 
-# macOS: dynamic lookup so optional weak symbols resolve at runtime
+# macOS targets (dynamic linking)
 [target.aarch64-apple-darwin]
 rustflags = [
     "-C", "link-arg=-undefined",
