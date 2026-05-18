@@ -532,6 +532,28 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Periodic ingest-time maintenance. Combines:
+    ///
+    /// 1. `ensure_optimal_index` — builds the IVF_PQ index once row count
+    ///    crosses the threshold (1000 rows by default).
+    /// 2. `Table::optimize(OptimizeAction::All)` — folds newly-inserted rows
+    ///    into the existing index incrementally (cheap, no retraining) AND
+    ///    compacts the many small files LanceDB writes per insert.
+    ///
+    /// Without this called periodically during a high-write workload (e.g.
+    /// ingesting ~25K memories), vector search progressively slows down
+    /// because new rows live in an unindexed "delta" that gets linearly
+    /// scanned alongside the indexed region. Per LanceDB docs:
+    /// <https://lancedb.com/docs/indexing/reindexing/>
+    pub async fn run_maintenance(&self) -> Result<()> {
+        self.ensure_optimal_index().await?;
+        // OptimizeAction::All = Compact + Index incremental + Prune. The
+        // Index part is the one that absorbs the unindexed delta into the
+        // existing IVF index without retraining. Compact merges small files.
+        self.memories_table.optimize(OptimizeAction::All).await?;
+        Ok(())
+    }
+
     /// Ensure optimal vector index for memories table (call periodically, not on every store)
     pub async fn ensure_optimal_index(&self) -> Result<()> {
         let row_count = self.memories_table.count_rows(None).await?;
