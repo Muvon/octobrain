@@ -97,6 +97,10 @@ def ingest_instance(client: OctobrainClient, inst: dict) -> int:
         transcript = "\n".join(lines)
         if len(transcript) > 9900:
             transcript = transcript[:9900] + "\n…[truncated]"
+        # Octobrain validates 10..10000 chars. Pad very short transcripts
+        # (rare — happens when a session is e.g. "user: ok" / "assistant: ok").
+        if len(transcript) < 10:
+            transcript = transcript + " " + "(short session)"
 
         # Title is a short summary of the first turn for readability/retrieval.
         first_line = lines[0]
@@ -126,14 +130,38 @@ def answer_question(client: OctobrainClient, llm: LLMClient, question: str, k: i
         return ""
 
 
-def write_hypothesis(out_file: Path, records: Iterable[dict]) -> int:
+def load_completed_qids(hypothesis_file: Path) -> set[str]:
+    """Return the set of question_ids already present in hypothesis.jsonl.
+    Lets a crashed run resume without re-doing finished questions — critical
+    for the ~10-hour full LongMemEval run.
+    """
+    if not hypothesis_file.exists():
+        return set()
+    qids: set[str] = set()
+    with hypothesis_file.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                qid = rec.get("question_id")
+                if qid:
+                    qids.add(qid)
+            except json.JSONDecodeError:
+                continue
+    return qids
+
+
+def append_hypothesis(out_file: Path, record: dict) -> None:
+    """Append a single hypothesis as a JSONL line, fsync so we don't lose
+    the answer if the process is killed before exit. Cheap insurance.
+    """
     out_file.parent.mkdir(parents=True, exist_ok=True)
-    n = 0
-    with out_file.open("w") as f:
-        for r in records:
-            f.write(json.dumps(r) + "\n")
-            n += 1
-    return n
+    with out_file.open("a") as f:
+        f.write(json.dumps(record) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def main() -> int:
@@ -163,11 +191,25 @@ def main() -> int:
         log.info("MAX_QUESTIONS=%d → limiting to %d instances", max_q, len(instances))
     log.info("%d instances to process", len(instances))
 
+    # Resume protection: if hypothesis.jsonl already has answers from a
+    # previously-killed run, skip those question_ids instead of redoing
+    # them. The OpenAI embedding + agent LLM cost of a single instance is
+    # non-trivial; the cost of redoing 400 instances after a crash on #450
+    # is catastrophic.
+    done_qids = load_completed_qids(args.hypothesis_file)
+    if done_qids:
+        log.info(
+            "resume detected: %d hypotheses already in %s — skipping those",
+            len(done_qids),
+            args.hypothesis_file,
+        )
+
     llm = LLMClient(LLMConfig.from_env("AGENT_MODEL"))
     log.info("agent model: %s", llm.model)
 
-    records: list[dict] = []
     t0 = time.monotonic()
+    written = 0
+    skipped = 0
 
     # One octobrain MCP session per run (spawned over stdio by the SDK). We
     # re-ingest per instance because LongMemEval haystacks differ between
@@ -191,21 +233,40 @@ def main() -> int:
         log.info("probe ok in %.2fs (%s)", time.monotonic() - t_probe, probe[:80])
 
         for inst in tqdm(instances, desc="instances", unit="q"):
-            qid = inst.get("question_id") or inst.get("id") or f"q-{len(records)}"
+            qid = (
+                inst.get("question_id")
+                or inst.get("id")
+                or f"q-{written + skipped}"
+            )
             question = inst.get("question") or inst.get("query") or ""
             if not question:
                 log.warning("instance %s has no question, skipping", qid)
+                continue
+
+            if qid in done_qids:
+                skipped += 1
                 continue
 
             n_mem = ingest_instance(ob, inst)
             log.info("instance %s ingested %d memories", qid, n_mem)
 
             hypothesis = answer_question(ob, llm, question, k=args.k)
-            records.append({"question_id": qid, "hypothesis": hypothesis})
+            # Persist immediately — if the process dies after this line,
+            # this answer is still on disk. Next run picks up from here.
+            append_hypothesis(
+                args.hypothesis_file,
+                {"question_id": qid, "hypothesis": hypothesis},
+            )
+            written += 1
 
     elapsed = time.monotonic() - t0
-    n = write_hypothesis(args.hypothesis_file, records)
-    log.info("wrote %d hypotheses to %s in %.1fs", n, args.hypothesis_file, elapsed)
+    log.info(
+        "done in %.1fs: %d new hypotheses appended, %d skipped (already in %s)",
+        elapsed,
+        written,
+        skipped,
+        args.hypothesis_file,
+    )
     return 0
 
 
