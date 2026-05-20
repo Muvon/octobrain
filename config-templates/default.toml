@@ -20,7 +20,7 @@
 #   openai:text-embedding-3-small    OPENAI_API_KEY
 #   google:text-embedding-004        GOOGLE_API_KEY
 #   jina:jina-embeddings-v3          JINA_API_KEY
-model = "fastembed:BAAI/bge-small-en-v1.5"
+text_model = "fastembed:nomic-ai/nomic-embed-text-v1.5"
 
 # Batch size for embedding generation (number of texts to process at once)
 # Default: 32
@@ -71,11 +71,11 @@ recency_decay_days = 30
 # Uses cross-encoder models to score query-document pairs
 # Improves accuracy by 20-35% and reduces hallucinations by 35%
 # Default: false (disabled by default for backward compatibility)
-enabled = false
+enabled = true
 
 # Reranker model (fully qualified, e.g., voyage:rerank-2.5, voyage:rerank-2.5-lite)
 # Default: voyage:rerank-2.5
-model = "voyage:rerank-2.5"
+model = "fastembed:jina-reranker-v2-base-multilingual"
 
 # Number of candidates to retrieve before reranking
 # Retrieve more candidates for better reranking accuracy

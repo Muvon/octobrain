@@ -225,6 +225,16 @@ jobs:
               export C_INCLUDE_PATH=/tmp/include
               export CPLUS_INCLUDE_PATH=/tmp/include
 
+              # Pin the toolchain to the exact alpine-musl triple. rust-toolchain.toml
+              # specifies just channel = 1.95.0; on later rustup invocations after the
+              # ORT/apk steps, rustup re-detects the host and has been observed to
+              # flip from aarch64-unknown-linux-musl to -gnu, then auto-installs a
+              # fresh gnu toolchain with no musl rust-std, producing the rustc error
+              # E0463 "cannot find crate for core".
+              # RUSTUP_TOOLCHAIN with an explicit triple overrides the toml resolution
+              # and bypasses host re-detection.
+              export RUSTUP_TOOLCHAIN=1.95.0-${{ matrix.target }}
+
               rustup target add ${{ matrix.target }}
 
               ORT_SRC=/workspace/onnxruntime-src
@@ -259,7 +269,17 @@ jobs:
               apk add --no-cache protobuf-dev
 
               export ORT_LIB_LOCATION="$ORT_LIB_LOCATION"
-              export RUSTFLAGS="-C link-arg=-lgcc"
+              # +fp16: gemm-common 0.19.0 emits inline aarch64 SIMD asm using
+              # FP16 instructions (fmla/fmul .8h) that need ARMv8.2-A fullfp16.
+              # Alpine generic aarch64 baseline omits this feature, so LLVM
+              # rejects the asm at compile time. ubuntu-22.04-arm runs on
+              # ARMv8.2+ hardware (Graviton/Neoverse) so +fp16 is safe.
+              # Setting RUSTFLAGS via env overrides .cargo/config.toml entirely,
+              # so flags must be re-applied here.
+              case "${{ matrix.target }}" in
+                aarch64-*) export RUSTFLAGS="-C link-arg=-lgcc -C target-feature=+fp16" ;;
+                *)         export RUSTFLAGS="-C link-arg=-lgcc" ;;
+              esac
               cargo build --target ${{ matrix.target }}
             '
 
