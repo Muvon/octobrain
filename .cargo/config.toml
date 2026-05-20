@@ -1,6 +1,6 @@
 # Cargo configuration for cross-compilation and optimization
 
-# Linux musl targets: static CRT for fully-static binaries
+# Linux musl targets for static linking
 [target.x86_64-unknown-linux-musl]
 rustflags = [
     "-C", "target-feature=+crt-static",
@@ -11,27 +11,37 @@ rustflags = [
 rustflags = [
     "-C", "target-feature=+crt-static",
     "-C", "link-arg=-static",
+    # gemm-common 0.19.0 emits fp16 SIMD asm (.8h) in functions without a
+    # #[target_feature(enable = "fp16")] guard, so LLVM rejects the asm unless
+    # fullfp16 is enabled. +fp16 lets the asm assemble; gemm dispatches these
+    # paths at runtime via CPU detection, so chips without fullfp16 never
+    # execute them. (Note: RUSTFLAGS env in CI/release docker scripts replaces
+    # this entirely — keep flags in sync there.)
+    "-C", "target-feature=+fp16",
 ]
 
-# Windows MSVC: dynamic CRT (-crt-static) so Rust matches ORT prebuilts.
-# Pyke's prebuilt onnxruntime is compiled with /MD (dynamic CRT). Rust on
-# MSVC defaults to /MT (static CRT) → __imp_* unresolved-symbol link errors.
-# vcruntime140.dll is present on all Windows hosts.
+# Windows MSVC targets: keep +crt-static at the .cargo/config level (matches
+# octocode). Release/CI pipelines override to -crt-static at build time via
+# RUSTFLAGS so Rust matches pyke's /MD-built ORT prebuilts.
 [target.x86_64-pc-windows-msvc]
 rustflags = [
-    "-C", "target-feature=-crt-static",
+    "-C", "target-feature=+crt-static",
 ]
 
 [target.aarch64-pc-windows-msvc]
 rustflags = [
-    "-C", "target-feature=-crt-static",
+    "-C", "target-feature=+crt-static",
 ]
 
-# macOS: dynamic lookup so optional weak symbols resolve at runtime
+# macOS targets (dynamic linking)
 [target.aarch64-apple-darwin]
 rustflags = [
     "-C", "link-arg=-undefined",
     "-C", "link-arg=dynamic_lookup",
+    # Apple Silicon (M1+) implements ARMv8.2-A which includes fullfp16.
+    # gemm-common 0.19.0 emits fp16 SIMD asm (.8h) that LLVM rejects unless
+    # this feature is explicitly enabled (LLVM doesn't infer it from CPU probing).
+    "-C", "target-feature=+fp16",
 ]
 
 [target.x86_64-apple-darwin]
