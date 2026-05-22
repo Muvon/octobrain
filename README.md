@@ -99,6 +99,9 @@ octobrain memory remember "api design patterns"
 # Multi-query search for broader coverage
 octobrain memory remember "authentication" "security" "jwt"
 
+# Get a memory by ID
+octobrain memory get <id>
+
 # Get recent memories
 octobrain memory recent --limit 20
 
@@ -116,6 +119,18 @@ octobrain memory update <id> --title "New Title" --add-tags "new-tag"
 
 # Delete a memory
 octobrain memory forget --memory-id <id>
+```
+
+### Memory Consolidation
+
+Close a goal and fold all its contributing memories into a consolidated summary:
+
+```bash
+# Consolidate a goal (all Achieves-link sources get archived)
+octobrain memory consolidate <goal-id> --summary "Final summary"
+
+# Sleep consolidation: auto-cluster recent similar memories
+octobrain memory sleep-consolidate --threshold 0.85 --min-size 3
 ```
 
 ### Memory Relationships
@@ -191,18 +206,10 @@ octobrain mcp --bind 0.0.0.0:12345
 
 **Available MCP Tools:**
 
-| Tool | Description |
-|------|-------------|
-| `memorize` | Store memories with metadata |
-| `remember` | Semantic search with filters |
+| `memorize` | Store memories with metadata; optional `related_to` for inline relationships |
+| `remember` | Semantic search with filters; returns 1-hop graph neighbors |
 | `forget` | Delete memories (requires confirmation) |
-| `relate` | Create relationships between memories |
-| `auto_link` | Auto-connect similar memories |
-| `memory_graph` | Explore memory relationships |
-| `knowledge_search` | Search indexed knowledge |
-| `knowledge_read` | Fetch full text content of a source |
-| `knowledge_match` | Search indexed content by regex pattern |
-
+| `knowledge` | Unified tool: `search`, `store`, `delete`, `read`, `match` via `command` field |
 See [MCP Integration](#mcp-integration) for Claude Desktop setup.
 
 ## Features
@@ -215,7 +222,8 @@ See [MCP Integration](#mcp-integration) for Claude Desktop setup.
 - **Knowledge Indexing** — Ingest URLs, PDFs, docs for retrieval
 - **Project Scoping** — Isolate memories per Git project or share across projects
 - **Role Filtering** — Tag memories by role (developer, reviewer, etc.)
-- **MCP Protocol** — Full MCP 2025-11-25 compliance for AI tool integration
+- **Query Expansion (HyDE-lite)** — Pseudo-relevance feedback for +10-30% recall on long-tail queries
+- **MCP Protocol** — Full MCP 2025-03-26 compliance for AI tool integration
 
 ## Configuration
 
@@ -225,12 +233,12 @@ Configuration is stored in `~/.local/share/octobrain/config.toml`. All options h
 
 | Section | Option | Default | Description |
 |---------|--------|---------|-------------|
-| `[embedding]` | `model` | `fastembed:BAAI/bge-small-en-v1.5` | Embedding model (provider:model format). Default is a local fastembed model — no API key, runs on CPU. |
+| `[embedding]` | `model` | `fastembed:nomic-ai/nomic-embed-text-v1.5` | Embedding model (provider:model format). Default is a local fastembed model — no API key, runs on CPU. |
 | `[search]` | `similarity_threshold` | `0.3` | Minimum relevance (0.0-1.0) |
 | `[search.hybrid]` | `enabled` | `true` | Enable BM25 + vector fusion |
-| `[search.reranker]` | `enabled` | `false` | Enable cross-encoder reranking |
+| `[search.reranker]` | `enabled` | `true` | Enable cross-encoder reranking |
+| `[search.hyde]` | `enabled` | `true` | Pseudo-relevance feedback query expansion |
 | `[memory]` | `max_memories` | `10000` | Maximum stored memories |
-| `[memory]` | `decay_enabled` | `true` | Enable temporal importance decay |
 | `[memory]` | `auto_linking_enabled` | `true` | Auto-connect similar memories |
 | `[knowledge]` | `chunk_size` | `1200` | Characters per chunk |
 
@@ -239,11 +247,11 @@ Configuration is stored in `~/.local/share/octobrain/config.toml`. All options h
 ```toml
 [embedding]
 # Local models (no API key, runs on CPU, model auto-downloaded on first use)
-model = "fastembed:BAAI/bge-small-en-v1.5"                       # Default: fast + good quality, 384-dim
+model = "fastembed:nomic-ai/nomic-embed-text-v1.5"                      # Default: 768-dim, 8192-token context
+model = "fastembed:BAAI/bge-small-en-v1.5"                              # 384-dim, ~62 MTEB, fast + good quality
 model = "fastembed:sentence-transformers/all-MiniLM-L6-v2-quantized"  # Smallest (~22MB), fastest
-model = "fastembed:nomic-ai/nomic-embed-text-v1.5"               # 768-dim, 8192-token context
-model = "fastembed:BAAI/bge-base-en-v1.5"                        # Larger (~440MB), higher quality
-model = "fastembed:intfloat/multilingual-e5-small"               # Multilingual
+model = "fastembed:BAAI/bge-base-en-v1.5"                              # Larger (~440MB), higher quality
+model = "fastembed:intfloat/multilingual-e5-small"                     # Multilingual
 
 # Cloud providers (require API keys, generally higher quality)
 model = "voyage:voyage-3.5-lite"          # VOYAGE_API_KEY
@@ -283,6 +291,7 @@ Organize memories by category for better filtering:
 | `communication` | Stakeholder updates, team decisions |
 | `process` | Deployment procedures, runbooks, operations |
 | `insight` | General insights, tips |
+| `goal` | Task/intent anchors for consolidation workflow |
 
 ## MCP Integration
 

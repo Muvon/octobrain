@@ -22,7 +22,7 @@ src/
     formatting.rs      — CLI output formatting
     git_utils.rs       — Git commit/remote detection
     mod.rs             — Module exports
-    *_tests.rs         — hybrid_tests, decay_tests, auto_link_tests, role_tests, reranker_integration
+    *_tests.rs         — hybrid_tests, decay_tests, auto_link_tests, role_tests, hyde_tests, goal_tests, sleep_tests
   knowledge/
     types.rs           — KnowledgeChunk, KnowledgeSearchResult, IndexResult, etc.
     manager.rs         — KnowledgeManager: index, search, read, match, store, delete
@@ -32,8 +32,8 @@ src/
     formatting.rs      — CLI output formatting
     mod.rs             — Module exports
   mcp/
-    server.rs          — McpServer: 6 tools via rmcp macros, stdio + HTTP transports
-    memory.rs          — MemoryProvider: execute_memorize/remember/forget/graph/relate
+    server.rs          — McpServer: 4 tools via rmcp macros, stdio + HTTP transports
+    memory.rs          — MemoryProvider: execute_memorize/remember/forget
     knowledge.rs       — KnowledgeProvider: execute_search/store/delete/read/match
     types.rs           — McpError utilities
     logging.rs         — Server-side logging
@@ -146,15 +146,13 @@ Parent/child model: large content → parent sections stored as `parent_content`
 
 ## MCP Server
 
-**6 tools** (knowledge is a unified tool with a `command` discriminator):
+**4 tools** (knowledge is a unified tool with a `command` discriminator):
 
 | Tool | Purpose |
 |------|---------|
-| `memorize` | Store a memory with type, title, content, tags, importance, source trust |
+| `memorize` | Store a memory with type, title, content, tags, importance, source trust; optional `related_to` for inline relationships |
 | `remember` | Semantic search — single query or array of 2-5 terms; returns 1-hop graph neighbors |
 | `forget` | Delete by `memory_id` or by query+filters; requires `confirm=true` |
-| `relate` | Create typed relationship between two memories |
-| `memory_graph` | BFS graph traversal from a root memory (depth > 1) |
 | `knowledge` | Unified: `search`, `store`, `delete`, `read`, `match` via `command` field |
 
 **Transport modes:**
@@ -165,7 +163,7 @@ Parent/child model: large content → parent sections stored as `parent_content`
 
 ## Memory Types
 
-`code` · `architecture` · `bug_fix` · `feature` · `documentation` · `user_preference` · `decision` · `learning` · `configuration` · `testing` · `performance` · `security` · `validation` · `research` · `workflow` · `requirement` · `design` · `integration` · `communication` · `process` · `insight`
+`code` · `architecture` · `bug_fix` · `feature` · `documentation` · `user_preference` · `decision` · `learning` · `configuration` · `testing` · `performance` · `security` · `validation` · `research` · `workflow` · `requirement` · `design` · `integration` · `communication` · `process` · `insight` · `goal`
 
 ## Storage
 

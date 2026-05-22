@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! MCP Server implementation using the official rmcp SDK
-//! Provides full MCP 2025-11-25 protocol compliance with stdio and HTTP transports
+//! Provides MCP 2025-03-26 protocol compliance with stdio and HTTP transports
 
 use anyhow::Result;
 use rmcp::{
@@ -149,7 +149,7 @@ impl McpServer {
         Ok(())
     }
 
-    /// Run server using HTTP transport (streamable HTTP for MCP 2025-11-25)
+    /// Run server using HTTP transport (streamable HTTP for MCP 2025-03-26)
     pub async fn run_http(self, bind_addr: &str) -> Result<()> {
         use axum::Router;
         use tower_http::cors::{Any, CorsLayer};
@@ -573,10 +573,9 @@ impl ServerHandler for McpServer {
             )
             .with_instructions(
                 "This server provides memory tools for storing and retrieving AI context. \
-                 Use 'memorize' to store information, 'remember' for semantic search, \
-                 'forget' to delete memories, 'memory_graph' to explore memory connections, \
-                 'relate' to create relationships, \
-                 and 'knowledge' to search indexed web content. \
+                 Use 'memorize' to store information (supports 'related_to' for inline relationships), \
+                 'remember' for semantic search, 'forget' to delete memories, \
+                 and 'knowledge' to search/index/read/match indexed content. \
                  The 'knowledge' tool's 'source' parameter is always a SINGLE FILE or URL — never a directory.",
             )
     }
