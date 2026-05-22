@@ -20,7 +20,7 @@
 #   openai:text-embedding-3-small    OPENAI_API_KEY
 #   google:text-embedding-004        GOOGLE_API_KEY
 #   jina:jina-embeddings-v3          JINA_API_KEY
-text_model = "fastembed:nomic-ai/nomic-embed-text-v1.5"
+model = "fastembed:nomic-ai/nomic-embed-text-v1.5"
 
 # Batch size for embedding generation (number of texts to process at once)
 # Default: 32
