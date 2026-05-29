@@ -586,6 +586,16 @@ pub struct MemorySearchResult {
     pub selection_reason: String,
 }
 
+/// Sort search results by descending relevance score.
+/// NaN scores compare as equal, keeping the ordering total so the sort never panics.
+pub(crate) fn sort_by_relevance_desc(results: &mut [MemorySearchResult]) {
+    results.sort_by(|a, b| {
+        b.relevance_score
+            .partial_cmp(&a.relevance_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
 /// Memory relationship between memories
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRelationship {

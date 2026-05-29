@@ -62,7 +62,16 @@ pub(crate) fn rocchio_blend(query: &[f32], centroid: &[f32], alpha: f32) -> Vec<
 
 use super::reranker_integration::RerankerIntegration;
 use super::types::{Memory, MemoryConfig, MemoryQuery, MemoryRelationship, MemorySearchResult};
+use crate::arrow_helpers::{
+    f32_column, f32_column_opt, i32_column_opt, string_column, string_column_opt,
+};
 use crate::embedding::EmbeddingProvider;
+
+/// Escape a string for safe inclusion inside a LanceDB SQL single-quoted literal.
+/// DataFusion (LanceDB's SQL engine) escapes an embedded `'` by doubling it.
+fn escape_sql(value: &str) -> String {
+    value.replace('\'', "''")
+}
 
 /// Build a SQL predicate string for scalar fields that LanceDB can filter at the storage layer.
 ///
@@ -75,14 +84,14 @@ fn build_scalar_predicate(
 ) -> String {
     // project_key is optional — None means no project filter (show all projects)
     let mut parts: Vec<String> = if let Some(key) = project_key {
-        vec![format!("project_key = '{}'", key)]
+        vec![format!("project_key = '{}'", escape_sql(key))]
     } else {
         Vec::new()
     };
 
     // role filter — only applied when a role is set (None = no filter)
     if let Some(role) = role {
-        parts.push(format!("role = '{}'", role));
+        parts.push(format!("role = '{}'", escape_sql(role)));
     }
 
     if let Some(ref memory_types) = query.memory_types {
@@ -105,9 +114,8 @@ fn build_scalar_predicate(
     }
 
     if let Some(ref git_commit) = query.git_commit {
-        // Escape single quotes in the commit hash (defensive, hashes won't have them)
-        let escaped = git_commit.replace('\'', "''");
-        parts.push(format!("git_commit = '{}'", escaped));
+        // Escape defensively — commit hashes won't contain quotes, but stay consistent.
+        parts.push(format!("git_commit = '{}'", escape_sql(git_commit)));
     }
 
     if let Some(created_after) = query.created_after {
@@ -147,25 +155,11 @@ impl MemoryStore {
         self.project_key.is_none()
     }
 
-    /// Create a new memory store
-    pub async fn new(
-        db_path: &str,
-        project_key: Option<String>,
-        role: Option<String>,
-        embedding_provider: Box<dyn EmbeddingProvider>,
-        config: MemoryConfig,
-        main_config: crate::config::Config,
-        reranker_integration: Option<RerankerIntegration>,
-    ) -> Result<Self> {
-        let reranker_integration = std::sync::Mutex::new(reranker_integration);
-        let db = connect(db_path).execute().await?;
-
-        // Get vector dimension from the embedding provider by testing with a short text
-        let test_embedding = embedding_provider.generate_embedding("test").await?;
-        let vector_dim = test_embedding.len();
-
-        // Build the memories schema once — reused for every write
-        let schema = Arc::new(Schema::new(vec![
+    /// Arrow schema for the `memories` table. Defined once so the writer
+    /// (`store_memory_with_embedding`) and the table creator (`init_tables`)
+    /// can never drift out of sync.
+    fn memories_schema(vector_dim: usize) -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("project_key", DataType::Utf8, false),
             Field::new("role", DataType::Utf8, true),
@@ -196,7 +190,80 @@ impl MemoryStore {
                 ),
                 true,
             ),
-        ]));
+        ]))
+    }
+
+    /// Arrow schema for the `memory_relationships` table.
+    fn relationships_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("source_id", DataType::Utf8, false),
+            Field::new("target_id", DataType::Utf8, false),
+            Field::new("project_key", DataType::Utf8, false),
+            Field::new("relationship_type", DataType::Utf8, false),
+            Field::new("strength", DataType::Float32, false),
+            Field::new("description", DataType::Utf8, false),
+            Field::new("created_at", DataType::Utf8, false),
+        ]))
+    }
+
+    /// project_key used for writes/deletes, falling back to "default" when the
+    /// store is unscoped. Centralizes the repeated `unwrap_or("default")`.
+    fn project_label(&self) -> &str {
+        self.project_key.as_deref().unwrap_or("default")
+    }
+
+    /// Current importance for `memory` under this store's decay configuration.
+    /// Wraps the four-argument decay plumbing repeated across the search paths.
+    fn current_importance(&self, memory: &Memory) -> f32 {
+        memory.get_current_importance(
+            self.config.decay_enabled,
+            self.config.min_importance_threshold,
+            self.config.decay_half_life_days,
+            self.config.access_boost_factor,
+        )
+    }
+
+    /// Build the IVF_PQ vector index on the `embedding` column from optimizer params.
+    async fn create_vector_index(
+        &self,
+        params: crate::vector_optimizer::IndexParams,
+    ) -> Result<()> {
+        self.memories_table
+            .create_index(
+                &["embedding"],
+                Index::IvfPq(
+                    lancedb::index::vector::IvfPqIndexBuilder::default()
+                        .distance_type(params.distance_type)
+                        .num_partitions(params.num_partitions)
+                        .num_sub_vectors(params.num_sub_vectors)
+                        .num_bits(params.num_bits as u32),
+                ),
+            )
+            .execute()
+            .await?;
+        Ok(())
+    }
+
+    /// Create a new memory store
+    pub async fn new(
+        db_path: &str,
+        project_key: Option<String>,
+        role: Option<String>,
+        embedding_provider: Box<dyn EmbeddingProvider>,
+        config: MemoryConfig,
+        main_config: crate::config::Config,
+        reranker_integration: Option<RerankerIntegration>,
+    ) -> Result<Self> {
+        let reranker_integration = std::sync::Mutex::new(reranker_integration);
+        let db = connect(db_path).execute().await?;
+
+        // Get vector dimension from the embedding provider by testing with a short text
+        let test_embedding = embedding_provider.generate_embedding("test").await?;
+        let vector_dim = test_embedding.len();
+
+        // Build the memories schema once — reused for every write
+        let schema = Self::memories_schema(vector_dim);
 
         // Initialize tables (creates them if missing, adds scalar + FTS indexes)
         Self::init_tables(&db, &schema).await?;
@@ -211,16 +278,7 @@ impl MemoryStore {
         Self::migrate_state_column(&memories_table).await?;
 
         // Build relationship schema once — reused for every relationship write
-        let rel_schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("source_id", DataType::Utf8, false),
-            Field::new("target_id", DataType::Utf8, false),
-            Field::new("project_key", DataType::Utf8, false),
-            Field::new("relationship_type", DataType::Utf8, false),
-            Field::new("strength", DataType::Float32, false),
-            Field::new("description", DataType::Utf8, false),
-            Field::new("created_at", DataType::Utf8, false),
-        ]));
+        let rel_schema = Self::relationships_schema();
 
         let store = Self {
             memories_table,
@@ -363,18 +421,7 @@ impl MemoryStore {
 
         // Create relationships table if it doesn't exist
         if !table_names.contains(&"memory_relationships".to_string()) {
-            let rel_schema = Arc::new(Schema::new(vec![
-                Field::new("id", DataType::Utf8, false),
-                Field::new("source_id", DataType::Utf8, false),
-                Field::new("target_id", DataType::Utf8, false),
-                Field::new("project_key", DataType::Utf8, false),
-                Field::new("relationship_type", DataType::Utf8, false),
-                Field::new("strength", DataType::Float32, false),
-                Field::new("description", DataType::Utf8, false),
-                Field::new("created_at", DataType::Utf8, false),
-            ]));
-
-            db.create_empty_table("memory_relationships", rel_schema)
+            db.create_empty_table("memory_relationships", Self::relationships_schema())
                 .execute()
                 .await?;
 
@@ -504,27 +551,24 @@ impl MemoryStore {
 
     /// Update an existing memory
     pub async fn update_memory(&self, memory: &Memory) -> Result<()> {
-        // Just use store_memory as it handles updates by deleting and re-inserting
+        // store_memory upserts via merge_insert keyed on id, so it handles updates too.
         self.store_memory(memory).await
     }
 
     /// Delete a memory by ID
     pub async fn delete_memory(&self, memory_id: &str) -> Result<()> {
+        let id = escape_sql(memory_id);
+        let project = escape_sql(self.project_label());
+
         self.memories_table
-            .delete(&format!(
-                "id = '{}' AND project_key = '{}'",
-                memory_id,
-                self.project_key.as_deref().unwrap_or("default")
-            ))
+            .delete(&format!("id = '{}' AND project_key = '{}'", id, project))
             .await?;
 
         // Also delete any relationships involving this memory (scoped to project)
         self.relationships_table
             .delete(&format!(
                 "(source_id = '{}' OR target_id = '{}') AND project_key = '{}'",
-                memory_id,
-                memory_id,
-                self.project_key.as_deref().unwrap_or("default")
+                id, id, project
             ))
             .await
             .ok();
@@ -556,6 +600,8 @@ impl MemoryStore {
 
     /// Ensure optimal vector index for memories table (call periodically, not on every store)
     pub async fn ensure_optimal_index(&self) -> Result<()> {
+        use crate::vector_optimizer::VectorOptimizer;
+
         let row_count = self.memories_table.count_rows(None).await?;
         let has_index = self
             .memories_table
@@ -566,66 +612,28 @@ impl MemoryStore {
 
         if !has_index {
             // Use intelligent optimizer to determine optimal index parameters
-            let index_params = crate::vector_optimizer::VectorOptimizer::calculate_index_params(
-                row_count,
-                self.vector_dim,
-            );
+            let index_params = VectorOptimizer::calculate_index_params(row_count, self.vector_dim);
 
             if index_params.should_create_index {
                 tracing::info!(
-					"Creating optimized vector index for memories table: {} rows, {} partitions, {} sub-vectors",
-					row_count, index_params.num_partitions, index_params.num_sub_vectors
-				);
-
-                self.memories_table
-                    .create_index(
-                        &["embedding"],
-                        Index::IvfPq(
-                            lancedb::index::vector::IvfPqIndexBuilder::default()
-                                .distance_type(index_params.distance_type)
-                                .num_partitions(index_params.num_partitions)
-                                .num_sub_vectors(index_params.num_sub_vectors)
-                                .num_bits(index_params.num_bits as u32),
-                        ),
-                    )
-                    .execute()
-                    .await?;
+                    "Creating optimized vector index for memories table: {} rows, {} partitions, {} sub-vectors",
+                    row_count,
+                    index_params.num_partitions,
+                    index_params.num_sub_vectors
+                );
+                self.create_vector_index(index_params).await?;
             } else {
                 tracing::debug!(
-					"Skipping index creation for memories table with {} rows - brute force will be faster",
-					row_count
-				);
-            }
-        } else {
-            // Check if we should optimize existing index due to growth
-            if crate::vector_optimizer::VectorOptimizer::should_optimize_for_growth(
-                row_count,
-                self.vector_dim,
-                true,
-            ) {
-                tracing::info!("Dataset growth detected, optimizing memories index");
-
-                // Recreate index with optimal parameters
-                let index_params = crate::vector_optimizer::VectorOptimizer::calculate_index_params(
-                    row_count,
-                    self.vector_dim,
+                    "Skipping index creation for memories table with {} rows - brute force will be faster",
+                    row_count
                 );
-
-                if index_params.should_create_index {
-                    self.memories_table
-                        .create_index(
-                            &["embedding"],
-                            Index::IvfPq(
-                                lancedb::index::vector::IvfPqIndexBuilder::default()
-                                    .distance_type(index_params.distance_type)
-                                    .num_partitions(index_params.num_partitions)
-                                    .num_sub_vectors(index_params.num_sub_vectors)
-                                    .num_bits(index_params.num_bits as u32),
-                            ),
-                        )
-                        .execute()
-                        .await?;
-                }
+            }
+        } else if VectorOptimizer::should_optimize_for_growth(row_count, self.vector_dim, true) {
+            // Existing index, dataset grew: rebuild with parameters sized to the new row count.
+            tracing::info!("Dataset growth detected, optimizing memories index");
+            let index_params = VectorOptimizer::calculate_index_params(row_count, self.vector_dim);
+            if index_params.should_create_index {
+                self.create_vector_index(index_params).await?;
             }
         }
 
@@ -634,12 +642,13 @@ impl MemoryStore {
 
     /// Get a memory by ID
     pub async fn get_memory(&self, memory_id: &str) -> Result<Option<Memory>> {
+        let id = escape_sql(memory_id);
         let mut results = self
             .memories_table
             .query()
             .only_if(match self.project_key.as_deref() {
-                Some(key) => format!("id = '{}' AND project_key = '{}'", memory_id, key),
-                None => format!("id = '{}'", memory_id),
+                Some(key) => format!("id = '{}' AND project_key = '{}'", id, escape_sql(key)),
+                None => format!("id = '{}'", id),
             })
             .limit(1)
             .execute()
@@ -754,12 +763,8 @@ impl MemoryStore {
         new_state: super::types::MemoryState,
         new_importance: f32,
     ) -> Result<()> {
-        let project = self
-            .project_key
-            .as_deref()
-            .unwrap_or("default")
-            .replace('\'', "''");
-        let id_escaped = id.replace('\'', "''");
+        let project = escape_sql(self.project_label());
+        let id_escaped = escape_sql(id);
         let predicate = format!("id = '{}' AND project_key = '{}'", id_escaped, project);
         let clamped = new_importance.clamp(0.0, 1.0);
 
@@ -782,14 +787,10 @@ impl MemoryStore {
         }
         let id_list = ids
             .iter()
-            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .map(|id| format!("'{}'", escape_sql(id)))
             .collect::<Vec<_>>()
             .join(",");
-        let project = self
-            .project_key
-            .as_deref()
-            .unwrap_or("default")
-            .replace('\'', "''");
+        let project = escape_sql(self.project_label());
         let predicate = format!("id IN ({}) AND project_key = '{}'", id_list, project);
         let now_literal = format!("'{}'", Utc::now().to_rfc3339());
 
@@ -846,9 +847,7 @@ impl MemoryStore {
                     continue;
                 }
 
-                let distance_array = batch
-                    .column_by_name("_distance")
-                    .and_then(|col| col.as_any().downcast_ref::<Float32Array>())
+                let distance_array = f32_column_opt(&batch, "_distance")
                     .map(|arr| (0..arr.len()).map(|i| arr.value(i)).collect::<Vec<f32>>())
                     .unwrap_or_default();
 
@@ -862,12 +861,7 @@ impl MemoryStore {
 
                     // Cosine distance → similarity, weighted by temporal importance and trust tier
                     let vector_similarity = 1.0 - distance;
-                    let current_importance = memory.get_current_importance(
-                        self.config.decay_enabled,
-                        self.config.min_importance_threshold,
-                        self.config.decay_half_life_days,
-                        self.config.access_boost_factor,
-                    );
+                    let current_importance = self.current_importance(&memory);
                     let trust_multiplier = memory.metadata.source.trust_multiplier();
                     let final_score = vector_similarity * current_importance * trust_multiplier;
 
@@ -881,8 +875,7 @@ impl MemoryStore {
                 }
             }
         } else {
-            // No text query — filter-only scan (predicate always includes project_key)
-            // No text query — filter-only scan
+            // No text query — filter-only scan (project_key predicate omitted when unscoped)
             let mut q = self.memories_table.query();
             if !predicate.is_empty() {
                 q = q.only_if(predicate);
@@ -901,12 +894,7 @@ impl MemoryStore {
                         continue;
                     }
 
-                    let relevance_score = memory.get_current_importance(
-                        self.config.decay_enabled,
-                        self.config.min_importance_threshold,
-                        self.config.decay_half_life_days,
-                        self.config.access_boost_factor,
-                    );
+                    let relevance_score = self.current_importance(&memory);
 
                     if relevance_score >= min_relevance {
                         results.push(MemorySearchResult {
@@ -933,18 +921,8 @@ impl MemoryStore {
                         a.memory.created_at.cmp(&b.memory.created_at)
                     }
                     super::types::MemorySortBy::Importance => {
-                        let a_imp = a.memory.get_current_importance(
-                            self.config.decay_enabled,
-                            self.config.min_importance_threshold,
-                            self.config.decay_half_life_days,
-                            self.config.access_boost_factor,
-                        );
-                        let b_imp = b.memory.get_current_importance(
-                            self.config.decay_enabled,
-                            self.config.min_importance_threshold,
-                            self.config.decay_half_life_days,
-                            self.config.access_boost_factor,
-                        );
+                        let a_imp = self.current_importance(&a.memory);
+                        let b_imp = self.current_importance(&b.memory);
                         a_imp
                             .partial_cmp(&b_imp)
                             .unwrap_or(std::cmp::Ordering::Equal)
@@ -957,11 +935,7 @@ impl MemoryStore {
                 }
             });
         } else {
-            results.sort_by(|a, b| {
-                b.relevance_score
-                    .partial_cmp(&a.relevance_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            super::types::sort_by_relevance_desc(&mut results);
         }
 
         results.truncate(limit);
@@ -1132,9 +1106,7 @@ impl MemoryStore {
             }
 
             // Hybrid search returns _relevance_score (raw RRF), not _distance
-            let rrf_scores: Vec<f32> = batch
-                .column_by_name("_relevance_score")
-                .and_then(|col| col.as_any().downcast_ref::<Float32Array>())
+            let rrf_scores: Vec<f32> = f32_column_opt(&batch, "_relevance_score")
                 .map(|arr| {
                     (0..arr.len())
                         .map(|i| (arr.value(i) / max_rrf_score).min(1.0))
@@ -1151,12 +1123,7 @@ impl MemoryStore {
                 }
 
                 let recency_score = Self::calculate_recency_score(&memory, recency_decay_days);
-                let importance_score = memory.get_current_importance(
-                    self.config.decay_enabled,
-                    self.config.min_importance_threshold,
-                    self.config.decay_half_life_days,
-                    self.config.access_boost_factor,
-                );
+                let importance_score = self.current_importance(&memory);
 
                 // RRF already fuses vector + BM25; recency and importance are additive signals
                 // Trust multiplier boosts user-confirmed memories above agent-inferred ones
@@ -1180,11 +1147,7 @@ impl MemoryStore {
             }
         }
 
-        results.sort_by(|a, b| {
-            b.relevance_score
-                .partial_cmp(&a.relevance_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        super::types::sort_by_relevance_desc(&mut results);
         results.truncate(limit);
 
         Ok(results)
@@ -1198,10 +1161,10 @@ impl MemoryStore {
     ) -> Result<Vec<Memory>> {
         let mut parts: Vec<String> = Vec::new();
         if let Some(key) = self.project_key.as_deref() {
-            parts.push(format!("project_key = '{}'", key.replace('\'', "''")));
+            parts.push(format!("project_key = '{}'", escape_sql(key)));
         }
         if let Some(role) = self.role.as_deref() {
-            parts.push(format!("role = '{}'", role.replace('\'', "''")));
+            parts.push(format!("role = '{}'", escape_sql(role)));
         }
         parts.push("state = 'working'".to_string());
         parts.push(format!("created_at >= '{}'", since.to_rfc3339()));
@@ -1266,15 +1229,18 @@ impl MemoryStore {
         &self,
         memory_id: &str,
     ) -> Result<Vec<MemoryRelationship>> {
+        let id = escape_sql(memory_id);
         let mut results = self
             .relationships_table
             .query()
             .only_if(match self.project_key.as_deref() {
                 Some(key) => format!(
                     "(source_id = '{}' OR target_id = '{}') AND project_key = '{}'",
-                    memory_id, memory_id, key
+                    id,
+                    id,
+                    escape_sql(key)
                 ),
-                None => format!("source_id = '{}' OR target_id = '{}'", memory_id, memory_id),
+                None => format!("source_id = '{}' OR target_id = '{}'", id, id),
             })
             .execute()
             .await?;
@@ -1295,10 +1261,11 @@ impl MemoryStore {
 
     /// Delete all AutoLinked relationships for a memory (used before re-linking on update)
     pub async fn delete_auto_linked_relationships(&self, memory_id: &str) -> Result<()> {
+        let id = escape_sql(memory_id);
         self.relationships_table
             .delete(&format!(
                 "(source_id = '{}' OR target_id = '{}') AND relationship_type = 'auto_linked' AND project_key = '{}'",
-                memory_id, memory_id, self.project_key.as_deref().unwrap_or("default")
+                id, id, escape_sql(self.project_label())
             ))
             .await
             .ok();
@@ -1310,7 +1277,7 @@ impl MemoryStore {
         let filter = self
             .project_key
             .as_deref()
-            .map(|k| format!("project_key = '{}'", k));
+            .map(|k| format!("project_key = '{}'", escape_sql(k)));
         Ok(self.memories_table.count_rows(filter).await?)
     }
 
@@ -1318,7 +1285,7 @@ impl MemoryStore {
     pub async fn get_distinct_projects_and_roles(&self) -> Result<(Vec<String>, Vec<String>)> {
         let mut q = self.memories_table.query();
         if let Some(key) = self.project_key.as_deref() {
-            q = q.only_if(format!("project_key = '{}'", key));
+            q = q.only_if(format!("project_key = '{}'", escape_sql(key)));
         }
         let mut results = q.execute().await?;
 
@@ -1329,20 +1296,14 @@ impl MemoryStore {
             if batch.num_rows() == 0 {
                 continue;
             }
-            if let Some(col) = batch
-                .column_by_name("project_key")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-            {
+            if let Some(col) = string_column_opt(&batch, "project_key") {
                 for i in 0..col.len() {
                     if !col.is_null(i) {
                         projects.insert(col.value(i).to_string());
                     }
                 }
             }
-            if let Some(col) = batch
-                .column_by_name("role")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
-            {
+            if let Some(col) = string_column_opt(&batch, "role") {
                 for i in 0..col.len() {
                     if !col.is_null(i) {
                         let v = col.value(i);
@@ -1367,7 +1328,7 @@ impl MemoryStore {
         let filter = match self.project_key.as_deref() {
             Some(key) => format!(
                 "project_key = '{}' AND related_files IS NOT NULL AND related_files != '[]'",
-                key
+                escape_sql(key)
             ),
             None => "related_files IS NOT NULL AND related_files != '[]'".to_string(),
         };
@@ -1398,7 +1359,7 @@ impl MemoryStore {
 
             let filter = format!(
                 "project_key = '{}' AND created_at < '{}' AND importance < {}",
-                self.project_key.as_deref().unwrap_or("default"),
+                escape_sql(self.project_label()),
                 cutoff_str,
                 self.config.cleanup_min_importance
             );
@@ -1435,80 +1396,29 @@ impl MemoryStore {
         let num_rows = batch.num_rows();
         let mut memories = Vec::with_capacity(num_rows);
 
-        // Extract all columns
-        let id_array = batch
-            .column_by_name("id")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| anyhow::anyhow!("id column not found or wrong type"))?;
-
-        let memory_type_array = batch
-            .column_by_name("memory_type")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| anyhow::anyhow!("memory_type column not found or wrong type"))?;
-
-        let title_array = batch
-            .column_by_name("title")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| anyhow::anyhow!("title column not found or wrong type"))?;
-
-        let content_array = batch
-            .column_by_name("content")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| anyhow::anyhow!("content column not found or wrong type"))?;
-
-        let created_at_array = batch
-            .column_by_name("created_at")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| anyhow::anyhow!("created_at column not found or wrong type"))?;
-
-        let updated_at_array = batch
-            .column_by_name("updated_at")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| anyhow::anyhow!("updated_at column not found or wrong type"))?;
-
-        let importance_array = batch
-            .column_by_name("importance")
-            .and_then(|col| col.as_any().downcast_ref::<Float32Array>())
-            .ok_or_else(|| anyhow::anyhow!("importance column not found or wrong type"))?;
-
-        let confidence_array = batch
-            .column_by_name("confidence")
-            .and_then(|col| col.as_any().downcast_ref::<Float32Array>())
-            .ok_or_else(|| anyhow::anyhow!("confidence column not found or wrong type"))?;
-
-        let tags_array = batch
-            .column_by_name("tags")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| anyhow::anyhow!("tags column not found or wrong type"))?;
-
-        let files_array = batch
-            .column_by_name("related_files")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| anyhow::anyhow!("related_files column not found or wrong type"))?;
-
-        let git_array = batch
-            .column_by_name("git_commit")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| anyhow::anyhow!("git_commit column not found or wrong type"))?;
+        // Extract all columns (required ones error if missing or mistyped)
+        let id_array = string_column(batch, "id")?;
+        let memory_type_array = string_column(batch, "memory_type")?;
+        let title_array = string_column(batch, "title")?;
+        let content_array = string_column(batch, "content")?;
+        let created_at_array = string_column(batch, "created_at")?;
+        let updated_at_array = string_column(batch, "updated_at")?;
+        let importance_array = f32_column(batch, "importance")?;
+        let confidence_array = f32_column(batch, "confidence")?;
+        let tags_array = string_column(batch, "tags")?;
+        let files_array = string_column(batch, "related_files")?;
+        let git_array = string_column(batch, "git_commit")?;
 
         // source column may be absent in older databases — fall back to AgentInferred
-        let source_array = batch
-            .column_by_name("source")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+        let source_array = string_column_opt(batch, "source");
 
         // Decay columns are present on tables migrated by migrate_decay_columns(); fall
         // back to defaults (count=0, last_accessed=created_at) if absent (e.g. mid-migration).
-        let access_count_array = batch
-            .column_by_name("access_count")
-            .and_then(|col| col.as_any().downcast_ref::<Int32Array>());
-        let last_accessed_array = batch
-            .column_by_name("last_accessed")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+        let access_count_array = i32_column_opt(batch, "access_count");
+        let last_accessed_array = string_column_opt(batch, "last_accessed");
         // State column is added by migrate_state_column on existing tables; default to
         // Working if absent so legacy rows keep their normal retrieval behavior.
-        let state_array = batch
-            .column_by_name("state")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+        let state_array = string_column_opt(batch, "state");
 
         for i in 0..num_rows {
             let memory_type =
@@ -1593,41 +1503,14 @@ impl MemoryStore {
         let num_rows = batch.num_rows();
         let mut relationships = Vec::with_capacity(num_rows);
 
-        // Extract all columns
-        let id_array = batch
-            .column_by_name("id")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| anyhow::anyhow!("id column not found or wrong type"))?;
-
-        let source_array = batch
-            .column_by_name("source_id")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| anyhow::anyhow!("source_id column not found or wrong type"))?;
-
-        let target_array = batch
-            .column_by_name("target_id")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| anyhow::anyhow!("target_id column not found or wrong type"))?;
-
-        let type_array = batch
-            .column_by_name("relationship_type")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| anyhow::anyhow!("relationship_type column not found or wrong type"))?;
-
-        let strength_array = batch
-            .column_by_name("strength")
-            .and_then(|col| col.as_any().downcast_ref::<Float32Array>())
-            .ok_or_else(|| anyhow::anyhow!("strength column not found or wrong type"))?;
-
-        let desc_array = batch
-            .column_by_name("description")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| anyhow::anyhow!("description column not found or wrong type"))?;
-
-        let created_array = batch
-            .column_by_name("created_at")
-            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| anyhow::anyhow!("created_at column not found or wrong type"))?;
+        // Extract all columns (all required)
+        let id_array = string_column(batch, "id")?;
+        let source_array = string_column(batch, "source_id")?;
+        let target_array = string_column(batch, "target_id")?;
+        let type_array = string_column(batch, "relationship_type")?;
+        let strength_array = f32_column(batch, "strength")?;
+        let desc_array = string_column(batch, "description")?;
+        let created_array = string_column(batch, "created_at")?;
 
         for i in 0..num_rows {
             // From<&str> understands both the snake_case form emitted by Display
@@ -1681,7 +1564,7 @@ impl MemoryStore {
         // Get current counts before deletion (scoped to project)
         let memory_count = self.get_memory_count().await.unwrap_or(0);
 
-        let project_key = self.project_key.as_deref().unwrap_or("default");
+        let project_key = escape_sql(self.project_label());
 
         // Count relationships for this project
         let relationship_count = self

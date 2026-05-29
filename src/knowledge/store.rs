@@ -2,7 +2,7 @@
 //
 use anyhow::{Context, Result};
 use arrow_array::{
-    Array, FixedSizeListArray, Float32Array, Int32Array, ListArray, RecordBatch, StringArray,
+    Array, FixedSizeListArray, Float32Array, Int32Array, RecordBatch, StringArray,
     TimestampMillisecondArray,
 };
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
@@ -18,6 +18,9 @@ use lancedb::{
 };
 use std::sync::Arc;
 
+use crate::arrow_helpers::{
+    f32_column_opt, i32_column, list_column, string_column, string_column_opt, timestamp_ms_column,
+};
 use crate::knowledge::types::{KnowledgeChunk, KnowledgeSearchResult, KnowledgeStats};
 use chrono::Duration;
 
@@ -286,91 +289,35 @@ impl KnowledgeStore {
                 continue;
             }
 
-            let ids = batch
-                .column_by_name("id")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let sources = batch
-                .column_by_name("source")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let source_titles = batch
-                .column_by_name("source_title")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let session_ids = batch
-                .column_by_name("session_id")
-                .and_then(|col| col.as_any().downcast_ref::<StringArray>());
-            let chunk_indices = batch
-                .column_by_name("chunk_index")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .unwrap();
-            let contents = batch
-                .column_by_name("content")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let parent_contents = batch
-                .column_by_name("parent_content")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let section_paths = batch
-                .column_by_name("section_path")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<ListArray>()
-                .unwrap();
-            let char_starts = batch
-                .column_by_name("char_start")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .unwrap();
-            let char_ends = batch
-                .column_by_name("char_end")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .unwrap();
+            let ids = string_column(&batch, "id")?;
+            let sources = string_column(&batch, "source")?;
+            let source_titles = string_column(&batch, "source_title")?;
+            let session_ids = string_column_opt(&batch, "session_id");
+            let chunk_indices = i32_column(&batch, "chunk_index")?;
+            let contents = string_column(&batch, "content")?;
+            let parent_contents = string_column(&batch, "parent_content")?;
+            let section_paths = list_column(&batch, "section_path")?;
+            let char_starts = i32_column(&batch, "char_start")?;
+            let char_ends = i32_column(&batch, "char_end")?;
             // Extract score column - hybrid search uses _relevance_score, vector search uses _distance
             // LanceDB hybrid search with RRF reranking returns _relevance_score (raw RRF scores)
             // RRF formula: score = sum of 1/(rank + k) for each ranking (vector + FTS)
             // Max possible score is 2/k (if rank 0 in both)
             // Regular vector search returns _distance (0-2 for cosine, lower is better)
             let relevance_scores: Vec<f32> = if use_hybrid {
-                // Hybrid search: normalize RRF scores to 0-1 range
-                // Max possible RRF score is 2/k (when rank=0 in both vector and FTS)
+                // Hybrid search: normalize RRF scores to 0-1 range.
+                // Max possible RRF score is 2/k (when rank=0 in both vector and FTS).
                 let max_rrf_score = 2.0 / RRF_K;
-
-                batch
-                    .column_by_name("_relevance_score")
-                    .and_then(|col| col.as_any().downcast_ref::<Float32Array>())
+                f32_column_opt(&batch, "_relevance_score")
                     .map(|arr| {
                         (0..arr.len())
-                            .map(|i| {
-                                let raw_score = arr.value(i);
-                                // Normalize: divide by max possible score
-                                (raw_score / max_rrf_score).min(1.0)
-                            })
+                            .map(|i| (arr.value(i) / max_rrf_score).min(1.0))
                             .collect::<Vec<f32>>()
                     })
                     .unwrap_or_else(|| vec![0.5; batch.num_rows()])
             } else {
                 // Vector search: convert _distance to relevance (1.0 - distance for cosine)
-                batch
-                    .column_by_name("_distance")
-                    .and_then(|col| col.as_any().downcast_ref::<Float32Array>())
+                f32_column_opt(&batch, "_distance")
                     .map(|arr| {
                         (0..arr.len())
                             .map(|i| 1.0 - arr.value(i))
@@ -441,18 +388,8 @@ impl KnowledgeStore {
         }
 
         let batch = &batches[0];
-        let content_hashes = batch
-            .column_by_name("content_hash")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let last_checkeds = batch
-            .column_by_name("last_checked")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .unwrap();
+        let content_hashes = string_column(batch, "content_hash")?;
+        let last_checkeds = timestamp_ms_column(batch, "last_checked")?;
 
         let content_hash = content_hashes.value(0).to_string();
         let last_checked_millis = last_checkeds.value(0);
@@ -489,18 +426,8 @@ impl KnowledgeStore {
         let mut newest: Option<DateTime<Utc>> = None;
 
         for batch in batches {
-            let sources_col = batch
-                .column_by_name("source")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let indexed_ats = batch
-                .column_by_name("indexed_at")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap();
+            let sources_col = string_column(&batch, "source")?;
+            let indexed_ats = timestamp_ms_column(&batch, "indexed_at")?;
 
             for i in 0..batch.num_rows() {
                 unique_urls.insert(sources_col.value(i).to_string());
@@ -536,24 +463,9 @@ impl KnowledgeStore {
             std::collections::HashMap::new();
 
         for batch in batches {
-            let sources_col = batch
-                .column_by_name("source")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let source_titles = batch
-                .column_by_name("source_title")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let last_checkeds = batch
-                .column_by_name("last_checked")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap();
+            let sources_col = string_column(&batch, "source")?;
+            let source_titles = string_column(&batch, "source_title")?;
+            let last_checkeds = timestamp_ms_column(&batch, "last_checked")?;
 
             for i in 0..batch.num_rows() {
                 let url = sources_col.value(i).to_string();
@@ -668,24 +580,9 @@ impl KnowledgeStore {
                 continue;
             }
 
-            let sources = batch
-                .column_by_name("source")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let source_titles = batch
-                .column_by_name("source_title")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let contents = batch
-                .column_by_name("content")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
+            let sources = string_column(&batch, "source")?;
+            let source_titles = string_column(&batch, "source_title")?;
+            let contents = string_column(&batch, "content")?;
 
             for i in 0..batch.num_rows() {
                 let source = sources.value(i).to_string();

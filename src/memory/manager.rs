@@ -622,11 +622,7 @@ impl MemoryManager {
             .collect();
 
         // Sort by relevance score (highest first)
-        final_results.sort_by(|a, b| {
-            b.relevance_score
-                .partial_cmp(&a.relevance_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        super::types::sort_by_relevance_desc(&mut final_results);
 
         // Apply limit if specified in filters
         if let Some(limit) = base_filters.limit {

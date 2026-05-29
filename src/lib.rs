@@ -17,6 +17,7 @@
 //! Extracted from octocode, this library provides a focused memory management system
 //! using LanceDB for vector storage and semantic search capabilities.
 
+pub mod arrow_helpers;
 pub mod config;
 pub mod constants;
 pub mod embedding;
