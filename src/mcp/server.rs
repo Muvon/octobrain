@@ -188,6 +188,14 @@ impl McpServer {
     }
 }
 
+/// Convert a provider-layer `McpError` (crate::mcp::types) into the rmcp SDK error type.
+fn to_rmcp_error(e: crate::mcp::types::McpError) -> McpError {
+    McpError::internal_error(
+        e.message,
+        Some(serde_json::to_value(e.operation).unwrap_or_default()),
+    )
+}
+
 // ============================================================================
 // Shared enum types for schema constraints
 // ============================================================================
@@ -429,12 +437,10 @@ impl McpServer {
             }
         }
 
-        provider.execute_memorize(&args).await.map_err(|e| {
-            McpError::internal_error(
-                e.message,
-                Some(serde_json::to_value(e.operation).unwrap_or_default()),
-            )
-        })
+        provider
+            .execute_memorize(&args)
+            .await
+            .map_err(to_rmcp_error)
     }
 
     #[tool(
@@ -460,12 +466,10 @@ impl McpServer {
             }
         }
 
-        provider.execute_remember(&args).await.map_err(|e| {
-            McpError::internal_error(
-                e.message,
-                Some(serde_json::to_value(e.operation).unwrap_or_default()),
-            )
-        })
+        provider
+            .execute_remember(&args)
+            .await
+            .map_err(to_rmcp_error)
     }
 
     #[tool(
@@ -490,12 +494,7 @@ impl McpServer {
             }
         }
 
-        provider.execute_forget(&args).await.map_err(|e| {
-            McpError::internal_error(
-                e.message,
-                Some(serde_json::to_value(e.operation).unwrap_or_default()),
-            )
-        })
+        provider.execute_forget(&args).await.map_err(to_rmcp_error)
     }
 
     #[tool(
@@ -546,12 +545,7 @@ impl McpServer {
                     .await
             }
         }
-        .map_err(|e| {
-            McpError::internal_error(
-                e.message,
-                Some(serde_json::to_value(e.operation).unwrap_or_default()),
-            )
-        })
+        .map_err(to_rmcp_error)
     }
 }
 

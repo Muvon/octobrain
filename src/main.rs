@@ -16,6 +16,7 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{fmt, EnvFilter};
 
+mod arrow_helpers;
 mod cli;
 mod commands;
 mod config;

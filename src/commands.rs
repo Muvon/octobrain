@@ -78,12 +78,8 @@ async fn execute_memory_command(
             }
 
             let mem_type = MemoryType::from(memory_type);
-            let tags_vec = tags
-                .as_ref()
-                .map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
-            let files_vec = files
-                .as_ref()
-                .map(|f| f.split(',').map(|s| s.trim().to_string()).collect());
+            let tags_vec = split_csv_opt(&tags);
+            let files_vec = split_csv_opt(&files);
 
             let memory = memory_manager
                 .memorize(crate::memory::manager::MemorizeParams {
@@ -124,20 +120,9 @@ async fn execute_memory_command(
             } else if disable_reranker {
                 memory_manager.disable_reranker();
             }
-            let mem_types = memory_types.as_ref().map(|types| {
-                types
-                    .split(',')
-                    .map(|s| MemoryType::from(s.trim().to_string()))
-                    .collect()
-            });
-
-            let tags_vec = tags
-                .as_ref()
-                .map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
-
-            let files_vec = files
-                .as_ref()
-                .map(|f| f.split(',').map(|s| s.trim().to_string()).collect());
+            let mem_types = parse_memory_types_opt(&memory_types);
+            let tags_vec = split_csv_opt(&tags);
+            let files_vec = split_csv_opt(&files);
 
             let memory_query = MemoryQuery {
                 memory_types: mem_types,
@@ -282,16 +267,8 @@ async fn execute_memory_command(
                     ));
                 }
 
-                let mem_types = memory_types.as_ref().map(|types| {
-                    types
-                        .split(',')
-                        .map(|s| MemoryType::from(s.trim().to_string()))
-                        .collect()
-                });
-
-                let tags_vec = tags
-                    .as_ref()
-                    .map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
+                let mem_types = parse_memory_types_opt(&memory_types);
+                let tags_vec = split_csv_opt(&tags);
 
                 let memory_query = MemoryQuery {
                     query_text: Some(q.clone()),
@@ -467,7 +444,7 @@ async fn execute_memory_command(
         }
 
         MemoryCommand::ForFiles { files, format } => {
-            let file_paths: Vec<String> = files.split(',').map(|s| s.trim().to_string()).collect();
+            let file_paths = split_csv(&files);
             let results = memory_manager.get_memories_for_files(file_paths).await?;
 
             if results.is_empty() {
@@ -479,7 +456,7 @@ async fn execute_memory_command(
         }
 
         MemoryCommand::ByTags { tags, format } => {
-            let tag_list: Vec<String> = tags.split(',').map(|s| s.trim().to_string()).collect();
+            let tag_list = split_csv(&tags);
             let results = memory_manager.get_memories_by_tags(tag_list).await?;
 
             if results.is_empty() {
@@ -827,4 +804,23 @@ fn format_memories(memories: &[crate::memory::Memory], format: &str) {
 
 fn format_search_results(results: &[crate::memory::MemorySearchResult], format: &str) {
     crate::memory::format_memories_for_cli(results, format);
+}
+
+/// Split a comma-separated CLI argument into trimmed, owned segments.
+fn split_csv(raw: &str) -> Vec<String> {
+    raw.split(',').map(|s| s.trim().to_string()).collect()
+}
+
+/// Split an optional comma-separated CLI argument into `Option<Vec<String>>`.
+fn split_csv_opt(raw: &Option<String>) -> Option<Vec<String>> {
+    raw.as_ref().map(|s| split_csv(s))
+}
+
+/// Parse an optional comma-separated `memory_types` argument into `Option<Vec<MemoryType>>`.
+fn parse_memory_types_opt(raw: &Option<String>) -> Option<Vec<MemoryType>> {
+    raw.as_ref().map(|s| {
+        s.split(',')
+            .map(|t| MemoryType::from(t.trim().to_string()))
+            .collect()
+    })
 }

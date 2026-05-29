@@ -386,53 +386,10 @@ impl MemoryProvider {
             }
         }
 
-        // Parse memory types filter
-        let memory_types =
-            if let Some(types_array) = arguments.get("memory_types").and_then(|v| v.as_array()) {
-                let types: Vec<MemoryType> = types_array
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .map(|s| MemoryType::from(s.to_string()))
-                    .collect();
-                if types.is_empty() {
-                    None
-                } else {
-                    Some(types)
-                }
-            } else {
-                None
-            };
-
-        // Parse tags filter
-        let tags = if let Some(tags_array) = arguments.get("tags").and_then(|v| v.as_array()) {
-            let tag_list: Vec<String> = tags_array
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-            if tag_list.is_empty() {
-                None
-            } else {
-                Some(tag_list)
-            }
-        } else {
-            None
-        };
-
-        // Parse related files filter
-        let related_files =
-            if let Some(files_array) = arguments.get("related_files").and_then(|v| v.as_array()) {
-                let file_list: Vec<String> = files_array
-                    .iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect();
-                if file_list.is_empty() {
-                    None
-                } else {
-                    Some(file_list)
-                }
-            } else {
-                None
-            };
+        // Parse filters (absent or empty arrays become None)
+        let memory_types = parse_memory_types(arguments);
+        let tags = parse_string_array(arguments, "tags");
+        let related_files = parse_string_array(arguments, "related_files");
 
         // Set limit
         let limit = arguments
@@ -607,38 +564,9 @@ impl MemoryProvider {
             if query.len() < 3 || query.len() > 500 {
                 return Ok("❌ Query must be between 3 and 500 characters".to_string());
             }
-            // Parse memory types filter
-            let memory_types = if let Some(types_array) =
-                arguments.get("memory_types").and_then(|v| v.as_array())
-            {
-                let types: Vec<MemoryType> = types_array
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .map(|s| MemoryType::from(s.to_string()))
-                    .collect();
-                if types.is_empty() {
-                    None
-                } else {
-                    Some(types)
-                }
-            } else {
-                None
-            };
-
-            // Parse tags filter
-            let tags = if let Some(tags_array) = arguments.get("tags").and_then(|v| v.as_array()) {
-                let tag_list: Vec<String> = tags_array
-                    .iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect();
-                if tag_list.is_empty() {
-                    None
-                } else {
-                    Some(tag_list)
-                }
-            } else {
-                None
-            };
+            // Parse filters (absent or empty arrays become None)
+            let memory_types = parse_memory_types(arguments);
+            let tags = parse_string_array(arguments, "tags");
 
             let memory_query = MemoryQuery {
                 query_text: Some(query.to_string()),
@@ -667,5 +595,37 @@ impl MemoryProvider {
         } else {
             Ok("❌ Either 'memory_id' or 'query' must be provided".to_string())
         }
+    }
+}
+
+/// Parse a JSON array argument into a non-empty `Vec<String>`, mirroring the
+/// "collect strings, treat empty as absent" pattern the remember/forget filters share.
+fn parse_string_array(arguments: &Value, key: &str) -> Option<Vec<String>> {
+    let list: Vec<String> = arguments
+        .get(key)?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    if list.is_empty() {
+        None
+    } else {
+        Some(list)
+    }
+}
+
+/// Parse the `memory_types` JSON array into `Vec<MemoryType>`, `None` when absent or empty.
+fn parse_memory_types(arguments: &Value) -> Option<Vec<MemoryType>> {
+    let types: Vec<MemoryType> = arguments
+        .get("memory_types")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(|s| MemoryType::from(s.to_string()))
+        .collect();
+    if types.is_empty() {
+        None
+    } else {
+        Some(types)
     }
 }

@@ -52,7 +52,6 @@ impl VectorOptimizer {
     }
 
     /// Check if index should be optimized due to dataset growth.
-    /// Check if index should be optimized due to dataset growth.
     /// Returns true when row_count crosses meaningful thresholds:
     /// - Every 500 rows when has_index is true (index may be stale)
     /// - Every 1000 rows when has_index is false (should have index)
