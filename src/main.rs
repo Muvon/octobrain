@@ -25,6 +25,7 @@ mod embedding;
 mod knowledge;
 mod mcp;
 mod memory;
+mod sql;
 mod storage;
 mod vector_optimizer;
 
