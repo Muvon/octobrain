@@ -67,11 +67,9 @@ use crate::arrow_helpers::{
 };
 use crate::embedding::EmbeddingProvider;
 
-/// Escape a string for safe inclusion inside a LanceDB SQL single-quoted literal.
-/// DataFusion (LanceDB's SQL engine) escapes an embedded `'` by doubling it.
-fn escape_sql(value: &str) -> String {
-    value.replace('\'', "''")
-}
+/// SQL string escaping for LanceDB predicates is shared across stores; see
+/// [`crate::sql::escape_sql_literal`]. Aliased here to keep predicate call sites terse.
+use crate::sql::escape_sql_literal as escape_sql;
 
 /// Build a SQL predicate string for scalar fields that LanceDB can filter at the storage layer.
 ///

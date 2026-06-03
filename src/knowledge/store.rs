@@ -22,6 +22,7 @@ use crate::arrow_helpers::{
     f32_column_opt, i32_column, list_column, string_column, string_column_opt, timestamp_ms_column,
 };
 use crate::knowledge::types::{KnowledgeChunk, KnowledgeSearchResult, KnowledgeStats};
+use crate::sql::escape_sql_literal;
 use chrono::Duration;
 
 /// RRF (Reciprocal Rank Fusion) constant k
@@ -37,10 +38,6 @@ pub struct KnowledgeStore {
 }
 
 impl KnowledgeStore {
-    fn quote_filter_string(input: &str) -> String {
-        input.replace('\'', "''")
-    }
-
     pub async fn new(vector_dim: usize) -> Result<Self> {
         let db_path = crate::storage::get_system_storage_dir()?.join("knowledge");
         std::fs::create_dir_all(&db_path)?;
@@ -258,14 +255,14 @@ impl KnowledgeStore {
         let mut filters = Vec::new();
 
         if let Some(s) = source {
-            filters.push(format!("source = '{}'", Self::quote_filter_string(s)));
+            filters.push(format!("source = '{}'", escape_sql_literal(s)));
         }
 
         // Session scoping: return persistent (NULL session_id) + current session's data
         if let Some(sid) = session_id {
             filters.push(format!(
                 "(session_id IS NULL OR session_id = '{}')",
-                Self::quote_filter_string(sid)
+                escape_sql_literal(sid)
             ));
         }
 
@@ -377,7 +374,7 @@ impl KnowledgeStore {
         let query = self
             .table
             .query()
-            .only_if(format!("source = '{}'", Self::quote_filter_string(source)))
+            .only_if(format!("source = '{}'", escape_sql_literal(source)))
             .limit(1);
 
         let results = query.execute().await?;
@@ -401,7 +398,7 @@ impl KnowledgeStore {
 
     pub async fn delete_source(&self, source: &str) -> Result<()> {
         self.table
-            .delete(&format!("source = '{}'", Self::quote_filter_string(source)))
+            .delete(&format!("source = '{}'", escape_sql_literal(source)))
             .await?;
         Ok(())
     }
@@ -508,8 +505,8 @@ impl KnowledgeStore {
             .query()
             .only_if(format!(
                 "source = '{}' AND session_id = '{}'",
-                Self::quote_filter_string(source),
-                Self::quote_filter_string(session_id)
+                escape_sql_literal(source),
+                escape_sql_literal(session_id)
             ))
             .limit(1);
 
@@ -523,8 +520,8 @@ impl KnowledgeStore {
         self.table
             .delete(&format!(
                 "source = '{}' AND session_id = '{}'",
-                Self::quote_filter_string(source),
-                Self::quote_filter_string(session_id)
+                escape_sql_literal(source),
+                escape_sql_literal(session_id)
             ))
             .await?;
         Ok(())
@@ -554,13 +551,13 @@ impl KnowledgeStore {
         let mut filters = Vec::new();
 
         if let Some(s) = source {
-            filters.push(format!("source = '{}'", Self::quote_filter_string(s)));
+            filters.push(format!("source = '{}'", escape_sql_literal(s)));
         }
 
         if let Some(sid) = session_id {
             filters.push(format!(
                 "(session_id IS NULL OR session_id = '{}')",
-                Self::quote_filter_string(sid)
+                escape_sql_literal(sid)
             ));
         }
 
