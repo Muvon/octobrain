@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.7.0] - 2026-06-03
+
+### 📋 Release Summary
+
+This release introduces advanced memory consolidation and persistence features, including automated goal anchoring, half-life decay, and "sleep" clustering for improved long-term retention (434f28dd, b37de658, 8b115380, d9f10bf4, 230cb4ce). Search capabilities have been significantly enhanced through HyDE-lite query expansion and a new integrated SQL module (a8fde461, de606fc5). Additionally, we have streamlined the MCP toolset, implemented the LongMemEval benchmarking framework, and optimized overall system performance and stability (6733a00b, d988af72, 92059bdd, 9fdda3ac).
+
+
+### ✨ New Features & Enhancements
+
+- **core**: add sql module `de606fc5`
+- **bench**: add checkpointing and input padding to longmemeval `92059bdd`
+- **bench**: implement LongMemEval benchmarking framework `d988af72`
+- **memory**: automate goal consolidation via closes relation `434f28dd`
+- **mcp**: narrow MCP surface from 8 to 5 tools `6733a00b`
+- **memory**: autonomous lazy sleep consolidation + HyDE default-on `d9f10bf4`
+- **memory**: sleep consolidation — batch-cluster recent similar memories `8b115380`
+- **memory**: goal-anchored consolidation, lifecycle state, MCP+CLI `230cb4ce`
+- **search**: add HyDE-lite (PRF / Rocchio) query expansion `a8fde461`
+- **memory**: implement half-life decay and persistence `b37de658`
+
+### 🔧 Improvements & Optimizations
+
+- **sql**: centralize SQL literal escaping `9d98b535`
+- **memory**: centralize utilities and harden sql `59b04f9b`
+- **config**: rename text_model to model `08ba7365`
+- **ci**: fix aarch64 compilation and update default models `6511ee43`
+- **ci**: optimize build pipeline and update embeddings `20276d25`
+- **memory**: implement periodic LanceDB maintenance `9fdda3ac`
+- **memory**: implement async auto-linking and graph retrieval `4cbae3ac`
+- **workflow**: migrate pr brief to reusable workflow `5a434a67`
+
+### 📚 Documentation & Examples
+
+- **guide**: expand development guide and architecture details `b6b54d0c`
+- **mcp**: update documentation and tool instructions `b0f5bfae`
+
+### 🔄 Other Changes
+
+2 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.6.1] - 2026-05-14
 
 ### 📋 Release Summary
