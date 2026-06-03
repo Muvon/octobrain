@@ -24,5 +24,6 @@ pub mod embedding;
 pub mod knowledge;
 pub mod mcp;
 pub mod memory;
+pub mod sql;
 pub mod storage;
 pub mod vector_optimizer;
