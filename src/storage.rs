@@ -152,3 +152,14 @@ pub fn get_system_config_path() -> Result<PathBuf> {
     let system_dir = get_system_storage_dir()?;
     Ok(system_dir.join("config.toml"))
 }
+
+/// Get the config file path, respecting the OCTOBRAIN_CONFIG_PATH environment variable.
+/// If the env var is set, returns that path directly. Otherwise falls back to the
+/// system config path.
+pub fn get_config_path() -> Result<PathBuf> {
+    if let Ok(env_path) = std::env::var("OCTOBRAIN_CONFIG_PATH") {
+        Ok(PathBuf::from(env_path))
+    } else {
+        get_system_config_path()
+    }
+}

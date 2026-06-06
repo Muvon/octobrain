@@ -158,7 +158,7 @@ impl Config {
     /// STRICT: All config fields must be explicitly defined - no defaults allowed
     pub fn load() -> Result<Self> {
         // Try to load from system config directory
-        let config_path = crate::storage::get_system_config_path()?;
+        let config_path = crate::storage::get_config_path()?;
 
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
