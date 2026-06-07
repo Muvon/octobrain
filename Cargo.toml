@@ -74,7 +74,7 @@ regex = "1"
 
 # Local dep for testing
 # octolib = { path = "../octolib", default-features = false }
-octolib = { version = "0.21.5", default-features = false }
+octolib = { version = "0.22.0", default-features = false }
 
 # Replace esaxx-rs 0.1.10 (transitive: tokenizers/esaxx_fast → esaxx-rs/cpp).
 # Upstream build.rs hardcodes cc::Build::static_crt(true), forcing /MT on
