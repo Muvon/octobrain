@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.8.0] - 2026-06-07
+
+### 📋 Release Summary
+
+This release introduces automatic project discovery and the ability to specify custom configuration paths via environment variables (8aa684c3, 54907257). Additionally, MCP performance and reliability have been improved through optimized tool listing and refined locking logic (d1f1c3da, 85956ee3).
+
+
+### ✨ New Features & Enhancements
+
+- **mcp**: add automatic project discovery and ID derivation `8aa684c3`
+- **config**: allow custom config path via env var `54907257`
+
+### 🔧 Improvements & Optimizations
+
+- **mcp**: decouple project and role locking logic `85956ee3`
+- **mcp**: optimize tool listing and memory provider `d1f1c3da`
+
+### 🔄 Other Changes
+
+1 maintenance, dependency, and tooling update not listed individually.
+
 ## [0.7.0] - 2026-06-03
 
 ### 📋 Release Summary
