@@ -35,95 +35,57 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 use tracing::debug;
 
-/// Tools with project/role stripped — built once, reused on every locked tools/list response.
+/// Tools with project+role stripped — built once.
 static TOOLS_LOCKED: OnceLock<Vec<Tool>> = OnceLock::new();
-/// Full tools list — built once, reused on every unlocked tools/list response.
+/// Tools with only role stripped — built once.
+static TOOLS_ROLE_ONLY: OnceLock<Vec<Tool>> = OnceLock::new();
+/// Full tools list — built once.
 static TOOLS_FULL: OnceLock<Vec<Tool>> = OnceLock::new();
 
 fn tools_full() -> &'static Vec<Tool> {
     TOOLS_FULL.get_or_init(|| McpServer::tool_router().list_all())
 }
 
+fn strip_fields(fields: &[&str]) -> Vec<Tool> {
+    tools_full()
+        .iter()
+        .map(|tool| {
+            let mut schema = tool.input_schema.as_ref().clone();
+            if let Some(props) = schema.get_mut("properties").and_then(|v| v.as_object_mut()) {
+                for f in fields {
+                    props.remove(*f);
+                }
+            }
+            if let Some(required) = schema.get_mut("required").and_then(|v| v.as_array_mut()) {
+                required.retain(|v| !fields.iter().any(|f| v.as_str() == Some(f)));
+            }
+            let mut t = tool.clone();
+            t.input_schema = Arc::new(schema);
+            t
+        })
+        .collect()
+}
+
 fn tools_locked() -> &'static Vec<Tool> {
-    TOOLS_LOCKED.get_or_init(|| {
-        tools_full()
-            .iter()
-            .map(|tool| {
-                let mut schema = tool.input_schema.as_ref().clone();
-                if let Some(props) = schema.get_mut("properties").and_then(|v| v.as_object_mut()) {
-                    props.remove("project");
-                    props.remove("role");
-                }
-                if let Some(required) = schema.get_mut("required").and_then(|v| v.as_array_mut()) {
-                    required
-                        .retain(|v| v.as_str() != Some("project") && v.as_str() != Some("role"));
-                }
-                let mut t = tool.clone();
-                t.input_schema = Arc::new(schema);
-                t
-            })
-            .collect()
-    })
+    TOOLS_LOCKED.get_or_init(|| strip_fields(&["project", "role"]))
+}
+
+fn tools_role_only() -> &'static Vec<Tool> {
+    TOOLS_ROLE_ONLY.get_or_init(|| strip_fields(&["role"]))
 }
 
 use crate::config::Config;
 use crate::mcp::knowledge::KnowledgeProvider;
 use crate::mcp::memory::MemoryProvider;
 
-/// Strip credentials from a git remote URL before hashing or display.
-/// `https://token@github.com/org/repo.git` → `https://github.com/org/repo.git`
-fn strip_git_credentials(url: &str) -> String {
-    let scheme = if url.starts_with("https://") {
-        "https"
-    } else if url.starts_with("http://") {
-        "http"
-    } else {
-        return url.to_string();
-    };
-    let rest = &url[scheme.len() + 3..]; // skip "scheme://"
-    if let Some(at) = rest.find('@') {
-        format!("{}://{}", scheme, &rest[at + 1..])
-    } else {
-        url.to_string()
-    }
-}
-
-/// Same algorithm as octomind: SHA-256(git remote origin URL, credentials stripped) or SHA-256(cwd), first 16 hex chars.
+/// Delegates to octolib::utils::path_to_id — single canonical implementation.
 fn derive_project_id(path: &std::path::Path) -> String {
-    use sha2::{Digest, Sha256};
-    let source = std::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(path)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| strip_git_credentials(s.trim()))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned());
-    let hash = Sha256::digest(source.as_bytes());
-    hex::encode(hash)[..16].to_string()
+    octolib::utils::path_to_id(path)
 }
 
-/// Extract org/repo (lowercased) from a git remote URL.
-/// `git@github.com:Muvon/octomind.git` → `muvon/octomind`
-/// `https://github.com/Muvon/octomind.git` → `muvon/octomind`
+/// Extract org/repo (lowercased) from a git remote URL via octolib::utils.
 fn org_repo_from_url(url: &str) -> String {
-    let url = strip_git_credentials(url.trim());
-    let url = url.strip_suffix(".git").unwrap_or(&url);
-    let path = if url.contains('@') && url.contains(':') && !url.contains("://") {
-        // SSH: git@host:org/repo
-        url.find(':').map(|i| &url[i + 1..]).unwrap_or(url)
-    } else if let Some(rest) = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-    {
-        // HTTPS: https://host/org/repo — drop the host
-        rest.splitn(2, '/').nth(1).unwrap_or(rest)
-    } else {
-        url
-    };
-    path.to_lowercase()
+    octolib::utils::org_repo_from_url(url)
 }
 
 /// Scan `root` for git repos: root itself, then immediate subdirectories.
@@ -187,7 +149,10 @@ pub struct SessionState {
     pub project: Option<String>,
     pub role: Option<String>,
     pub session_id: String,
-    pub locked: bool,
+    /// Role is locked (and stripped from schema) when role is present in handshake.
+    pub role_locked: bool,
+    /// Project is locked (and stripped from schema) when git=true OR no local repos.
+    pub project_locked: bool,
 }
 
 impl Default for SessionState {
@@ -196,7 +161,8 @@ impl Default for SessionState {
             project: None,
             role: None,
             session_id: uuid::Uuid::new_v4().to_string(),
-            locked: false,
+            role_locked: false,
+            project_locked: false,
         }
     }
 }
@@ -210,11 +176,14 @@ pub struct McpServer {
     knowledge: Arc<Mutex<Option<KnowledgeProvider>>>,
     session: Arc<Mutex<SessionState>>,
     instructions: String,
+    /// True when octobrain's working directory contains at least one git repo.
+    has_local_projects: bool,
 }
 
 impl McpServer {
     pub fn new(config: Config, working_directory: std::path::PathBuf) -> Self {
         let projects = discover_projects(&working_directory);
+        let has_local_projects = !projects.is_empty();
         let instructions = build_instructions(&projects);
         Self {
             config,
@@ -223,6 +192,7 @@ impl McpServer {
             knowledge: Arc::new(Mutex::new(None)),
             session: Arc::new(Mutex::new(SessionState::default())),
             instructions,
+            has_local_projects,
         }
     }
 
@@ -236,7 +206,7 @@ impl McpServer {
     ) -> Result<MemoryProvider, McpError> {
         let session = self.session.lock().await.clone();
 
-        if session.locked {
+        if session.role_locked || session.project_locked {
             // Double-checked lock: cheap path first
             {
                 let guard = self.memory.lock().await;
@@ -704,8 +674,11 @@ impl ServerHandler for McpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let tools = if self.session.lock().await.locked {
-            tools_locked().clone()
+        let session = self.session.lock().await;
+        let tools = if session.role_locked && session.project_locked {
+            tools_locked().clone() // strip project + role
+        } else if session.role_locked {
+            tools_role_only().clone() // strip role only, project stays visible
         } else {
             tools_full().clone()
         };
@@ -737,14 +710,22 @@ impl ServerHandler for McpServer {
                     .get("session_id")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
+                let git = session_obj
+                    .get("git")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
                 let mut session = self.session.lock().await;
-                session.project = project;
+                let should_lock_project = git || !self.has_local_projects;
+                session.project = if should_lock_project { project } else { None };
                 session.role = role;
                 if let Some(sid) = session_id {
                     session.session_id = sid;
                 }
-                session.locked = true;
+                // Always lock (handshake received) — strips role from schema.
+                // project_locked strips project from schema too, only when meaningful.
+                session.role_locked = session.role.is_some();
+                session.project_locked = should_lock_project;
 
                 debug!(
                     "Session locked: project={:?}, role={:?}",
