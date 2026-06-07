@@ -70,6 +70,117 @@ use crate::config::Config;
 use crate::mcp::knowledge::KnowledgeProvider;
 use crate::mcp::memory::MemoryProvider;
 
+/// Strip credentials from a git remote URL before hashing or display.
+/// `https://token@github.com/org/repo.git` → `https://github.com/org/repo.git`
+fn strip_git_credentials(url: &str) -> String {
+    let scheme = if url.starts_with("https://") {
+        "https"
+    } else if url.starts_with("http://") {
+        "http"
+    } else {
+        return url.to_string();
+    };
+    let rest = &url[scheme.len() + 3..]; // skip "scheme://"
+    if let Some(at) = rest.find('@') {
+        format!("{}://{}", scheme, &rest[at + 1..])
+    } else {
+        url.to_string()
+    }
+}
+
+/// Same algorithm as octomind: SHA-256(git remote origin URL, credentials stripped) or SHA-256(cwd), first 16 hex chars.
+fn derive_project_id(path: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    let source = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(path)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| strip_git_credentials(s.trim()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    let hash = Sha256::digest(source.as_bytes());
+    hex::encode(hash)[..16].to_string()
+}
+
+/// Extract org/repo (lowercased) from a git remote URL.
+/// `git@github.com:Muvon/octomind.git` → `muvon/octomind`
+/// `https://github.com/Muvon/octomind.git` → `muvon/octomind`
+fn org_repo_from_url(url: &str) -> String {
+    let url = strip_git_credentials(url.trim());
+    let url = url.strip_suffix(".git").unwrap_or(&url);
+    let path = if url.contains('@') && url.contains(':') && !url.contains("://") {
+        // SSH: git@host:org/repo
+        url.find(':').map(|i| &url[i + 1..]).unwrap_or(url)
+    } else if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
+        // HTTPS: https://host/org/repo — drop the host
+        rest.splitn(2, '/').nth(1).unwrap_or(rest)
+    } else {
+        url
+    };
+    path.to_lowercase()
+}
+
+/// Scan `root` for git repos: root itself, then immediate subdirectories.
+/// Returns list of (org/repo label, hex project_id) for every git repo found.
+fn discover_projects(root: &std::path::Path) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+
+    let mut check = |path: &std::path::Path| {
+        if path.join(".git").exists() {
+            let id = derive_project_id(path);
+            let label = std::process::Command::new("git")
+                .args(["remote", "get-url", "origin"])
+                .current_dir(path)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| org_repo_from_url(&s))
+                .unwrap_or_else(|| path.to_string_lossy().to_lowercase());
+            found.push((label, id));
+        }
+    };
+
+    check(root);
+
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                check(&path);
+            }
+        }
+    }
+
+    found
+}
+
+/// Build the instructions string, optionally including available project hints.
+fn build_instructions(projects: &[(String, String)]) -> String {
+    let base = "This server provides memory tools for storing and retrieving AI context. \
+                Use 'memorize' to store information (supports 'related_to' for inline relationships), \
+                'remember' for semantic search, 'forget' to delete memories, \
+                and 'knowledge' to search/index/read/match indexed content. \
+                The 'knowledge' tool's 'source' parameter is always a SINGLE FILE or URL — never a directory.";
+
+    if projects.is_empty() {
+        return base.to_string();
+    }
+
+    let mut hint =
+        String::from("\n\nAvailable projects (pass the hex ID as the 'project' parameter):");
+    for (label, id) in projects {
+        hint.push_str(&format!("\n  {}: {}", label, id));
+    }
+    format!("{}{}", base, hint)
+}
+
 /// Session state for project/role locking from MCP capabilities
 #[derive(Clone, Debug)]
 pub struct SessionState {
@@ -98,16 +209,20 @@ pub struct McpServer {
     memory: Arc<Mutex<Option<MemoryProvider>>>,
     knowledge: Arc<Mutex<Option<KnowledgeProvider>>>,
     session: Arc<Mutex<SessionState>>,
+    instructions: String,
 }
 
 impl McpServer {
     pub fn new(config: Config, working_directory: std::path::PathBuf) -> Self {
+        let projects = discover_projects(&working_directory);
+        let instructions = build_instructions(&projects);
         Self {
             config,
             working_directory,
             memory: Arc::new(Mutex::new(None)),
             knowledge: Arc::new(Mutex::new(None)),
             session: Arc::new(Mutex::new(SessionState::default())),
+            instructions,
         }
     }
 
@@ -580,13 +695,7 @@ impl ServerHandler for McpServer {
                         "Standalone memory management system for AI context and conversation state",
                     ),
             )
-            .with_instructions(
-                "This server provides memory tools for storing and retrieving AI context. \
-                 Use 'memorize' to store information (supports 'related_to' for inline relationships), \
-                 'remember' for semantic search, 'forget' to delete memories, \
-                 and 'knowledge' to search/index/read/match indexed content. \
-                 The 'knowledge' tool's 'source' parameter is always a SINGLE FILE or URL — never a directory.",
-            )
+            .with_instructions(self.instructions.clone())
     }
 
     /// Return tool list with project/role stripped from schemas when session context is known
