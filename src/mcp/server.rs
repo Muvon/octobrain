@@ -19,8 +19,8 @@ use anyhow::Result;
 use rmcp::{
     handler::server::{wrapper::Parameters, ServerHandler},
     model::{
-        Implementation, InitializeRequestParams, InitializeResult, ProtocolVersion,
-        ServerCapabilities, ServerInfo,
+        Implementation, InitializeRequestParams, InitializeResult, ListToolsResult,
+        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
     },
     schemars::JsonSchema,
     service::RequestContext,
@@ -31,9 +31,40 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServiceExt,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 use tracing::debug;
+
+/// Tools with project/role stripped — built once, reused on every locked tools/list response.
+static TOOLS_LOCKED: OnceLock<Vec<Tool>> = OnceLock::new();
+/// Full tools list — built once, reused on every unlocked tools/list response.
+static TOOLS_FULL: OnceLock<Vec<Tool>> = OnceLock::new();
+
+fn tools_full() -> &'static Vec<Tool> {
+    TOOLS_FULL.get_or_init(|| McpServer::tool_router().list_all())
+}
+
+fn tools_locked() -> &'static Vec<Tool> {
+    TOOLS_LOCKED.get_or_init(|| {
+        tools_full()
+            .iter()
+            .map(|tool| {
+                let mut schema = tool.input_schema.as_ref().clone();
+                if let Some(props) = schema.get_mut("properties").and_then(|v| v.as_object_mut()) {
+                    props.remove("project");
+                    props.remove("role");
+                }
+                if let Some(required) = schema.get_mut("required").and_then(|v| v.as_array_mut()) {
+                    required
+                        .retain(|v| v.as_str() != Some("project") && v.as_str() != Some("role"));
+                }
+                let mut t = tool.clone();
+                t.input_schema = Arc::new(schema);
+                t
+            })
+            .collect()
+    })
+}
 
 use crate::config::Config;
 use crate::mcp::knowledge::KnowledgeProvider;
@@ -80,37 +111,48 @@ impl McpServer {
         }
     }
 
-    /// Get or initialize memory provider with session state
-    async fn get_or_init_memory(&self) -> Result<MemoryProvider, McpError> {
+    /// Get memory provider.
+    /// - Locked (handshake received): cached, project/role fixed from session state.
+    /// - Unlocked (no handshake): fresh per call, project/role from caller args.
+    async fn get_memory_provider(
+        &self,
+        project: Option<String>,
+        role: Option<String>,
+    ) -> Result<MemoryProvider, McpError> {
         let session = self.session.lock().await.clone();
 
-        // Check if already initialized
-        {
-            let guard = self.memory.lock().await;
+        if session.locked {
+            // Double-checked lock: cheap path first
+            {
+                let guard = self.memory.lock().await;
+                if let Some(provider) = guard.as_ref() {
+                    return Ok(provider.clone());
+                }
+            }
+            let mut guard = self.memory.lock().await;
             if let Some(provider) = guard.as_ref() {
                 return Ok(provider.clone());
             }
+            let provider = MemoryProvider::new(
+                &self.config,
+                self.working_directory.clone(),
+                session.project,
+                session.role,
+            )
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Failed to initialize memory: {}", e), None)
+            })?;
+            *guard = Some(provider.clone());
+            Ok(provider)
+        } else {
+            // No handshake — honour per-call project/role from args
+            MemoryProvider::new(&self.config, self.working_directory.clone(), project, role)
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(format!("Failed to initialize memory: {}", e), None)
+                })
         }
-
-        // Initialize with session project/role
-        let mut guard = self.memory.lock().await;
-        if let Some(provider) = guard.as_ref() {
-            return Ok(provider.clone());
-        }
-
-        let provider = MemoryProvider::new(
-            &self.config,
-            self.working_directory.clone(),
-            session.project.clone(),
-            session.role.clone(),
-        )
-        .await
-        .map_err(|e| {
-            McpError::internal_error(format!("Failed to initialize memory: {}", e), None)
-        })?;
-
-        *guard = Some(provider.clone());
-        Ok(provider)
     }
 
     /// Get or initialize knowledge provider
@@ -421,22 +463,12 @@ impl McpServer {
         &self,
         Parameters(params): Parameters<MemorizeParams>,
     ) -> Result<String, McpError> {
-        let provider = self.get_or_init_memory().await?;
-
-        let mut args = serde_json::to_value(&params).map_err(|e| {
+        let provider = self
+            .get_memory_provider(params.project.clone(), params.role.clone())
+            .await?;
+        let args = serde_json::to_value(&params).map_err(|e| {
             McpError::internal_error(format!("Failed to serialize params: {}", e), None)
         })?;
-
-        // Handle session locking
-        let session = self.session.lock().await;
-        if session.locked {
-            // Remove project/role from args if locked
-            if let Some(obj) = args.as_object_mut() {
-                obj.remove("project");
-                obj.remove("role");
-            }
-        }
-
         provider
             .execute_memorize(&args)
             .await
@@ -451,21 +483,12 @@ impl McpServer {
         &self,
         Parameters(params): Parameters<RememberParams>,
     ) -> Result<String, McpError> {
-        let provider = self.get_or_init_memory().await?;
-
-        let mut args = serde_json::to_value(&params).map_err(|e| {
+        let provider = self
+            .get_memory_provider(params.project.clone(), params.role.clone())
+            .await?;
+        let args = serde_json::to_value(&params).map_err(|e| {
             McpError::internal_error(format!("Failed to serialize params: {}", e), None)
         })?;
-
-        // Handle session locking
-        let session = self.session.lock().await;
-        if session.locked {
-            if let Some(obj) = args.as_object_mut() {
-                obj.remove("project");
-                obj.remove("role");
-            }
-        }
-
         provider
             .execute_remember(&args)
             .await
@@ -480,20 +503,12 @@ impl McpServer {
         &self,
         Parameters(params): Parameters<ForgetParams>,
     ) -> Result<String, McpError> {
-        let provider = self.get_or_init_memory().await?;
-
-        let mut args = serde_json::to_value(&params).map_err(|e| {
+        let provider = self
+            .get_memory_provider(params.project.clone(), params.role.clone())
+            .await?;
+        let args = serde_json::to_value(&params).map_err(|e| {
             McpError::internal_error(format!("Failed to serialize params: {}", e), None)
         })?;
-
-        let session = self.session.lock().await;
-        if session.locked {
-            if let Some(obj) = args.as_object_mut() {
-                obj.remove("project");
-                obj.remove("role");
-            }
-        }
-
         provider.execute_forget(&args).await.map_err(to_rmcp_error)
     }
 
@@ -572,6 +587,24 @@ impl ServerHandler for McpServer {
                  and 'knowledge' to search/index/read/match indexed content. \
                  The 'knowledge' tool's 'source' parameter is always a SINGLE FILE or URL — never a directory.",
             )
+    }
+
+    /// Return tool list with project/role stripped from schemas when session context is known
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let tools = if self.session.lock().await.locked {
+            tools_locked().clone()
+        } else {
+            tools_full().clone()
+        };
+        Ok(ListToolsResult {
+            tools,
+            meta: None,
+            next_cursor: None,
+        })
     }
 
     /// Extract project/role from experimental capabilities during initialize handshake
