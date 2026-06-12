@@ -124,7 +124,7 @@ impl MemoryManager {
         )
         .await?;
 
-        let mut manager = Self {
+        let manager = Self {
             store: Arc::new(store),
             config: memory_config,
             stale_check_marker,
@@ -134,15 +134,34 @@ impl MemoryManager {
             pending_maintenance: Arc::new(AsyncMutex::new(None)),
         };
 
-        // Lazy cleanup of stale file references on init (like knowledge session cleanup)
+        // Spawn background tasks — fire-and-forget, never block init.
         if manager.config.stale_ref_cleanup_enabled {
-            manager.cleanup_stale_references().await.ok();
+            let bg = MemoryManager {
+                store: manager.store.clone(),
+                config: manager.config.clone(),
+                stale_check_marker: manager.stale_check_marker.clone(),
+                sleep_consolidation_marker: manager.sleep_consolidation_marker.clone(),
+                pending_auto_links: manager.pending_auto_links.clone(),
+                memorize_counter: manager.memorize_counter.clone(),
+                pending_maintenance: manager.pending_maintenance.clone(),
+            };
+            tokio::spawn(async move {
+                bg.cleanup_stale_references().await.ok();
+            });
         }
-        // Lazy autonomous sleep consolidation: marker-gated, no cron required.
-        // Mirrors the cleanup pattern — best-effort, errors swallowed so a slow or
-        // failed consolidation pass never blocks the manager from initializing.
         if manager.config.sleep_consolidation_enabled {
-            manager.maybe_sleep_consolidate().await.ok();
+            let bg = MemoryManager {
+                store: manager.store.clone(),
+                config: manager.config.clone(),
+                stale_check_marker: manager.stale_check_marker.clone(),
+                sleep_consolidation_marker: manager.sleep_consolidation_marker.clone(),
+                pending_auto_links: manager.pending_auto_links.clone(),
+                memorize_counter: manager.memorize_counter.clone(),
+                pending_maintenance: manager.pending_maintenance.clone(),
+            };
+            tokio::spawn(async move {
+                bg.maybe_sleep_consolidate().await.ok();
+            });
         }
 
         Ok(manager)
@@ -164,7 +183,7 @@ impl MemoryManager {
     /// Decide whether to run sleep consolidation based on the marker file.
     /// Runs if no marker exists OR `now - last_run >= interval_hours`.
     /// Always updates the marker on a successful run.
-    async fn maybe_sleep_consolidate(&mut self) -> Result<()> {
+    async fn maybe_sleep_consolidate(&self) -> Result<()> {
         let interval_hours = self.config.sleep_consolidation_interval_hours.max(1) as i64;
         let due = match self.read_sleep_marker() {
             Some(last) => (Utc::now() - last).num_hours() >= interval_hours,
@@ -214,7 +233,7 @@ impl MemoryManager {
     /// - HEAD unchanged since last check → skip entirely
     /// - HEAD advanced → scan only the delta (last_checked..HEAD)
     /// - First run → scan from oldest memory's commit
-    async fn cleanup_stale_references(&mut self) -> Result<usize> {
+    async fn cleanup_stale_references(&self) -> Result<usize> {
         // Without a scope we cannot determine which git repo to check
         // file existence against — skip entirely to avoid deleting memories
         // from unrelated projects.
@@ -357,7 +376,7 @@ impl MemoryManager {
 
     /// Propagate importance penalties through relationships (1 hop).
     /// DependsOn → 0.5x penalty, RelatedTo/AutoLinked → 0.9x penalty.
-    async fn propagate_staleness(&mut self, stale_ids: &[String]) -> Result<usize> {
+    async fn propagate_staleness(&self, stale_ids: &[String]) -> Result<usize> {
         let mut penalized = 0;
         let mut seen = std::collections::HashSet::new();
 
@@ -649,7 +668,7 @@ impl MemoryManager {
     }
     /// Update an existing memory
     pub async fn update_memory(
-        &mut self,
+        &self,
         memory_id: &str,
         title: Option<String>,
         content: Option<String>,
@@ -798,7 +817,7 @@ impl MemoryManager {
 
     /// Create a relationship between two memories
     pub async fn create_relationship(
-        &mut self,
+        &self,
         source_id: String,
         target_id: String,
         relationship_type: RelationshipType,
@@ -865,7 +884,7 @@ impl MemoryManager {
     /// 5. Add Closes(parent → goal) and AutoLinked(parent → each source)
     /// 6. Transition each source: state → Consolidated, importance *= 0.2 (partial UPDATE)
     pub async fn consolidate_goal(
-        &mut self,
+        &self,
         goal_id: &str,
         parent_id: Option<String>,
         summary: Option<String>,
@@ -1050,7 +1069,7 @@ impl MemoryManager {
     /// Returns the consolidated memories produced. Empty vec when nothing
     /// clusters tightly enough at the given threshold.
     pub async fn sleep_consolidate(
-        &mut self,
+        &self,
         similarity_threshold: f32,
         min_cluster_size: usize,
         max_age_days: u32,
