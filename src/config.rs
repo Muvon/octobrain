@@ -23,6 +23,8 @@ pub struct EmbeddingConfig {
     pub model: String,
     pub batch_size: usize,
     pub max_tokens_per_batch: usize,
+    /// Timeout in seconds for embedding generation calls (0 = disabled)
+    pub timeout_secs: u64,
 }
 
 impl Default for EmbeddingConfig {
@@ -31,6 +33,7 @@ impl Default for EmbeddingConfig {
             model: "fastembed:BAAI/bge-small-en-v1.5".to_string(),
             batch_size: 32,
             max_tokens_per_batch: 100000,
+            timeout_secs: 30,
         }
     }
 }
@@ -60,6 +63,7 @@ impl Default for SearchConfig {
                 model: "voyage:rerank-2.5".to_string(),
                 top_k_candidates: 50,
                 final_top_k: 10,
+                timeout_secs: 30,
             },
             hyde: HydeConfig::default(),
         }
@@ -219,4 +223,6 @@ pub struct RerankerConfig {
     pub top_k_candidates: usize,
     /// Number of results to return after reranking
     pub final_top_k: usize,
+    /// Timeout in seconds for reranker calls (0 = disabled)
+    pub timeout_secs: u64,
 }
