@@ -31,6 +31,7 @@
 //!     model: "voyage:rerank-2.5".to_string(),
 //!     top_k_candidates: 50,
 //!     final_top_k: 10,
+//!     timeout_secs: 30,
 //! };
 //!
 //! let reranker = RerankerIntegration::new(config);
