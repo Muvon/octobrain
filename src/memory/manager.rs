@@ -82,11 +82,7 @@ pub struct MemoryManager {
 
 impl MemoryManager {
     /// Create a new memory manager
-    pub async fn new(
-        config: &Config,
-        project_key: Option<String>,
-        role: Option<String>,
-    ) -> Result<Self> {
+    pub async fn new(config: &Config, scope: Option<String>, role: Option<String>) -> Result<Self> {
         // Use memory config from main config (loaded from config file)
         let memory_config = config.memory.clone();
 
@@ -104,11 +100,13 @@ impl MemoryManager {
         // Use shared memory database path (single DB for all projects)
         let db_path = crate::storage::get_memory_database_path()?;
 
-        // Marker files: {db_dir}/.{kind}_{project_key}
-        let project_label = project_key.as_deref().unwrap_or("default");
-        let stale_check_marker = db_path.join(format!(".stale_check_{}", project_label));
+        // Marker files: {db_dir}/.{kind}_{scope_label}
+        let scope_label = scope.as_deref().unwrap_or("global");
+        // Replace path separators so the marker file name stays flat
+        let scope_safe = scope_label.replace('/', "_");
+        let stale_check_marker = db_path.join(format!(".stale_check_{}", scope_safe));
         let sleep_consolidation_marker =
-            db_path.join(format!(".sleep_consolidation_{}", project_label));
+            db_path.join(format!(".sleep_consolidation_{}", scope_safe));
 
         // Create embedding provider using model from config
         let model_string = &config.embedding.model;
@@ -117,7 +115,7 @@ impl MemoryManager {
 
         let store = MemoryStore::new(
             db_path.to_string_lossy().as_ref(),
-            project_key,
+            scope,
             role,
             embedding_provider,
             memory_config.clone(),
@@ -217,10 +215,10 @@ impl MemoryManager {
     /// - HEAD advanced → scan only the delta (last_checked..HEAD)
     /// - First run → scan from oldest memory's commit
     async fn cleanup_stale_references(&mut self) -> Result<usize> {
-        // Without a project key we cannot determine which git repo to check
+        // Without a scope we cannot determine which git repo to check
         // file existence against — skip entirely to avoid deleting memories
         // from unrelated projects.
-        if self.store.has_no_project_key() {
+        if self.store.is_unscoped() {
             return Ok(0);
         }
 

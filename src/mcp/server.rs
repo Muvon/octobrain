@@ -41,6 +41,8 @@ static TOOLS_LOCKED: OnceLock<Vec<Tool>> = OnceLock::new();
 static TOOLS_ROLE_ONLY: OnceLock<Vec<Tool>> = OnceLock::new();
 /// Full tools list — built once.
 static TOOLS_FULL: OnceLock<Vec<Tool>> = OnceLock::new();
+/// Full tools without global flag (unlocked sessions don't need it — use scope="" directly).
+static TOOLS_FULL_NO_GLOBAL: OnceLock<Vec<Tool>> = OnceLock::new();
 
 fn tools_full() -> &'static Vec<Tool> {
     TOOLS_FULL.get_or_init(|| McpServer::tool_router().list_all())
@@ -66,46 +68,33 @@ fn strip_fields(fields: &[&str]) -> Vec<Tool> {
         .collect()
 }
 
-fn tools_locked() -> &'static Vec<Tool> {
-    TOOLS_LOCKED.get_or_init(|| strip_fields(&["project", "role"]))
+/// Unlocked full schema: strip `global` (irrelevant — AI can pass scope="" directly).
+fn tools_full_no_global() -> &'static Vec<Tool> {
+    TOOLS_FULL_NO_GLOBAL.get_or_init(|| strip_fields(&["global"]))
 }
 
+/// Scope locked: strip `scope` + `role` + keep `global` so AI can opt into global scope.
+fn tools_locked() -> &'static Vec<Tool> {
+    TOOLS_LOCKED.get_or_init(|| strip_fields(&["scope", "role"]))
+}
+
+/// Role locked only: strip `role` + `global` (scope still free, no lock).
 fn tools_role_only() -> &'static Vec<Tool> {
-    TOOLS_ROLE_ONLY.get_or_init(|| strip_fields(&["role"]))
+    TOOLS_ROLE_ONLY.get_or_init(|| strip_fields(&["role", "global"]))
 }
 
 use crate::config::Config;
 use crate::mcp::knowledge::KnowledgeProvider;
 use crate::mcp::memory::MemoryProvider;
 
-/// Delegates to octolib::utils::path_to_id — single canonical implementation.
-fn derive_project_id(path: &std::path::Path) -> String {
-    octolib::utils::path_to_id(path)
-}
-
-/// Extract org/repo (lowercased) from a git remote URL via octolib::utils.
-fn org_repo_from_url(url: &str) -> String {
-    octolib::utils::org_repo_from_url(url)
-}
-
 /// Scan `root` for git repos: root itself, then immediate subdirectories.
-/// Returns list of (org/repo label, hex project_id) for every git repo found.
-fn discover_projects(root: &std::path::Path) -> Vec<(String, String)> {
+/// Returns list of human-readable scope strings for every git repo found.
+fn discover_scopes(root: &std::path::Path) -> Vec<String> {
     let mut found = Vec::new();
 
     let mut check = |path: &std::path::Path| {
         if path.join(".git").exists() {
-            let id = derive_project_id(path);
-            let label = std::process::Command::new("git")
-                .args(["remote", "get-url", "origin"])
-                .current_dir(path)
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| org_repo_from_url(&s))
-                .unwrap_or_else(|| path.to_string_lossy().to_lowercase());
-            found.push((label, id));
+            found.push(crate::storage::derive_scope(path));
         }
     };
 
@@ -123,22 +112,21 @@ fn discover_projects(root: &std::path::Path) -> Vec<(String, String)> {
     found
 }
 
-/// Build the instructions string, optionally including available project hints.
-fn build_instructions(projects: &[(String, String)]) -> String {
+/// Build the instructions string, optionally including available scope hints.
+fn build_instructions(scopes: &[String]) -> String {
     let base = "This server provides memory tools for storing and retrieving AI context. \
                 Use 'memorize' to store information (supports 'related_to' for inline relationships), \
                 'remember' for semantic search, 'forget' to delete memories, \
                 and 'knowledge' to search/index/read/match indexed content. \
                 The 'knowledge' tool's 'source' parameter is always a SINGLE FILE or URL — never a directory.";
 
-    if projects.is_empty() {
+    if scopes.is_empty() {
         return base.to_string();
     }
 
-    let mut hint =
-        String::from("\n\nAvailable projects (pass the hex ID as the 'project' parameter):");
-    for (label, id) in projects {
-        hint.push_str(&format!("\n  {}: {}", label, id));
+    let mut hint = String::from("\n\nAvailable project scopes (pass as the 'scope' parameter):");
+    for scope in scopes {
+        hint.push_str(&format!("\n  {}", scope));
     }
     format!("{}{}", base, hint)
 }
@@ -146,23 +134,23 @@ fn build_instructions(projects: &[(String, String)]) -> String {
 /// Session state for project/role locking from MCP capabilities
 #[derive(Clone, Debug)]
 pub struct SessionState {
-    pub project: Option<String>,
+    pub scope: Option<String>,
     pub role: Option<String>,
     pub session_id: String,
     /// Role is locked (and stripped from schema) when role is present in handshake.
     pub role_locked: bool,
-    /// Project is locked (and stripped from schema) when git=true OR no local repos.
-    pub project_locked: bool,
+    /// Scope is locked (and stripped from schema) when git=true OR no local repos.
+    pub scope_locked: bool,
 }
 
 impl Default for SessionState {
     fn default() -> Self {
         Self {
-            project: None,
+            scope: None,
             role: None,
             session_id: uuid::Uuid::new_v4().to_string(),
             role_locked: false,
-            project_locked: false,
+            scope_locked: false,
         }
     }
 }
@@ -182,9 +170,9 @@ pub struct McpServer {
 
 impl McpServer {
     pub fn new(config: Config, working_directory: std::path::PathBuf) -> Self {
-        let projects = discover_projects(&working_directory);
-        let has_local_projects = !projects.is_empty();
-        let instructions = build_instructions(&projects);
+        let scopes = discover_scopes(&working_directory);
+        let has_local_projects = !scopes.is_empty();
+        let instructions = build_instructions(&scopes);
         Self {
             config,
             working_directory,
@@ -197,16 +185,16 @@ impl McpServer {
     }
 
     /// Get memory provider.
-    /// - Locked (handshake received): cached, project/role fixed from session state.
-    /// - Unlocked (no handshake): fresh per call, project/role from caller args.
+    /// - Locked (handshake received): cached, scope/role fixed from session state.
+    /// - Unlocked (no handshake): fresh per call, scope/role from caller args.
     async fn get_memory_provider(
         &self,
-        project: Option<String>,
+        scope: Option<String>,
         role: Option<String>,
     ) -> Result<MemoryProvider, McpError> {
         let session = self.session.lock().await.clone();
 
-        if session.role_locked || session.project_locked {
+        if session.role_locked || session.scope_locked {
             // Double-checked lock: cheap path first
             {
                 let guard = self.memory.lock().await;
@@ -221,7 +209,7 @@ impl McpServer {
             let provider = MemoryProvider::new(
                 &self.config,
                 self.working_directory.clone(),
-                session.project,
+                session.scope,
                 session.role,
             )
             .await
@@ -231,8 +219,8 @@ impl McpServer {
             *guard = Some(provider.clone());
             Ok(provider)
         } else {
-            // No handshake — honour per-call project/role from args
-            MemoryProvider::new(&self.config, self.working_directory.clone(), project, role)
+            // No handshake — honour per-call scope/role from args
+            MemoryProvider::new(&self.config, self.working_directory.clone(), scope, role)
                 .await
                 .map_err(|e| {
                     McpError::internal_error(format!("Failed to initialize memory: {}", e), None)
@@ -442,8 +430,10 @@ pub struct MemorizeParams {
     pub related_files: Option<Vec<String>>,
     /// Trust tier: 'user_confirmed' (user explicitly stated/approved) ranks higher in retrieval; 'agent_inferred' for AI conclusions
     pub source: Option<SourceTrust>,
-    /// Project key to scope this memory to. Defaults to auto-detected Git remote hash.
-    pub project: Option<String>,
+    /// Scope string to store this memory under (e.g. 'github.com/org/repo'). Defaults to auto-detected scope from cwd.
+    pub scope: Option<String>,
+    /// When true, store this memory in the global scope (shared across all projects) regardless of the locked session scope.
+    pub global: Option<bool>,
     /// Role tag to attach to this memory (e.g. 'developer', 'reviewer').
     pub role: Option<String>,
     /// Optional: create typed relationships from this new memory to existing
@@ -472,8 +462,8 @@ pub struct RememberParams {
     /// Minimum relevance score (0.0-1.0)
     #[schemars(range(min = 0.0, max = 1.0))]
     pub min_relevance: Option<f32>,
-    /// Filter by project key. If omitted, returns memories from all projects.
-    pub project: Option<String>,
+    /// Filter by scope. If omitted, returns memories from all scopes (global + current).
+    pub scope: Option<String>,
     /// Filter by role. If omitted, returns memories for all roles.
     pub role: Option<String>,
 }
@@ -491,8 +481,8 @@ pub struct ForgetParams {
     pub tags: Option<Vec<String>>,
     /// Must be true — deletion is permanent
     pub confirm: bool,
-    /// Project key filter
-    pub project: Option<String>,
+    /// Scope filter
+    pub scope: Option<String>,
     /// Role filter
     pub role: Option<String>,
 }
@@ -542,14 +532,21 @@ pub struct KnowledgeParams {
 impl McpServer {
     #[tool(
         name = "memorize",
-        description = "Store information, insights, or context in memory. Call remember first to avoid duplicates. Set source='user_confirmed' for user-stated facts (importance 0.8-1.0), 'agent_inferred' for AI conclusions (0.3-0.6). Skip transient state or things easily re-derived.\n\nUse related_to[] to link the new memory to existing ones in the same call. Relationship types: related_to, depends_on, supersedes, similar, conflicts, implements, extends, achieves, closes.\n\nGoal workflow:\n1. memorize a 'goal' type memory for the task — captures intent\n2. For each contributing memory: memorize with related_to=[{target_id: goal_id, relationship_type: 'achieves'}]\n3. When the task closes: memorize the completion / lesson-learned note with related_to=[{target_id: goal_id, relationship_type: 'closes'}]. This triggers automatic consolidation — your closing memo becomes the consolidated parent, all Achieves sources transition to Consolidated state with dampened importance (still queryable for audit). Importance of the closing memo is bumped to max(sources) * 1.1. No separate consolidate call needed."
+        description = "Store information, insights, or context in memory. Call remember first to avoid duplicates. Set source='user_confirmed' for user-stated facts (importance 0.8-1.0), 'agent_inferred' for AI conclusions (0.3-0.6). Skip transient state or things easily re-derived.\n\nUse related_to[] to link the new memory to existing ones in the same call. Relationship types: related_to, depends_on, supersedes, similar, conflicts, implements, extends, achieves, closes.\n\nGoal workflow:\n1. memorize a 'goal' type memory for the task — captures intent\n2. For each contributing memory: memorize with related_to=[{target_id: goal_id, relationship_type: 'achieves'}]\n3. When the task closes: memorize the completion / lesson-learned note with related_to=[{target_id: goal_id, relationship_type: 'closes'}]. This triggers automatic consolidation — your closing memo becomes the consolidated parent, all Achieves sources transition to Consolidated state with dampened importance (still queryable for audit). Importance of the closing memo is bumped to max(sources) * 1.1. No separate consolidate call needed.\n\nglobal=true (only available when session scope is locked): stores the memory in the shared global scope instead of the locked project scope. Use this for cross-project facts — user preferences, personal habits, universal conventions, tool choices — things that apply regardless of which project is active. Do NOT use global for project-specific knowledge."
     )]
     async fn memorize(
         &self,
         Parameters(params): Parameters<MemorizeParams>,
     ) -> Result<String, McpError> {
+        // global=true only meaningful when scope is locked; overrides to global scope ("")
+        let session_scope_locked = self.session.lock().await.scope_locked;
+        let effective_scope = if session_scope_locked && params.global == Some(true) {
+            Some(String::new())
+        } else {
+            params.scope.clone()
+        };
         let provider = self
-            .get_memory_provider(params.project.clone(), params.role.clone())
+            .get_memory_provider(effective_scope, params.role.clone())
             .await?;
         let args = serde_json::to_value(&params).map_err(|e| {
             McpError::internal_error(format!("Failed to serialize params: {}", e), None)
@@ -569,7 +566,7 @@ impl McpServer {
         Parameters(params): Parameters<RememberParams>,
     ) -> Result<String, McpError> {
         let provider = self
-            .get_memory_provider(params.project.clone(), params.role.clone())
+            .get_memory_provider(params.scope.clone(), params.role.clone())
             .await?;
         let args = serde_json::to_value(&params).map_err(|e| {
             McpError::internal_error(format!("Failed to serialize params: {}", e), None)
@@ -589,7 +586,7 @@ impl McpServer {
         Parameters(params): Parameters<ForgetParams>,
     ) -> Result<String, McpError> {
         let provider = self
-            .get_memory_provider(params.project.clone(), params.role.clone())
+            .get_memory_provider(params.scope.clone(), params.role.clone())
             .await?;
         let args = serde_json::to_value(&params).map_err(|e| {
             McpError::internal_error(format!("Failed to serialize params: {}", e), None)
@@ -675,12 +672,12 @@ impl ServerHandler for McpServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let session = self.session.lock().await;
-        let tools = if session.role_locked && session.project_locked {
-            tools_locked().clone() // strip project + role
+        let tools = if session.role_locked && session.scope_locked {
+            tools_locked().clone() // strip scope + role
         } else if session.role_locked {
-            tools_role_only().clone() // strip role only, project stays visible
+            tools_role_only().clone() // strip role only, scope stays visible
         } else {
-            tools_full().clone()
+            tools_full_no_global().clone()
         };
         Ok(ListToolsResult {
             tools,
@@ -716,20 +713,20 @@ impl ServerHandler for McpServer {
                     .unwrap_or(false);
 
                 let mut session = self.session.lock().await;
-                let should_lock_project = git || !self.has_local_projects;
-                session.project = if should_lock_project { project } else { None };
+                let should_lock_scope = git || !self.has_local_projects;
+                session.scope = if should_lock_scope { project } else { None };
                 session.role = role;
                 if let Some(sid) = session_id {
                     session.session_id = sid;
                 }
                 // Always lock (handshake received) — strips role from schema.
-                // project_locked strips project from schema too, only when meaningful.
+                // scope_locked strips scope from schema too, only when meaningful.
                 session.role_locked = session.role.is_some();
-                session.project_locked = should_lock_project;
+                session.scope_locked = should_lock_scope;
 
                 debug!(
-                    "Session locked: project={:?}, role={:?}",
-                    session.project, session.role
+                    "Session locked: scope={:?}, role={:?}",
+                    session.scope, session.role
                 );
             }
         }
