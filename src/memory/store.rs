@@ -257,7 +257,12 @@ impl MemoryStore {
         let db = connect(db_path).execute().await?;
 
         // Get vector dimension from the embedding provider by testing with a short text
-        let test_embedding = embedding_provider.generate_embedding("test").await?;
+        let test_embedding = crate::embedding::generate_embedding(
+            "test",
+            embedding_provider.as_ref(),
+            main_config.embedding.timeout_secs,
+        )
+        .await?;
         let vector_dim = test_embedding.len();
 
         // Build the memories schema once — reused for every write
@@ -472,6 +477,7 @@ impl MemoryStore {
         let embedding = crate::embedding::generate_embedding(
             &searchable_text,
             self.embedding_provider.as_ref(),
+            self.main_config.embedding.timeout_secs,
         )
         .await?;
 
@@ -821,10 +827,12 @@ impl MemoryStore {
             build_scalar_predicate(self.project_key.as_deref(), self.role.as_deref(), query);
 
         if let Some(ref query_text) = query.query_text {
-            let raw_embedding = self
-                .embedding_provider
-                .generate_embedding(query_text)
-                .await?;
+            let raw_embedding = crate::embedding::generate_embedding(
+                query_text,
+                self.embedding_provider.as_ref(),
+                self.main_config.embedding.timeout_secs,
+            )
+            .await?;
             let query_embedding = self
                 .expand_query_embedding(raw_embedding, &predicate)
                 .await?;
@@ -1061,10 +1069,12 @@ impl MemoryStore {
             .unwrap_or(self.config.max_search_results);
         let min_relevance = query.filters.min_relevance.unwrap_or(0.0);
 
-        let raw_embedding = self
-            .embedding_provider
-            .generate_embedding(query_text)
-            .await?;
+        let raw_embedding = crate::embedding::generate_embedding(
+            query_text,
+            self.embedding_provider.as_ref(),
+            self.main_config.embedding.timeout_secs,
+        )
+        .await?;
 
         // Build scalar predicate for pushdown (project_key=None means all projects)
         let predicate = build_scalar_predicate(

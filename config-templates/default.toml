@@ -30,6 +30,10 @@ batch_size = 32
 # Default: 100000
 max_tokens_per_batch = 100000
 
+# Timeout in seconds for embedding generation calls (0 = no timeout)
+# Default: 30
+timeout_secs = 30
+
 [search]
 # Similarity threshold for memory search (0.0 to 1.0)
 # Lower values = more results, higher values = fewer but more relevant
@@ -85,6 +89,10 @@ top_k_candidates = 50
 # Number of results to return after reranking
 # Default: 10
 final_top_k = 10
+
+# Timeout in seconds for reranker calls (0 = no timeout)
+# Default: 30
+timeout_secs = 30
 
 [search.hyde]
 # Pseudo-relevance feedback (PRF / HyDE-lite) query expansion.

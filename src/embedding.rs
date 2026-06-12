@@ -26,20 +26,41 @@ pub async fn create_embedding_provider(
     create_embedding_provider_from_parts(&provider, &model).await
 }
 
-/// Generate embeddings for a single text
+/// Generate embeddings for a single text, with optional timeout from config.
 pub async fn generate_embedding(
     text: &str,
     provider: &dyn EmbeddingProvider,
+    timeout_secs: u64,
 ) -> anyhow::Result<Vec<f32>> {
-    provider.generate_embedding(text).await
+    let fut = provider.generate_embedding(text);
+    if timeout_secs == 0 {
+        fut.await
+    } else {
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("Embedding generation timed out after {}s", timeout_secs)
+            })?
+    }
 }
 
-/// Generate embeddings for multiple texts using batch API
+/// Generate embeddings for multiple texts using batch API, with optional timeout from config.
 pub async fn generate_embeddings_batch(
     texts: Vec<String>,
     provider: &dyn EmbeddingProvider,
+    timeout_secs: u64,
 ) -> anyhow::Result<Vec<Vec<f32>>> {
-    provider
-        .generate_embeddings_batch(texts, InputType::None)
-        .await
+    let fut = provider.generate_embeddings_batch(texts, InputType::None);
+    if timeout_secs == 0 {
+        fut.await
+    } else {
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Batch embedding generation timed out after {}s",
+                    timeout_secs
+                )
+            })?
+    }
 }

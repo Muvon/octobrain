@@ -89,15 +89,26 @@ impl RerankerIntegration {
             })
             .collect();
 
-        // Call octolib reranker
-        let rerank_response = octolib::reranker::rerank(
+        // Call octolib reranker with optional timeout
+        let rerank_fut = octolib::reranker::rerank(
             query,
             documents,
             provider,
             model,
             Some(self.config.final_top_k),
-        )
-        .await?;
+        );
+        let rerank_response = if self.config.timeout_secs == 0 {
+            rerank_fut.await?
+        } else {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(self.config.timeout_secs),
+                rerank_fut,
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("Reranker timed out after {}s", self.config.timeout_secs)
+            })??
+        };
 
         // Map reranked results back to MemorySearchResult
         let mut reranked_results = Vec::new();

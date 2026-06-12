@@ -24,6 +24,7 @@ pub struct KnowledgeManager {
     store: KnowledgeStore,
     chunker: ContentChunker,
     embedding_provider: Arc<dyn EmbeddingProvider>,
+    embedding_timeout_secs: u64,
 }
 
 impl KnowledgeManager {
@@ -31,7 +32,12 @@ impl KnowledgeManager {
         let embedding_provider = crate::embedding::create_embedding_provider(config).await?;
 
         // Get vector dimension
-        let test_embedding = embedding_provider.generate_embedding("test").await?;
+        let test_embedding = crate::embedding::generate_embedding(
+            "test",
+            embedding_provider.as_ref(),
+            config.embedding.timeout_secs,
+        )
+        .await?;
         let vector_dim = test_embedding.len();
 
         let store = KnowledgeStore::new(vector_dim).await?;
@@ -49,6 +55,7 @@ impl KnowledgeManager {
             store,
             chunker,
             embedding_provider: Arc::from(embedding_provider),
+            embedding_timeout_secs: config.embedding.timeout_secs,
         })
     }
 
@@ -70,7 +77,12 @@ impl KnowledgeManager {
         }
 
         // Generate query embedding
-        let query_embedding = self.embedding_provider.generate_embedding(query).await?;
+        let query_embedding = crate::embedding::generate_embedding(
+            query,
+            self.embedding_provider.as_ref(),
+            self.embedding_timeout_secs,
+        )
+        .await?;
 
         // Use global hybrid search flag
         let use_hybrid = self.search_config.hybrid.enabled;
@@ -169,9 +181,12 @@ impl KnowledgeManager {
 
         // Generate embeddings using proper batch API
         let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-        let embeddings =
-            crate::embedding::generate_embeddings_batch(texts, self.embedding_provider.as_ref())
-                .await?;
+        let embeddings = crate::embedding::generate_embeddings_batch(
+            texts,
+            self.embedding_provider.as_ref(),
+            self.embedding_timeout_secs,
+        )
+        .await?;
 
         // Store (persistent — no session_id)
         self.store
@@ -199,9 +214,12 @@ impl KnowledgeManager {
 
         // Generate embeddings using proper batch API
         let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-        let embeddings =
-            crate::embedding::generate_embeddings_batch(texts, self.embedding_provider.as_ref())
-                .await?;
+        let embeddings = crate::embedding::generate_embeddings_batch(
+            texts,
+            self.embedding_provider.as_ref(),
+            self.embedding_timeout_secs,
+        )
+        .await?;
 
         self.store
             .store_chunks(source, &title, &content_hash, &chunks, &embeddings, None)
@@ -375,7 +393,12 @@ impl KnowledgeManager {
                 char_start: 0,
                 char_end: content.len(),
             };
-            let embedding = self.embedding_provider.generate_embedding(content).await?;
+            let embedding = crate::embedding::generate_embedding(
+                content,
+                self.embedding_provider.as_ref(),
+                self.embedding_timeout_secs,
+            )
+            .await?;
             self.store
                 .store_chunks(
                     &source,
@@ -394,9 +417,12 @@ impl KnowledgeManager {
 
         // Generate embeddings in batch
         let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-        let embeddings =
-            crate::embedding::generate_embeddings_batch(texts, self.embedding_provider.as_ref())
-                .await?;
+        let embeddings = crate::embedding::generate_embeddings_batch(
+            texts,
+            self.embedding_provider.as_ref(),
+            self.embedding_timeout_secs,
+        )
+        .await?;
 
         self.store
             .store_chunks(
