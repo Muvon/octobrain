@@ -100,11 +100,13 @@ impl MemoryManager {
         // Use shared memory database path (single DB for all scopes)
         let db_path = crate::storage::get_memory_database_path()?;
 
-        // Marker files: {db_dir}/.{kind}_{scope}
-        let scope_label = scope.as_deref().unwrap_or("default");
-        let stale_check_marker = db_path.join(format!(".stale_check_{}", scope_label));
+        // Marker files: {db_dir}/.{kind}_{scope_label}
+        let scope_label = scope.as_deref().unwrap_or("global");
+        // Replace path separators so the marker file name stays flat
+        let scope_safe = scope_label.replace('/', "_");
+        let stale_check_marker = db_path.join(format!(".stale_check_{}", scope_safe));
         let sleep_consolidation_marker =
-            db_path.join(format!(".sleep_consolidation_{}", scope_label));
+            db_path.join(format!(".sleep_consolidation_{}", scope_safe));
 
         // Create embedding provider using model from config
         let model_string = &config.embedding.model;
@@ -215,8 +217,8 @@ impl MemoryManager {
     async fn cleanup_stale_references(&mut self) -> Result<usize> {
         // Without a scope we cannot determine which git repo to check
         // file existence against — skip entirely to avoid deleting memories
-        // from unrelated scopes.
-        if self.store.has_no_scope() {
+        // from unrelated projects.
+        if self.store.is_unscoped() {
             return Ok(0);
         }
 
