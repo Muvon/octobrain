@@ -23,7 +23,7 @@ mod tests {
     fn test_predicate_no_role() {
         let query = MemoryQuery::default();
         let pred = build_scalar_predicate_test(Some("proj123"), None, &query);
-        assert_eq!(pred, "scope = 'proj123'");
+        assert_eq!(pred, "(scope = 'proj123' OR scope = '')");
         assert!(
             !pred.contains("role"),
             "No role filter expected when role is None"
@@ -40,7 +40,7 @@ mod tests {
             pred
         );
         assert!(
-            pred.starts_with("scope = 'proj123'"),
+            pred.starts_with("(scope = 'proj123' OR scope = '')"),
             "scope must be first condition"
         );
     }
