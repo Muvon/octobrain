@@ -75,11 +75,7 @@ use crate::sql::escape_sql_literal as escape_sql;
 ///
 /// Tags and related_files are excluded here because they are stored as JSON-serialized strings
 /// and cannot be queried with simple SQL equality — those are handled post-fetch in Rust.
-fn build_scalar_predicate(
-    scope: Option<&str>,
-    role: Option<&str>,
-    query: &MemoryQuery,
-) -> String {
+fn build_scalar_predicate(scope: Option<&str>, role: Option<&str>, query: &MemoryQuery) -> String {
     // scope is optional — None means no scope filter (show all scopes)
     let mut parts: Vec<String> = if let Some(key) = scope {
         vec![format!("scope = '{}'", escape_sql(key))]
@@ -852,8 +848,7 @@ impl MemoryStore {
         let mut results = Vec::new();
 
         // Build scalar filter predicate for pushdown (tags/related_files stay in Rust)
-        let predicate =
-            build_scalar_predicate(self.scope.as_deref(), self.role.as_deref(), query);
+        let predicate = build_scalar_predicate(self.scope.as_deref(), self.role.as_deref(), query);
 
         if let Some(ref query_text) = query.query_text {
             let raw_embedding = crate::embedding::generate_embedding(
@@ -1106,11 +1101,8 @@ impl MemoryStore {
         .await?;
 
         // Build scalar predicate for pushdown (scope=None means all scopes)
-        let predicate = build_scalar_predicate(
-            self.scope.as_deref(),
-            self.role.as_deref(),
-            &query.filters,
-        );
+        let predicate =
+            build_scalar_predicate(self.scope.as_deref(), self.role.as_deref(), &query.filters);
 
         let query_embedding = self
             .expand_query_embedding(raw_embedding, &predicate)

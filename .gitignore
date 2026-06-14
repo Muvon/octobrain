@@ -1,3 +1,4 @@
 /target
 /.mcpregistry_*
 /.docker-cache
+.env

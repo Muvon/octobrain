@@ -135,8 +135,7 @@ fn build_instructions(scopes: &[(String, String)]) -> String {
         return base.to_string();
     }
 
-    let mut hint =
-        String::from("\n\nAvailable scopes (pass the hex ID as the 'scope' parameter):");
+    let mut hint = String::from("\n\nAvailable scopes (pass the hex ID as the 'scope' parameter):");
     for (label, id) in scopes {
         hint.push_str(&format!("\n  {}: {}", label, id));
     }

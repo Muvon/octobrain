@@ -82,11 +82,7 @@ pub struct MemoryManager {
 
 impl MemoryManager {
     /// Create a new memory manager
-    pub async fn new(
-        config: &Config,
-        scope: Option<String>,
-        role: Option<String>,
-    ) -> Result<Self> {
+    pub async fn new(config: &Config, scope: Option<String>, role: Option<String>) -> Result<Self> {
         // Use memory config from main config (loaded from config file)
         let memory_config = config.memory.clone();
 
