@@ -36,7 +36,7 @@ impl MemoryProvider {
     pub async fn new(
         config: &Config,
         working_directory: std::path::PathBuf,
-        project_key: Option<String>,
+        scope: Option<String>,
         role: Option<String>,
     ) -> Result<Self, McpError> {
         let original_dir = std::env::current_dir().ok();
@@ -47,7 +47,7 @@ impl MemoryProvider {
             );
         }
 
-        let manager = MemoryManager::new(config, project_key.clone(), role.clone())
+        let manager = MemoryManager::new(config, scope.clone(), role.clone())
             .await
             .map_err(|e| {
                 McpError::internal_error(

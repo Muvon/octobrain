@@ -17,7 +17,7 @@
 //! LanceDB executes predicates through DataFusion, whose SQL dialect escapes an
 //! embedded single quote inside a string literal by doubling it (`'` -> `''`).
 //! Both `MemoryStore` and `KnowledgeStore` interpolate user-controlled values
-//! (memory IDs, project keys, roles, sources, session IDs) into predicates, so
+//! (memory IDs, scopes, roles, sources, session IDs) into predicates, so
 //! they share this one escaping implementation to avoid drifting variants.
 
 /// Escape a string for safe inclusion inside a LanceDB SQL single-quoted literal.
@@ -39,7 +39,7 @@ mod tests {
 
     #[test]
     fn leaves_clean_strings_untouched() {
-        assert_eq!(escape_sql_literal("project-abc"), "project-abc");
+        assert_eq!(escape_sql_literal("scope-abc"), "scope-abc");
     }
 
     #[test]
