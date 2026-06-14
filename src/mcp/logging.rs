@@ -81,7 +81,7 @@ pub fn init_mcp_logging(base_dir: PathBuf, debug_mode: bool) -> Result<(), anyho
     let _ = registry.try_init();
 
     info!(
-        project_path = %base_dir.display(),
+        scope_path = %base_dir.display(),
         log_directory = %log_dir.display(),
         debug_mode = debug_mode,
         "MCP Server logging initialized"
@@ -93,19 +93,19 @@ pub fn init_mcp_logging(base_dir: PathBuf, debug_mode: bool) -> Result<(), anyho
 fn select_log_dir(base_dir: &Path) -> Result<PathBuf, anyhow::Error> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
-    if let Ok(project_id) = crate::storage::get_project_identifier(base_dir) {
+    if let Ok(scope_id) = crate::storage::get_scope_identifier(base_dir) {
         if let Ok(system_dir) = crate::storage::get_system_storage_dir() {
-            candidates.push(system_dir.join(&project_id).join("logs"));
+            candidates.push(system_dir.join(&scope_id).join("logs"));
         }
     }
 
     candidates.push(base_dir.join(".octobrain").join("logs"));
 
-    if let Ok(project_id) = crate::storage::get_project_identifier(base_dir) {
+    if let Ok(scope_id) = crate::storage::get_scope_identifier(base_dir) {
         candidates.push(
             std::env::temp_dir()
                 .join("octobrain")
-                .join(project_id)
+                .join(scope_id)
                 .join("logs"),
         );
     } else {

@@ -23,7 +23,7 @@ mod tests {
     fn test_predicate_no_role() {
         let query = MemoryQuery::default();
         let pred = build_scalar_predicate_test(Some("proj123"), None, &query);
-        assert_eq!(pred, "project_key = 'proj123'");
+        assert_eq!(pred, "scope = 'proj123'");
         assert!(
             !pred.contains("role"),
             "No role filter expected when role is None"
@@ -40,8 +40,8 @@ mod tests {
             pred
         );
         assert!(
-            pred.starts_with("project_key = 'proj123'"),
-            "project_key must be first condition"
+            pred.starts_with("scope = 'proj123'"),
+            "scope must be first condition"
         );
     }
 
@@ -53,18 +53,18 @@ mod tests {
             ..Default::default()
         };
         let pred = build_scalar_predicate_test(Some("proj123"), Some("reviewer"), &query);
-        assert!(pred.contains("project_key = 'proj123'"));
+        assert!(pred.contains("scope = 'proj123'"));
         assert!(pred.contains("role = 'reviewer'"));
         assert!(pred.contains("memory_type IN ('code')"));
     }
 
     #[test]
-    fn test_predicate_no_project_key() {
+    fn test_predicate_no_scope() {
         let query = MemoryQuery::default();
         let pred = build_scalar_predicate_test(None, None, &query);
         assert!(
-            !pred.contains("project_key"),
-            "No project_key filter expected when None, got: {}",
+            !pred.contains("scope"),
+            "No scope filter expected when None, got: {}",
             pred
         );
     }
@@ -76,7 +76,7 @@ mod tests {
             memory_types: Some(vec![MemoryType::Architecture]),
             ..Default::default()
         };
-        let pred = build_scalar_predicate_test(Some("myproject"), None, &query);
+        let pred = build_scalar_predicate_test(Some("myscope"), None, &query);
         assert!(!pred.contains("role"), "No role clause when role is None");
         assert!(pred.contains("memory_type IN ('architecture')"));
     }

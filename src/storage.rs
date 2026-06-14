@@ -55,11 +55,11 @@ pub fn get_system_storage_dir() -> Result<PathBuf> {
     Ok(base_dir)
 }
 
-/// Get project identifier for a given directory
+/// Get scope identifier for a given directory
 /// First tries to get Git remote URL, falls back to path hash
-pub fn get_project_identifier(project_path: &Path) -> Result<String> {
+pub fn get_scope_identifier(scope_path: &Path) -> Result<String> {
     // Try to get git remote URL first
-    if let Ok(git_remote) = get_git_remote_url(project_path) {
+    if let Ok(git_remote) = get_git_remote_url(scope_path) {
         // Create a hash from git remote URL
         let mut hasher = Sha256::new();
         hasher.update(git_remote.as_bytes());
@@ -68,12 +68,12 @@ pub fn get_project_identifier(project_path: &Path) -> Result<String> {
     }
 
     // Fallback to absolute path hash
-    let absolute_path = project_path.canonicalize().or_else(|_| {
+    let absolute_path = scope_path.canonicalize().or_else(|_| {
         // If canonicalize fails, try to get absolute path manually
-        if project_path.is_absolute() {
-            Ok(project_path.to_path_buf())
+        if scope_path.is_absolute() {
+            Ok(scope_path.to_path_buf())
         } else {
-            std::env::current_dir().map(|cwd| cwd.join(project_path))
+            std::env::current_dir().map(|cwd| cwd.join(scope_path))
         }
     })?;
 
@@ -83,11 +83,11 @@ pub fn get_project_identifier(project_path: &Path) -> Result<String> {
     Ok(format!("{:x}", result)[..16].to_string()) // Use first 16 chars
 }
 
-/// Try to get the Git remote URL for a project
-fn get_git_remote_url(project_path: &Path) -> Result<String> {
+/// Try to get the Git remote URL for a scope
+fn get_git_remote_url(scope_path: &Path) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
-        .arg(project_path)
+        .arg(scope_path)
         .arg("remote")
         .arg("get-url")
         .arg("origin")
@@ -140,7 +140,7 @@ fn normalize_git_url(url: &str) -> String {
 }
 
 /// Get the shared memory database path.
-/// All projects share a single LanceDB at this location; rows are scoped by project_key.
+/// All scopes share a single LanceDB at this location; rows are scoped by scope.
 pub fn get_memory_database_path() -> Result<PathBuf> {
     let system_dir = get_system_storage_dir()?;
     Ok(system_dir.join("memory"))

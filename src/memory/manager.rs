@@ -84,7 +84,7 @@ impl MemoryManager {
     /// Create a new memory manager
     pub async fn new(
         config: &Config,
-        project_key: Option<String>,
+        scope: Option<String>,
         role: Option<String>,
     ) -> Result<Self> {
         // Use memory config from main config (loaded from config file)
@@ -101,14 +101,14 @@ impl MemoryManager {
             None
         };
 
-        // Use shared memory database path (single DB for all projects)
+        // Use shared memory database path (single DB for all scopes)
         let db_path = crate::storage::get_memory_database_path()?;
 
-        // Marker files: {db_dir}/.{kind}_{project_key}
-        let project_label = project_key.as_deref().unwrap_or("default");
-        let stale_check_marker = db_path.join(format!(".stale_check_{}", project_label));
+        // Marker files: {db_dir}/.{kind}_{scope}
+        let scope_label = scope.as_deref().unwrap_or("default");
+        let stale_check_marker = db_path.join(format!(".stale_check_{}", scope_label));
         let sleep_consolidation_marker =
-            db_path.join(format!(".sleep_consolidation_{}", project_label));
+            db_path.join(format!(".sleep_consolidation_{}", scope_label));
 
         // Create embedding provider using model from config
         let model_string = &config.embedding.model;
@@ -117,7 +117,7 @@ impl MemoryManager {
 
         let store = MemoryStore::new(
             db_path.to_string_lossy().as_ref(),
-            project_key,
+            scope,
             role,
             embedding_provider,
             memory_config.clone(),
@@ -170,7 +170,7 @@ impl MemoryManager {
         let interval_hours = self.config.sleep_consolidation_interval_hours.max(1) as i64;
         let due = match self.read_sleep_marker() {
             Some(last) => (Utc::now() - last).num_hours() >= interval_hours,
-            None => true, // first run for this project
+            None => true, // first run for this scope
         };
         if !due {
             return Ok(());
@@ -217,10 +217,10 @@ impl MemoryManager {
     /// - HEAD advanced → scan only the delta (last_checked..HEAD)
     /// - First run → scan from oldest memory's commit
     async fn cleanup_stale_references(&mut self) -> Result<usize> {
-        // Without a project key we cannot determine which git repo to check
+        // Without a scope we cannot determine which git repo to check
         // file existence against — skip entirely to avoid deleting memories
-        // from unrelated projects.
-        if self.store.has_no_project_key() {
+        // from unrelated scopes.
+        if self.store.has_no_scope() {
             return Ok(0);
         }
 
@@ -786,14 +786,14 @@ impl MemoryManager {
                 .or_insert(0) += 1;
         }
 
-        let (projects, roles) = self.store.get_distinct_projects_and_roles().await?;
+        let (scopes, roles) = self.store.get_distinct_scopes_and_roles().await?;
 
         Ok(MemoryStats {
             total_memories: total_count,
             type_counts,
             recent_count: recent_memories.len().min(10),
             git_commit: GitUtils::get_current_commit(),
-            projects,
+            scopes,
             roles,
         })
     }
@@ -1436,7 +1436,7 @@ pub struct MemoryStats {
     pub type_counts: std::collections::HashMap<String, usize>,
     pub recent_count: usize,
     pub git_commit: Option<String>,
-    pub projects: Vec<String>,
+    pub scopes: Vec<String>,
     pub roles: Vec<String>,
 }
 
@@ -1451,10 +1451,10 @@ impl MemoryStats {
             output.push_str(&format!("  Current commit: {}\n", commit));
         }
 
-        if !self.projects.is_empty() {
-            output.push_str("  Projects:\n");
-            for project in &self.projects {
-                output.push_str(&format!("    {}\n", project));
+        if !self.scopes.is_empty() {
+            output.push_str("  Scopes:\n");
+            for scope in &self.scopes {
+                output.push_str(&format!("    {}\n", scope));
             }
         }
 

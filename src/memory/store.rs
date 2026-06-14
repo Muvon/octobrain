@@ -76,13 +76,13 @@ use crate::sql::escape_sql_literal as escape_sql;
 /// Tags and related_files are excluded here because they are stored as JSON-serialized strings
 /// and cannot be queried with simple SQL equality — those are handled post-fetch in Rust.
 fn build_scalar_predicate(
-    project_key: Option<&str>,
+    scope: Option<&str>,
     role: Option<&str>,
     query: &MemoryQuery,
 ) -> String {
-    // project_key is optional — None means no project filter (show all projects)
-    let mut parts: Vec<String> = if let Some(key) = project_key {
-        vec![format!("project_key = '{}'", escape_sql(key))]
+    // scope is optional — None means no scope filter (show all scopes)
+    let mut parts: Vec<String> = if let Some(key) = scope {
+        vec![format!("scope = '{}'", escape_sql(key))]
     } else {
         Vec::new()
     };
@@ -143,14 +143,14 @@ pub struct MemoryStore {
     // The lock is only held for the brief enable/disable mutation and during
     // the rerank call itself; never held across awaits inside async work.
     reranker_integration: std::sync::Mutex<Option<RerankerIntegration>>,
-    project_key: Option<String>,
+    scope: Option<String>,
     role: Option<String>,
 }
 
 impl MemoryStore {
-    /// Returns true when no project key is set (global/unscoped context).
-    pub fn has_no_project_key(&self) -> bool {
-        self.project_key.is_none()
+    /// Returns true when no scope is set (global/unscoped context).
+    pub fn has_no_scope(&self) -> bool {
+        self.scope.is_none()
     }
 
     /// Arrow schema for the `memories` table. Defined once so the writer
@@ -159,7 +159,7 @@ impl MemoryStore {
     fn memories_schema(vector_dim: usize) -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
-            Field::new("project_key", DataType::Utf8, false),
+            Field::new("scope", DataType::Utf8, false),
             Field::new("role", DataType::Utf8, true),
             Field::new("memory_type", DataType::Utf8, false),
             Field::new("title", DataType::Utf8, false),
@@ -197,7 +197,7 @@ impl MemoryStore {
             Field::new("id", DataType::Utf8, false),
             Field::new("source_id", DataType::Utf8, false),
             Field::new("target_id", DataType::Utf8, false),
-            Field::new("project_key", DataType::Utf8, false),
+            Field::new("scope", DataType::Utf8, false),
             Field::new("relationship_type", DataType::Utf8, false),
             Field::new("strength", DataType::Float32, false),
             Field::new("description", DataType::Utf8, false),
@@ -205,10 +205,10 @@ impl MemoryStore {
         ]))
     }
 
-    /// project_key used for writes/deletes, falling back to "default" when the
+    /// scope used for writes/deletes, falling back to "default" when the
     /// store is unscoped. Centralizes the repeated `unwrap_or("default")`.
-    fn project_label(&self) -> &str {
-        self.project_key.as_deref().unwrap_or("default")
+    fn scope_label(&self) -> &str {
+        self.scope.as_deref().unwrap_or("default")
     }
 
     /// Current importance for `memory` under this store's decay configuration.
@@ -246,7 +246,7 @@ impl MemoryStore {
     /// Create a new memory store
     pub async fn new(
         db_path: &str,
-        project_key: Option<String>,
+        scope: Option<String>,
         role: Option<String>,
         embedding_provider: Box<dyn EmbeddingProvider>,
         config: MemoryConfig,
@@ -279,6 +279,8 @@ impl MemoryStore {
         // New tables created above already have them; this only adds them where missing.
         Self::migrate_decay_columns(&memories_table).await?;
         Self::migrate_state_column(&memories_table).await?;
+        Self::migrate_scope_column(&memories_table).await?;
+        Self::migrate_scope_column(&relationships_table).await?;
 
         // Build relationship schema once — reused for every relationship write
         let rel_schema = Self::relationships_schema();
@@ -293,7 +295,7 @@ impl MemoryStore {
             main_config,
             vector_dim,
             reranker_integration,
-            project_key,
+            scope,
             role,
         };
         // Ensure optimal vector index (only during initialization, not on every store)
@@ -355,6 +357,33 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Migrate `project_key` column to `scope` for tables created before the rename.
+    /// If the old `project_key` column exists but `scope` does not, adds `scope` as
+    /// a copy of `project_key`. New tables already have `scope` via the schema in `new()`.
+    async fn migrate_scope_column(table: &Table) -> Result<()> {
+        let schema = table.schema().await?;
+        let has_scope = schema.field_with_name("scope").is_ok();
+        let has_project_key = schema.field_with_name("project_key").is_ok();
+
+        if has_scope || !has_project_key {
+            // Either already migrated or never had the old column
+            return Ok(());
+        }
+
+        tracing::info!("Migrating table: adding 'scope' column from 'project_key'");
+        table
+            .add_columns(
+                NewColumnTransform::SqlExpressions(vec![(
+                    "scope".to_string(),
+                    "project_key".to_string(),
+                )]),
+                None,
+            )
+            .await
+            .context("Failed to add scope column from project_key migration")?;
+        Ok(())
+    }
+
     /// Initialize memory and relationship tables (static — called once from new())
     async fn init_tables(db: &Connection, schema: &Arc<Schema>) -> Result<()> {
         let table_names = db.table_names().execute().await?;
@@ -368,12 +397,12 @@ impl MemoryStore {
             let table = db.open_table("memories").execute().await?;
 
             // Scalar indexes for pushdown filtering — created once at table birth
-            // Bitmap: low-cardinality string columns (project_key, memory_type, source)
+            // Bitmap: low-cardinality string columns (scope, memory_type, source)
             table
-                .create_index(&["project_key"], Index::Bitmap(Default::default()))
+                .create_index(&["scope"], Index::Bitmap(Default::default()))
                 .execute()
                 .await
-                .context("Failed to create Bitmap index on memories.project_key")?;
+                .context("Failed to create Bitmap index on memories.scope")?;
             table
                 .create_index(&["memory_type"], Index::Bitmap(Default::default()))
                 .execute()
@@ -430,7 +459,7 @@ impl MemoryStore {
 
             let rel_table = db.open_table("memory_relationships").execute().await?;
 
-            // Scalar indexes for relationships — enable fast lookups by source/target/project
+            // Scalar indexes for relationships — enable fast lookups by source/target/scope
             rel_table
                 .create_index(&["source_id"], Index::Bitmap(Default::default()))
                 .execute()
@@ -442,10 +471,10 @@ impl MemoryStore {
                 .await
                 .context("Failed to create Bitmap index on memory_relationships.target_id")?;
             rel_table
-                .create_index(&["project_key"], Index::Bitmap(Default::default()))
+                .create_index(&["scope"], Index::Bitmap(Default::default()))
                 .execute()
                 .await
-                .context("Failed to create Bitmap index on memory_relationships.project_key")?;
+                .context("Failed to create Bitmap index on memory_relationships.scope")?;
             rel_table
                 .create_index(&["relationship_type"], Index::Bitmap(Default::default()))
                 .execute()
@@ -507,7 +536,7 @@ impl MemoryStore {
             vec![
                 Arc::new(StringArray::from(vec![memory.id.clone()])),
                 Arc::new(StringArray::from(vec![self
-                    .project_key
+                    .scope
                     .as_deref()
                     .unwrap_or("default")
                     .to_string()])),
@@ -562,17 +591,17 @@ impl MemoryStore {
     /// Delete a memory by ID
     pub async fn delete_memory(&self, memory_id: &str) -> Result<()> {
         let id = escape_sql(memory_id);
-        let project = escape_sql(self.project_label());
+        let scope = escape_sql(self.scope_label());
 
         self.memories_table
-            .delete(&format!("id = '{}' AND project_key = '{}'", id, project))
+            .delete(&format!("id = '{}' AND scope = '{}'", id, scope))
             .await?;
 
-        // Also delete any relationships involving this memory (scoped to project)
+        // Also delete any relationships involving this memory (scoped to scope)
         self.relationships_table
             .delete(&format!(
-                "(source_id = '{}' OR target_id = '{}') AND project_key = '{}'",
-                id, id, project
+                "(source_id = '{}' OR target_id = '{}') AND scope = '{}'",
+                id, id, scope
             ))
             .await
             .ok();
@@ -650,8 +679,8 @@ impl MemoryStore {
         let mut results = self
             .memories_table
             .query()
-            .only_if(match self.project_key.as_deref() {
-                Some(key) => format!("id = '{}' AND project_key = '{}'", id, escape_sql(key)),
+            .only_if(match self.scope.as_deref() {
+                Some(key) => format!("id = '{}' AND scope = '{}'", id, escape_sql(key)),
                 None => format!("id = '{}'", id),
             })
             .limit(1)
@@ -767,9 +796,9 @@ impl MemoryStore {
         new_state: super::types::MemoryState,
         new_importance: f32,
     ) -> Result<()> {
-        let project = escape_sql(self.project_label());
+        let scope = escape_sql(self.scope_label());
         let id_escaped = escape_sql(id);
-        let predicate = format!("id = '{}' AND project_key = '{}'", id_escaped, project);
+        let predicate = format!("id = '{}' AND scope = '{}'", id_escaped, scope);
         let clamped = new_importance.clamp(0.0, 1.0);
 
         self.memories_table
@@ -794,8 +823,8 @@ impl MemoryStore {
             .map(|id| format!("'{}'", escape_sql(id)))
             .collect::<Vec<_>>()
             .join(",");
-        let project = escape_sql(self.project_label());
-        let predicate = format!("id IN ({}) AND project_key = '{}'", id_list, project);
+        let scope = escape_sql(self.scope_label());
+        let predicate = format!("id IN ({}) AND scope = '{}'", id_list, scope);
         let now_literal = format!("'{}'", Utc::now().to_rfc3339());
 
         self.memories_table
@@ -824,7 +853,7 @@ impl MemoryStore {
 
         // Build scalar filter predicate for pushdown (tags/related_files stay in Rust)
         let predicate =
-            build_scalar_predicate(self.project_key.as_deref(), self.role.as_deref(), query);
+            build_scalar_predicate(self.scope.as_deref(), self.role.as_deref(), query);
 
         if let Some(ref query_text) = query.query_text {
             let raw_embedding = crate::embedding::generate_embedding(
@@ -881,7 +910,7 @@ impl MemoryStore {
                 }
             }
         } else {
-            // No text query — filter-only scan (project_key predicate omitted when unscoped)
+            // No text query — filter-only scan (scope predicate omitted when unscoped)
             let mut q = self.memories_table.query();
             if !predicate.is_empty() {
                 q = q.only_if(predicate);
@@ -1076,9 +1105,9 @@ impl MemoryStore {
         )
         .await?;
 
-        // Build scalar predicate for pushdown (project_key=None means all projects)
+        // Build scalar predicate for pushdown (scope=None means all scopes)
         let predicate = build_scalar_predicate(
-            self.project_key.as_deref(),
+            self.scope.as_deref(),
             self.role.as_deref(),
             &query.filters,
         );
@@ -1168,8 +1197,8 @@ impl MemoryStore {
         since: chrono::DateTime<Utc>,
     ) -> Result<Vec<Memory>> {
         let mut parts: Vec<String> = Vec::new();
-        if let Some(key) = self.project_key.as_deref() {
-            parts.push(format!("project_key = '{}'", escape_sql(key)));
+        if let Some(key) = self.scope.as_deref() {
+            parts.push(format!("scope = '{}'", escape_sql(key)));
         }
         if let Some(role) = self.role.as_deref() {
             parts.push(format!("role = '{}'", escape_sql(role)));
@@ -1203,7 +1232,7 @@ impl MemoryStore {
                 Arc::new(StringArray::from(vec![relationship.source_id.clone()])),
                 Arc::new(StringArray::from(vec![relationship.target_id.clone()])),
                 Arc::new(StringArray::from(vec![self
-                    .project_key
+                    .scope
                     .as_deref()
                     .unwrap_or("default")
                     .to_string()])),
@@ -1241,9 +1270,9 @@ impl MemoryStore {
         let mut results = self
             .relationships_table
             .query()
-            .only_if(match self.project_key.as_deref() {
+            .only_if(match self.scope.as_deref() {
                 Some(key) => format!(
-                    "(source_id = '{}' OR target_id = '{}') AND project_key = '{}'",
+                    "(source_id = '{}' OR target_id = '{}') AND scope = '{}'",
                     id,
                     id,
                     escape_sql(key)
@@ -1272,42 +1301,42 @@ impl MemoryStore {
         let id = escape_sql(memory_id);
         self.relationships_table
             .delete(&format!(
-                "(source_id = '{}' OR target_id = '{}') AND relationship_type = 'auto_linked' AND project_key = '{}'",
-                id, id, escape_sql(self.project_label())
+                "(source_id = '{}' OR target_id = '{}') AND relationship_type = 'auto_linked' AND scope = '{}'",
+                id, id, escape_sql(self.scope_label())
             ))
             .await
             .ok();
         Ok(())
     }
 
-    /// Get total count of memories (all projects when project_key is None)
+    /// Get total count of memories (all scopes when scope is None)
     pub async fn get_memory_count(&self) -> Result<usize> {
         let filter = self
-            .project_key
+            .scope
             .as_deref()
-            .map(|k| format!("project_key = '{}'", escape_sql(k)));
+            .map(|k| format!("scope = '{}'", escape_sql(k)));
         Ok(self.memories_table.count_rows(filter).await?)
     }
 
-    /// Get distinct project_key and role values across all stored memories
-    pub async fn get_distinct_projects_and_roles(&self) -> Result<(Vec<String>, Vec<String>)> {
+    /// Get distinct scope and role values across all stored memories
+    pub async fn get_distinct_scopes_and_roles(&self) -> Result<(Vec<String>, Vec<String>)> {
         let mut q = self.memories_table.query();
-        if let Some(key) = self.project_key.as_deref() {
-            q = q.only_if(format!("project_key = '{}'", escape_sql(key)));
+        if let Some(key) = self.scope.as_deref() {
+            q = q.only_if(format!("scope = '{}'", escape_sql(key)));
         }
         let mut results = q.execute().await?;
 
-        let mut projects = std::collections::HashSet::new();
+        let mut scopes = std::collections::HashSet::new();
         let mut roles = std::collections::HashSet::new();
 
         while let Some(batch) = results.try_next().await? {
             if batch.num_rows() == 0 {
                 continue;
             }
-            if let Some(col) = string_column_opt(&batch, "project_key") {
+            if let Some(col) = string_column_opt(&batch, "scope") {
                 for i in 0..col.len() {
                     if !col.is_null(i) {
-                        projects.insert(col.value(i).to_string());
+                        scopes.insert(col.value(i).to_string());
                     }
                 }
             }
@@ -1323,19 +1352,19 @@ impl MemoryStore {
             }
         }
 
-        let mut projects: Vec<String> = projects.into_iter().collect();
+        let mut scopes: Vec<String> = scopes.into_iter().collect();
         let mut roles: Vec<String> = roles.into_iter().collect();
-        projects.sort();
+        scopes.sort();
         roles.sort();
-        Ok((projects, roles))
+        Ok((scopes, roles))
     }
 
     /// Get all memories that have non-empty related_files (for stale reference cleanup).
     /// Returns (id, related_files, importance) tuples to avoid loading full embeddings.
     pub async fn get_memories_with_files(&self) -> Result<Vec<Memory>> {
-        let filter = match self.project_key.as_deref() {
+        let filter = match self.scope.as_deref() {
             Some(key) => format!(
-                "project_key = '{}' AND related_files IS NOT NULL AND related_files != '[]'",
+                "scope = '{}' AND related_files IS NOT NULL AND related_files != '[]'",
                 escape_sql(key)
             ),
             None => "related_files IS NOT NULL AND related_files != '[]'".to_string(),
@@ -1366,8 +1395,8 @@ impl MemoryStore {
             let cutoff_str = cutoff_date.to_rfc3339();
 
             let filter = format!(
-                "project_key = '{}' AND created_at < '{}' AND importance < {}",
-                escape_sql(self.project_label()),
+                "scope = '{}' AND created_at < '{}' AND importance < {}",
+                escape_sql(self.scope_label()),
                 cutoff_str,
                 self.config.cleanup_min_importance
             );
@@ -1567,29 +1596,29 @@ impl MemoryStore {
         true
     }
 
-    /// Clear all memory data for the current project
+    /// Clear all memory data for the current scope
     pub async fn clear_all_memory_data(&self) -> Result<usize> {
-        // Get current counts before deletion (scoped to project)
+        // Get current counts before deletion (scoped to scope)
         let memory_count = self.get_memory_count().await.unwrap_or(0);
 
-        let project_key = escape_sql(self.project_label());
+        let scope = escape_sql(self.scope_label());
 
-        // Count relationships for this project
+        // Count relationships for this scope
         let relationship_count = self
             .relationships_table
-            .count_rows(Some(format!("project_key = '{}'", project_key)))
+            .count_rows(Some(format!("scope = '{}'", scope)))
             .await
             .unwrap_or(0);
 
         let total_deleted = memory_count + relationship_count;
 
-        // Delete only this project's memories and relationships
+        // Delete only this scope's memories and relationships
         self.memories_table
-            .delete(&format!("project_key = '{}'", project_key))
+            .delete(&format!("scope = '{}'", scope))
             .await?;
 
         self.relationships_table
-            .delete(&format!("project_key = '{}'", project_key))
+            .delete(&format!("scope = '{}'", scope))
             .await?;
         // Optimize tables after deletion
         self.memories_table.optimize(OptimizeAction::All).await?;
@@ -1669,9 +1698,9 @@ impl MemoryStore {
 /// Test-only re-export of the private `build_scalar_predicate` function.
 #[cfg(test)]
 pub fn build_scalar_predicate_test(
-    project_key: Option<&str>,
+    scope: Option<&str>,
     role: Option<&str>,
     query: &crate::memory::types::MemoryQuery,
 ) -> String {
-    build_scalar_predicate(project_key, role, query)
+    build_scalar_predicate(scope, role, query)
 }

@@ -25,11 +25,11 @@ use crate::memory::{MemoryManager, MemoryQuery, MemoryType};
 pub async fn execute(config: &Config, command: Commands) -> Result<()> {
     match command {
         Commands::Memory {
-            project,
+            scope,
             role,
             command,
         } => {
-            let mut memory_manager = MemoryManager::new(config, project, role).await?;
+            let mut memory_manager = MemoryManager::new(config, scope, role).await?;
             execute_memory_command(&mut memory_manager, command).await
         }
         Commands::Knowledge { command } => {
