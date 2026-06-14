@@ -808,7 +808,15 @@ mod tests {
 
         // Search with matching session — should find it
         let results = store
-            .search(&embedding, "session", None, 10, false, Some("session-abc"), None)
+            .search(
+                &embedding,
+                "session",
+                None,
+                10,
+                false,
+                Some("session-abc"),
+                None,
+            )
             .await
             .unwrap();
 
@@ -840,7 +848,15 @@ mod tests {
 
         // Search with session B — should NOT find session A's data
         let results = store
-            .search(&embedding, "secret", None, 10, false, Some("session-B"), None)
+            .search(
+                &embedding,
+                "secret",
+                None,
+                10,
+                false,
+                Some("session-B"),
+                None,
+            )
             .await
             .unwrap();
 
@@ -870,7 +886,15 @@ mod tests {
 
         // Search with any session — should find persistent
         let results = store
-            .search(&embedding, "docs", None, 10, false, Some("any-session"), None)
+            .search(
+                &embedding,
+                "docs",
+                None,
+                10,
+                false,
+                Some("any-session"),
+                None,
+            )
             .await
             .unwrap();
 
