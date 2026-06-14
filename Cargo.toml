@@ -75,6 +75,19 @@ regex = "1"
 # which conflicts with tantivy-common 0.9.0's blanket `From<B> for FileSlice`, causing E0119.
 time = { version = "=0.3.47", default-features = false }
 
+# Hold the transitive brotli compression chain (via reqwest / tower-http / lance) on
+# alloc-no-stdlib 2.x. brotli 8.0.3 uses alloc-no-stdlib "2.0" directly but takes its
+# `StandardAlloc` from alloc-stdlib; alloc-stdlib 0.2.3 and brotli-decompressor 5.0.2
+# both moved to alloc-no-stdlib 3.0, so a re-resolve hands StandardAlloc the 3.0
+# `Allocator` trait while brotli expects 2.0.4's — breaking `impl BrotliAlloc for
+# StandardAlloc` (E0277, "multiple versions of alloc_no_stdlib"). Pinning these two
+# leaf crates to their last 2.0-only releases collapses the chain to a single
+# alloc-no-stdlib 2.0.4. NB: pinning alloc-no-stdlib itself does NOT help — cargo lets
+# 2.x and 3.x coexist; the crates that SELECT the version must be pinned, and both
+# (not just one) — leaving either unpinned lets it re-introduce the 3.0 line.
+alloc-stdlib = "=0.2.2"
+brotli-decompressor = "=5.0.1"
+
 # Local dep for testing
 # octolib = { path = "../octolib", default-features = false }
 octolib = { version = "0.23.0", default-features = false }
