@@ -93,24 +93,22 @@ pub fn init_mcp_logging(base_dir: PathBuf, debug_mode: bool) -> Result<(), anyho
 fn select_log_dir(base_dir: &Path) -> Result<PathBuf, anyhow::Error> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
-    if let Ok(project_id) = crate::storage::get_project_identifier(base_dir) {
-        if let Ok(system_dir) = crate::storage::get_system_storage_dir() {
-            candidates.push(system_dir.join(&project_id).join("logs"));
-        }
+    let scope = crate::storage::derive_scope(base_dir);
+    // Sanitize scope for use as a directory component (replace '/' with '_')
+    let scope_safe = scope.replace('/', "_");
+
+    if let Ok(system_dir) = crate::storage::get_system_storage_dir() {
+        candidates.push(system_dir.join(&scope_safe).join("logs"));
     }
 
     candidates.push(base_dir.join(".octobrain").join("logs"));
 
-    if let Ok(project_id) = crate::storage::get_project_identifier(base_dir) {
-        candidates.push(
-            std::env::temp_dir()
-                .join("octobrain")
-                .join(project_id)
-                .join("logs"),
-        );
-    } else {
-        candidates.push(std::env::temp_dir().join("octobrain").join("logs"));
-    }
+    candidates.push(
+        std::env::temp_dir()
+            .join("octobrain")
+            .join(&scope_safe)
+            .join("logs"),
+    );
 
     for candidate in candidates {
         if try_prepare_log_dir(&candidate).is_ok() {

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use anyhow::Result;
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -55,92 +54,123 @@ pub fn get_system_storage_dir() -> Result<PathBuf> {
     Ok(base_dir)
 }
 
-/// Get project identifier for a given directory
-/// First tries to get Git remote URL, falls back to path hash
-pub fn get_project_identifier(project_path: &Path) -> Result<String> {
-    // Try to get git remote URL first
-    if let Ok(git_remote) = get_git_remote_url(project_path) {
-        // Create a hash from git remote URL
-        let mut hasher = Sha256::new();
-        hasher.update(git_remote.as_bytes());
-        let result = hasher.finalize();
-        return Ok(format!("{:x}", result)[..16].to_string()); // Use first 16 chars
+/// Derive a human-readable scope string for the given directory.
+///
+/// Resolution order:
+///   1. Git remote URL → normalized as `host/org/repo` (e.g. `github.com/muvon/octobrain`)
+///   2. No git remote → `local/<parent>/<dir>` derived from the last two path segments
+///
+/// The global scope `""` is reserved and never produced by this function.
+pub fn derive_scope(project_path: &Path) -> String {
+    // Try git remote first
+    if let Some(scope) = try_git_scope(project_path) {
+        return scope;
     }
-
-    // Fallback to absolute path hash
-    let absolute_path = project_path.canonicalize().or_else(|_| {
-        // If canonicalize fails, try to get absolute path manually
-        if project_path.is_absolute() {
-            Ok(project_path.to_path_buf())
-        } else {
-            std::env::current_dir().map(|cwd| cwd.join(project_path))
-        }
-    })?;
-
-    let mut hasher = Sha256::new();
-    hasher.update(absolute_path.to_string_lossy().as_bytes());
-    let result = hasher.finalize();
-    Ok(format!("{:x}", result)[..16].to_string()) // Use first 16 chars
+    // Fall back to local path-based scope
+    local_scope(project_path)
 }
 
-/// Try to get the Git remote URL for a project
-fn get_git_remote_url(project_path: &Path) -> Result<String> {
+/// Attempt to derive scope from `git remote get-url origin`. Returns `None` on any failure
+/// so the caller can fall back to the local path scheme.
+fn try_git_scope(project_path: &Path) -> Option<String> {
     let output = Command::new("git")
-        .arg("-C")
-        .arg(project_path)
-        .arg("remote")
-        .arg("get-url")
-        .arg("origin")
-        .output()?;
+        .args([
+            "-C",
+            &project_path.to_string_lossy(),
+            "remote",
+            "get-url",
+            "origin",
+        ])
+        .output()
+        .ok()?;
 
-    if output.status.success() {
-        let url = String::from_utf8(output.stdout)?.trim().to_string();
-
-        if !url.is_empty() {
-            return Ok(normalize_git_url(&url));
-        }
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    let url = raw.trim();
+    if url.is_empty() {
+        return None;
     }
 
-    Err(anyhow::anyhow!("No git remote found"))
+    let normalized = normalize_git_url(url);
+    if normalized.is_empty() {
+        tracing::debug!(
+            "git remote URL '{}' could not be normalized; using local scope",
+            url
+        );
+        return None;
+    }
+    Some(normalized)
 }
 
-/// Normalize git URL to be consistent regardless of protocol
-/// e.g., https://github.com/user/repo.git and git@github.com:user/repo.git
-/// both become github.com/user/repo
-fn normalize_git_url(url: &str) -> String {
+/// Derive `local/<parent>/<dir>` from the last two segments of the path.
+/// Gracefully degrades to `local/<dir>` when there is no parent segment.
+fn local_scope(project_path: &Path) -> String {
+    let absolute = project_path
+        .canonicalize()
+        .unwrap_or_else(|_| project_path.to_path_buf());
+
+    let mut components: Vec<String> = absolute
+        .components()
+        .filter_map(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            if s.is_empty() || s == "/" {
+                None
+            } else {
+                Some(s.to_lowercase())
+            }
+        })
+        .collect();
+
+    match components.len() {
+        0 => "local/unknown".to_string(),
+        1 => format!("local/{}", components.remove(0)),
+        _ => {
+            let dir = components.pop().unwrap();
+            let parent = components.pop().unwrap();
+            format!("local/{}/{}", parent, dir)
+        }
+    }
+}
+
+/// Normalize a git remote URL to `host/org/repo` (lowercase, no trailing slash, no `.git`).
+///
+/// Handles:
+/// - SSH: `git@github.com:org/repo.git` → `github.com/org/repo`
+/// - HTTPS: `https://github.com/org/repo.git` → `github.com/org/repo`
+pub fn normalize_git_url(url: &str) -> String {
     let url = url.trim();
 
     // Remove .git suffix if present
-    let url = if let Some(stripped) = url.strip_suffix(".git") {
-        stripped
-    } else {
-        url
-    };
+    let url = url.strip_suffix(".git").unwrap_or(url);
 
-    // Handle SSH format: git@host:user/repo
-    if url.contains("@") && url.contains(":") && !url.contains("://") {
+    let raw = if url.contains('@') && url.contains(':') && !url.contains("://") {
+        // SSH format: git@host:user/repo
         if let Some(at_pos) = url.find('@') {
             if let Some(colon_pos) = url[at_pos..].find(':') {
                 let host = &url[at_pos + 1..at_pos + colon_pos];
                 let path = &url[at_pos + colon_pos + 1..];
-                return format!("{}/{}", host, path);
+                format!("{}/{}", host, path)
+            } else {
+                url.to_string()
             }
+        } else {
+            url.to_string()
         }
-    }
+    } else if let Some(scheme_end) = url.find("://") {
+        // HTTPS / HTTP format
+        url[scheme_end + 3..].to_string()
+    } else {
+        url.to_string()
+    };
 
-    // Handle HTTPS format: https://host/user/repo
-    if url.starts_with("http://") || url.starts_with("https://") {
-        if let Some(scheme_end) = url.find("://") {
-            return url[scheme_end + 3..].to_string();
-        }
-    }
-
-    // Return as-is if we can't parse it
-    url.to_string()
+    // Lowercase and strip leading/trailing slashes
+    raw.to_lowercase().trim_matches('/').to_string()
 }
 
 /// Get the shared memory database path.
-/// All projects share a single LanceDB at this location; rows are scoped by project_key.
+/// All projects share a single LanceDB at this location; rows are scoped by the `scope` column.
 pub fn get_memory_database_path() -> Result<PathBuf> {
     let system_dir = get_system_storage_dir()?;
     Ok(system_dir.join("memory"))
