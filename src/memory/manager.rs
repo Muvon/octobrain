@@ -803,7 +803,7 @@ impl MemoryManager {
                 .or_insert(0) += 1;
         }
 
-        let (scopes, roles) = self.store.get_distinct_scopes_and_roles().await?;
+        let (scopes, roles) = self.store.get_distinct_projects_and_roles().await?;
 
         Ok(MemoryStats {
             total_memories: total_count,
