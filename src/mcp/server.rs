@@ -762,7 +762,7 @@ impl ServerHandler for McpServer {
 
                 let mut session = self.session.lock().await;
                 let should_lock_scope = git || !self.has_local_projects;
-                session.scope = if should_lock_scope { project } else { None };
+                session.scope = if should_lock_scope { scope } else { None };
                 session.role = role;
                 if let Some(sid) = session_id {
                     session.session_id = sid;
