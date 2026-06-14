@@ -176,6 +176,16 @@ pub fn get_memory_database_path() -> Result<PathBuf> {
     Ok(system_dir.join("memory"))
 }
 
+/// Get the directory holding knowledge-box state: the subscription registry and
+/// cloned remote box working trees. Created on demand.
+pub fn get_boxes_dir() -> Result<PathBuf> {
+    let dir = get_system_storage_dir()?.join("boxes");
+    if !dir.exists() {
+        fs::create_dir_all(&dir)?;
+    }
+    Ok(dir)
+}
+
 /// Get the system config file path
 /// Stored directly under ~/.local/share/octobrain/ on all systems
 pub fn get_system_config_path() -> Result<PathBuf> {

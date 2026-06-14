@@ -2,7 +2,7 @@
 //
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::config::{Config, KnowledgeConfig, SearchConfig};
@@ -65,6 +65,7 @@ impl KnowledgeManager {
         query: &str,
         source: Option<&str>,
         session_id: Option<&str>,
+        active_scope: Option<&str>,
     ) -> Result<Vec<KnowledgeSearchResult>> {
         // If source provided, normalize and check if needs indexing
         let normalized = source.map(normalize_source).transpose()?;
@@ -87,6 +88,10 @@ impl KnowledgeManager {
         // Use global hybrid search flag
         let use_hybrid = self.search_config.hybrid.enabled;
 
+        // Visible scope set: hot knowledge ("") + boxes bound to the active scope and
+        // its ancestors. None = unscoped (no filter, all scopes) — mirrors memory.
+        let scopes = crate::knowledge::boxes::visible_scopes(active_scope);
+
         // Search with configurable limit and hybrid flag
         self.store
             .search(
@@ -96,14 +101,18 @@ impl KnowledgeManager {
                 self.config.max_results,
                 use_hybrid,
                 session_id,
+                scopes.as_deref(),
             )
             .await
     }
 
     /// Check if source needs indexing (not indexed or outdated)
     async fn needs_indexing(&self, source: &str) -> Result<bool> {
-        // stored:// content is managed by the store command, never auto-reindexed
-        if source.starts_with("stored://") {
+        // stored:// and box:// content is managed explicitly (store command / box sync),
+        // never auto-refetched as a URL or file.
+        if source.starts_with("stored://")
+            || source.starts_with(crate::knowledge::boxes::BOX_URI_PREFIX)
+        {
             return Ok(false);
         }
 
@@ -188,9 +197,17 @@ impl KnowledgeManager {
         )
         .await?;
 
-        // Store (persistent — no session_id)
+        // Store (persistent hot knowledge — global scope, no session_id)
         self.store
-            .store_chunks(&source, &title, &content_hash, &chunks, &embeddings, None)
+            .store_chunks(
+                &source,
+                &title,
+                "",
+                &content_hash,
+                &chunks,
+                &embeddings,
+                None,
+            )
             .await?;
 
         Ok(IndexResult {
@@ -222,7 +239,15 @@ impl KnowledgeManager {
         .await?;
 
         self.store
-            .store_chunks(source, &title, &content_hash, &chunks, &embeddings, None)
+            .store_chunks(
+                source,
+                &title,
+                "",
+                &content_hash,
+                &chunks,
+                &embeddings,
+                None,
+            )
             .await?;
 
         Ok(())
@@ -258,11 +283,15 @@ impl KnowledgeManager {
         pattern: &str,
         source: Option<&str>,
         session_id: Option<&str>,
+        active_scope: Option<&str>,
     ) -> Result<Vec<MatchResult>> {
         let regex = regex::Regex::new(pattern)
             .with_context(|| format!("Invalid regex pattern: {}", pattern))?;
 
-        self.store.match_content(&regex, source, session_id).await
+        let scopes = crate::knowledge::boxes::visible_scopes(active_scope);
+        self.store
+            .match_content(&regex, source, session_id, scopes.as_deref())
+            .await
     }
 
     /// Fetch source content as raw bytes with content type detection.
@@ -403,6 +432,7 @@ impl KnowledgeManager {
                 .store_chunks(
                     &source,
                     &title,
+                    "",
                     &content_hash,
                     &[chunk],
                     &[embedding],
@@ -428,6 +458,7 @@ impl KnowledgeManager {
             .store_chunks(
                 &source,
                 &title,
+                "",
                 &content_hash,
                 &chunks,
                 &embeddings,
@@ -464,6 +495,240 @@ impl KnowledgeManager {
     ) -> Result<Vec<(String, String, usize, chrono::DateTime<chrono::Utc>)>> {
         self.store.list_sources(limit).await
     }
+
+    // ========================================================================
+    // Knowledge boxes
+    // ========================================================================
+
+    /// Manually import a remote git box and index it. Bound scope defaults to the
+    /// org level derived from the repo (`host/org`); `--global` forces global ("")
+    /// and `scope_override` pins an explicit scope.
+    pub async fn import_box(
+        &self,
+        url: &str,
+        scope_override: Option<&str>,
+        global: bool,
+    ) -> Result<usize> {
+        use crate::knowledge::boxes;
+
+        let box_id = boxes::box_id_from_url(url);
+        let scope = if global {
+            String::new()
+        } else if let Some(s) = scope_override {
+            s.to_string()
+        } else {
+            boxes::org_scope(&box_id).unwrap_or_default()
+        };
+
+        let dest = crate::storage::get_boxes_dir()?.join(boxes::slug(&box_id));
+        if dest.exists() {
+            boxes::pull(&dest).ok();
+        } else {
+            boxes::clone(url, &dest)?;
+        }
+
+        let count = self.index_box_dir(&dest, &box_id, &scope).await?;
+
+        let mut registry = boxes::BoxRegistry::load()?;
+        registry.upsert(boxes::RemoteBox {
+            url: url.to_string(),
+            box_id: box_id.clone(),
+            scope: scope.clone(),
+            last_commit: boxes::head_commit(&dest).unwrap_or_default(),
+            last_synced: Utc::now().to_rfc3339(),
+        });
+        registry.save()?;
+
+        tracing::info!(
+            "Imported box '{}' at scope '{}' ({} files indexed)",
+            box_id,
+            scope,
+            count
+        );
+        Ok(count)
+    }
+
+    /// Bootstrap/refresh sync: index project `.box/` for the given repos, auto-probe
+    /// each org for a conventional box, then pull + smart-reindex every subscribed
+    /// remote box. Failures are logged and skipped, never fatal. `projects` is a list
+    /// of (repo_path, scope) pairs discovered by the caller.
+    pub async fn sync_boxes(&self, projects: &[(PathBuf, String)]) -> Result<()> {
+        use crate::knowledge::boxes;
+        let boxes_dir = crate::storage::get_boxes_dir()?;
+
+        // 1. Project-local .box/ — box_id is the project scope itself.
+        for (repo_path, scope) in projects {
+            let box_dir = repo_path.join(boxes::PROJECT_BOX_DIR);
+            if box_dir.is_dir() {
+                if let Err(e) = self.index_box_dir(&box_dir, scope, scope).await {
+                    tracing::warn!("Project box index failed ({}): {}", box_dir.display(), e);
+                }
+            }
+        }
+
+        let mut registry = boxes::BoxRegistry::load()?;
+        let mut dirty = false;
+
+        // 2. Org auto-probe by convention (<host>/<org>/octobrain-box).
+        for (_repo, scope) in projects {
+            let org = match boxes::org_scope(scope) {
+                Some(o) => o,
+                None => continue,
+            };
+            let box_id = boxes::org_box_id(&org);
+            if registry.find(&box_id).is_some() {
+                continue; // already subscribed — handled in the pull loop below
+            }
+            // Honour the negative-probe cache: skip orgs known to have no box.
+            if registry
+                .probed
+                .get(&org)
+                .map(|p| !p.has_box)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let url = boxes::org_box_url(&org);
+            let exists = boxes::remote_exists(&url);
+            registry.probed.insert(
+                org.clone(),
+                boxes::ProbeResult {
+                    has_box: exists,
+                    checked: Utc::now().to_rfc3339(),
+                },
+            );
+            dirty = true;
+            if exists {
+                registry.upsert(boxes::RemoteBox {
+                    url,
+                    box_id,
+                    scope: org,
+                    last_commit: String::new(),
+                    last_synced: String::new(),
+                });
+            }
+        }
+
+        // 3. Pull + smart-reindex every subscribed remote box.
+        for b in registry.boxes.clone() {
+            let dest = boxes_dir.join(boxes::slug(&b.box_id));
+            if dest.exists() {
+                boxes::pull(&dest).ok();
+            } else if boxes::clone(&b.url, &dest).is_err() {
+                continue; // unreachable/offline — keep whatever is already indexed
+            }
+            match self.index_box_dir(&dest, &b.box_id, &b.scope).await {
+                Ok(_) => {
+                    if let Some(entry) = registry.boxes.iter_mut().find(|e| e.box_id == b.box_id) {
+                        entry.last_commit = boxes::head_commit(&dest).unwrap_or_default();
+                        entry.last_synced = Utc::now().to_rfc3339();
+                        dirty = true;
+                    }
+                }
+                Err(e) => tracing::warn!("Box reindex failed ({}): {}", b.box_id, e),
+            }
+        }
+
+        if dirty {
+            registry.save()?;
+        }
+        Ok(())
+    }
+
+    /// Index a box directory: smart-reindex changed files (by content_hash), prune
+    /// sources removed from the box. Returns the count of files (re)indexed this pass.
+    async fn index_box_dir(&self, root: &Path, box_id: &str, scope: &str) -> Result<usize> {
+        use crate::knowledge::boxes;
+
+        let files = boxes::collect_indexable(root);
+        let mut current: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut reindexed = 0usize;
+
+        for (path, rel) in &files {
+            let source = boxes::source_uri(box_id, rel);
+            current.insert(source.clone());
+
+            let content_type = ContentType::from_extension(&path.to_string_lossy())
+                .unwrap_or(ContentType::PlainText);
+            let bytes = match tokio::fs::read(path).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!("Skipping box file {}: {}", path.display(), e);
+                    continue;
+                }
+            };
+
+            let (title, content_hash, chunks) =
+                self.chunker
+                    .extract_and_chunk(&source, &content_type, &bytes)?;
+            if chunks.is_empty() {
+                continue;
+            }
+
+            // Smart reindex: skip files whose content is unchanged (embedding is the
+            // expensive part; re-extraction/hashing is cheap).
+            if let Some((existing_hash, _)) = self.store.get_source_metadata(&source).await? {
+                if existing_hash == content_hash {
+                    continue;
+                }
+            }
+
+            let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+            let embeddings = crate::embedding::generate_embeddings_batch(
+                texts,
+                self.embedding_provider.as_ref(),
+                self.embedding_timeout_secs,
+            )
+            .await?;
+
+            self.store
+                .store_chunks(
+                    &source,
+                    &title,
+                    scope,
+                    &content_hash,
+                    &chunks,
+                    &embeddings,
+                    None,
+                )
+                .await?;
+            reindexed += 1;
+        }
+
+        // Prune sources removed from the box since the last sync.
+        let prefix = boxes::source_prefix(box_id);
+        for existing in self.store.list_sources_with_prefix(&prefix).await? {
+            if !current.contains(&existing) {
+                self.store.delete_source(&existing).await?;
+            }
+        }
+
+        Ok(reindexed)
+    }
+
+    /// Remove a box: drop all its indexed rows, its registry entry, and its clone.
+    pub async fn remove_box(&self, box_id: &str) -> Result<()> {
+        use crate::knowledge::boxes;
+
+        self.store
+            .delete_by_source_prefix(&boxes::source_prefix(box_id))
+            .await?;
+
+        let mut registry = boxes::BoxRegistry::load()?;
+        registry.remove(box_id);
+        registry.save()?;
+
+        let dest = crate::storage::get_boxes_dir()?.join(boxes::slug(box_id));
+        if dest.exists() {
+            std::fs::remove_dir_all(&dest).ok();
+        }
+        Ok(())
+    }
+
+    /// List subscribed remote boxes (project `.box/` boxes are discovered, not listed).
+    pub fn list_boxes(&self) -> Result<Vec<crate::knowledge::boxes::RemoteBox>> {
+        Ok(crate::knowledge::boxes::BoxRegistry::load()?.boxes)
+    }
 }
 
 // ============================================================================
@@ -481,10 +746,11 @@ fn is_local_source(source: &str) -> bool {
 fn normalize_source(source: &str) -> Result<String> {
     let trimmed = source.trim();
 
-    // Already a URL or stored key
+    // Already a URL, stored key, or box source — pass through untouched.
     if trimmed.starts_with("http://")
         || trimmed.starts_with("https://")
         || trimmed.starts_with("stored://")
+        || trimmed.starts_with("box://")
     {
         return Ok(trimmed.trim_end_matches('/').to_string());
     }

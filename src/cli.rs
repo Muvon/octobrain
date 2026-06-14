@@ -43,6 +43,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: KnowledgeCommand,
     },
+    /// Knowledge box management — git-backed, scoped knowledge bundles
+    Box {
+        #[command(subcommand)]
+        command: BoxCommand,
+    },
     /// Start MCP server (Model Context Protocol) exposing memory tools
     Mcp {
         /// Bind to HTTP server on host:port instead of using stdin/stdout (e.g., "0.0.0.0:12345")
@@ -342,6 +347,35 @@ pub enum MemoryCommand {
         /// Only consider Working memories created in the last N days
         #[arg(short = 'a', long, default_value = "7")]
         max_age_days: u32,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BoxCommand {
+    /// Import (clone) a remote git box and index it as scoped knowledge
+    Import {
+        /// Git URL of the box repository
+        url: String,
+
+        /// Bind to a specific scope (default: org level derived from the repo)
+        #[arg(long)]
+        scope: Option<String>,
+
+        /// Index at the global scope (visible in every project)
+        #[arg(long)]
+        global: bool,
+    },
+
+    /// Pull and smart-reindex all subscribed boxes plus the local project .box/
+    Sync,
+
+    /// List subscribed remote boxes
+    List,
+
+    /// Remove a box by its id (host/org/repo) — drops its rows and clone
+    Remove {
+        /// Box id to remove (as shown by `box list`)
+        box_id: String,
     },
 }
 

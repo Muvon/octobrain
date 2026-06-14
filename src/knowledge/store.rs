@@ -13,7 +13,7 @@ use lancedb::{
     connect,
     index::Index,
     query::{ExecutableQuery, QueryBase, QueryExecutionOptions},
-    table::OptimizeAction,
+    table::{NewColumnTransform, OptimizeAction},
     Connection, DistanceType, Table,
 };
 use std::sync::Arc;
@@ -30,6 +30,21 @@ use chrono::Duration;
 /// https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf
 /// "Experiments indicate that k = 60 was near-optimal, but that the choice is not critical"
 const RRF_K: f32 = 60.0;
+
+/// Build a `scope IN ('a','b',...)` predicate for the visible scope set.
+/// Returns `None` when `scopes` is `None` (unscoped/admin → no filter) or empty.
+fn scope_in_clause(scopes: Option<&[String]>) -> Option<String> {
+    let scopes = scopes?;
+    if scopes.is_empty() {
+        return None;
+    }
+    let list = scopes
+        .iter()
+        .map(|s| format!("'{}'", escape_sql_literal(s)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("scope IN ({})", list))
+}
 
 pub struct KnowledgeStore {
     table: Table,
@@ -50,11 +65,34 @@ impl KnowledgeStore {
         // Cache the table handle — opened once, reused for the lifetime of this store
         let table = db.open_table("knowledge_chunks").execute().await?;
 
+        // Non-destructive migration: add the `scope` column to pre-existing tables
+        // that were created before knowledge gained scopes. Existing hot-knowledge
+        // rows default to global ("") so behavior is unchanged.
+        Self::migrate_scope_column(&table).await?;
+
         Ok(Self {
             table,
             schema,
             vector_dim,
         })
+    }
+
+    /// Add the `scope` column to a pre-existing `knowledge_chunks` table created
+    /// before box knowledge. Defaults all legacy rows to global ("").
+    async fn migrate_scope_column(table: &Table) -> Result<()> {
+        let existing = table.schema().await?;
+        if existing.field_with_name("scope").is_ok() {
+            return Ok(());
+        }
+        tracing::info!("Migrating knowledge_chunks: adding 'scope' column (default '')");
+        table
+            .add_columns(
+                NewColumnTransform::SqlExpressions(vec![("scope".to_string(), "''".to_string())]),
+                None,
+            )
+            .await
+            .context("Failed to add scope column to existing knowledge_chunks table")?;
+        Ok(())
     }
 
     fn build_schema(vector_dim: usize) -> Arc<Schema> {
@@ -92,6 +130,11 @@ impl KnowledgeStore {
                 ),
                 false,
             ),
+            // `scope` is last so a fresh table and a migrated table (add_columns
+            // appends) share an identical column order. Non-null with a "" default on
+            // migration — mirrors how the memory store adds its migrated columns. Box
+            // rows carry their bound scope; hot knowledge is global ("").
+            Field::new("scope", DataType::Utf8, false),
         ]))
     }
 
@@ -102,9 +145,12 @@ impl KnowledgeStore {
         if table_names.contains(&"knowledge_chunks".to_string()) {
             let table = db.open_table("knowledge_chunks").execute().await?;
             let existing_schema = table.schema().await?;
+            // `scope` is handled non-destructively by migrate_scope_column (add_columns),
+            // so a table merely missing `scope` must NOT trigger a destructive recreate.
             let needs_recreate = schema
                 .fields()
                 .iter()
+                .filter(|f| f.name() != "scope")
                 .any(|f| existing_schema.field_with_name(f.name()).is_err());
             if needs_recreate {
                 tracing::info!("knowledge_chunks schema outdated, dropping and recreating");
@@ -131,15 +177,24 @@ impl KnowledgeStore {
             .await
             .context("Failed to create FTS index on content column")?;
 
-        tracing::info!("Created FTS index on knowledge_chunks.content for hybrid search");
+        // Bitmap index on scope for fast pushdown of the `scope IN (...)` visibility filter.
+        table
+            .create_index(&["scope"], Index::Bitmap(Default::default()))
+            .execute()
+            .await
+            .context("Failed to create Bitmap index on knowledge_chunks.scope")?;
+
+        tracing::info!("Created FTS + scope indexes on knowledge_chunks for hybrid scoped search");
 
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn store_chunks(
         &self,
         source: &str,
         source_title: &str,
+        scope: &str,
         content_hash: &str,
         chunks: &[KnowledgeChunk],
         embeddings: &[Vec<f32>],
@@ -176,6 +231,7 @@ impl KnowledgeStore {
         let content_hashes: Vec<&str> = chunks.iter().map(|_| content_hash).collect();
         let indexed_ats: Vec<i64> = chunks.iter().map(|_| now_millis).collect();
         let last_checkeds: Vec<i64> = chunks.iter().map(|_| now_millis).collect();
+        let scopes: Vec<&str> = chunks.iter().map(|_| scope).collect();
 
         // Build section_path list array
         let mut section_path_builder =
@@ -215,6 +271,7 @@ impl KnowledgeStore {
                 Arc::new(TimestampMillisecondArray::from(indexed_ats)),
                 Arc::new(TimestampMillisecondArray::from(last_checkeds)),
                 Arc::new(embedding_array),
+                Arc::new(StringArray::from(scopes)),
             ],
         )?;
 
@@ -230,6 +287,7 @@ impl KnowledgeStore {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn search(
         &self,
         query_embedding: &[f32],
@@ -238,6 +296,7 @@ impl KnowledgeStore {
         limit: usize,
         use_hybrid: bool,
         session_id: Option<&str>,
+        scopes: Option<&[String]>,
     ) -> Result<Vec<KnowledgeSearchResult>> {
         let mut query = self
             .table
@@ -264,6 +323,12 @@ impl KnowledgeStore {
                 "(session_id IS NULL OR session_id = '{}')",
                 escape_sql_literal(sid)
             ));
+        }
+
+        // Scope visibility: hot knowledge ("") + bound boxes for the active scope and
+        // its ancestors. None = unscoped/admin (no filter, all scopes).
+        if let Some(filter) = scope_in_clause(scopes) {
+            filters.push(filter);
         }
 
         if !filters.is_empty() {
@@ -401,6 +466,37 @@ impl KnowledgeStore {
             .delete(&format!("source = '{}'", escape_sql_literal(source)))
             .await?;
         Ok(())
+    }
+
+    /// Delete every row whose `source` starts with `prefix` — used to drop a whole
+    /// box (`box://<box_id>/`) on remove or full re-import.
+    pub async fn delete_by_source_prefix(&self, prefix: &str) -> Result<()> {
+        self.table
+            .delete(&format!("source LIKE '{}%'", escape_sql_literal(prefix)))
+            .await?;
+        Ok(())
+    }
+
+    /// List distinct `source` URIs whose value starts with `prefix` (e.g. all files
+    /// currently indexed for a box) — used to prune sources removed from a box.
+    pub async fn list_sources_with_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        let mut stream = self
+            .table
+            .query()
+            .only_if(format!("source LIKE '{}%'", escape_sql_literal(prefix)))
+            .execute()
+            .await?;
+        let mut set = std::collections::HashSet::new();
+        while let Some(batch) = stream.try_next().await? {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            let sources = string_column(&batch, "source")?;
+            for i in 0..batch.num_rows() {
+                set.insert(sources.value(i).to_string());
+            }
+        }
+        Ok(set.into_iter().collect())
     }
 
     pub async fn get_stats(&self) -> Result<KnowledgeStats> {
@@ -547,6 +643,7 @@ impl KnowledgeStore {
         pattern: &regex::Regex,
         source: Option<&str>,
         session_id: Option<&str>,
+        scopes: Option<&[String]>,
     ) -> Result<Vec<crate::knowledge::types::MatchResult>> {
         let mut filters = Vec::new();
 
@@ -559,6 +656,10 @@ impl KnowledgeStore {
                 "(session_id IS NULL OR session_id = '{}')",
                 escape_sql_literal(sid)
             ));
+        }
+
+        if let Some(filter) = scope_in_clause(scopes) {
+            filters.push(filter);
         }
 
         let mut query = self.table.query();
@@ -665,6 +766,7 @@ mod tests {
             .store_chunks(
                 "https://example.com",
                 "Example",
+                "",
                 "hash1",
                 &[chunk],
                 std::slice::from_ref(&embedding),
@@ -675,7 +777,7 @@ mod tests {
 
         // Search without session filter — should find persistent content
         let results = store
-            .search(&embedding, "hello", None, 10, false, None)
+            .search(&embedding, "hello", None, 10, false, None, None)
             .await
             .unwrap();
 
@@ -695,6 +797,7 @@ mod tests {
             .store_chunks(
                 "stored://my_key",
                 "My Key",
+                "",
                 "hash1",
                 &[chunk],
                 std::slice::from_ref(&embedding),
@@ -705,7 +808,7 @@ mod tests {
 
         // Search with matching session — should find it
         let results = store
-            .search(&embedding, "session", None, 10, false, Some("session-abc"))
+            .search(&embedding, "session", None, 10, false, Some("session-abc"), None)
             .await
             .unwrap();
 
@@ -726,6 +829,7 @@ mod tests {
             .store_chunks(
                 "stored://secret",
                 "Secret",
+                "",
                 "hash1",
                 &[chunk],
                 std::slice::from_ref(&embedding),
@@ -736,7 +840,7 @@ mod tests {
 
         // Search with session B — should NOT find session A's data
         let results = store
-            .search(&embedding, "secret", None, 10, false, Some("session-B"))
+            .search(&embedding, "secret", None, 10, false, Some("session-B"), None)
             .await
             .unwrap();
 
@@ -755,6 +859,7 @@ mod tests {
             .store_chunks(
                 "https://docs.rs",
                 "Docs",
+                "",
                 "hash1",
                 &[chunk],
                 std::slice::from_ref(&embedding),
@@ -765,7 +870,7 @@ mod tests {
 
         // Search with any session — should find persistent
         let results = store
-            .search(&embedding, "docs", None, 10, false, Some("any-session"))
+            .search(&embedding, "docs", None, 10, false, Some("any-session"), None)
             .await
             .unwrap();
 
@@ -784,6 +889,7 @@ mod tests {
             .store_chunks(
                 "stored://key1",
                 "Key1",
+                "",
                 "hash1",
                 &[chunk],
                 &[embedding],
@@ -817,6 +923,7 @@ mod tests {
             .store_chunks(
                 "stored://key1",
                 "Key1",
+                "",
                 "hash1",
                 &[chunk],
                 std::slice::from_ref(&embedding),
@@ -853,6 +960,7 @@ mod tests {
             .store_chunks(
                 "https://example.com",
                 "Example",
+                "",
                 "hash1",
                 &[persistent],
                 std::slice::from_ref(&embedding),
@@ -867,6 +975,7 @@ mod tests {
             .store_chunks(
                 "stored://notes",
                 "Notes",
+                "",
                 "hash2",
                 &[session],
                 std::slice::from_ref(&embedding),
@@ -877,7 +986,7 @@ mod tests {
 
         // Search with matching session — should see both
         let results = store
-            .search(&embedding, "data", None, 10, false, Some("sess1"))
+            .search(&embedding, "data", None, 10, false, Some("sess1"), None)
             .await
             .unwrap();
 

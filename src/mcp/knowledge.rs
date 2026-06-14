@@ -49,6 +49,7 @@ impl KnowledgeProvider {
         query: Option<&str>,
         source: Option<&str>,
         session_id: &str,
+        active_scope: Option<&str>,
     ) -> Result<String, McpError> {
         let query = query.ok_or_else(|| {
             McpError::invalid_params(
@@ -59,7 +60,7 @@ impl KnowledgeProvider {
 
         let manager = self.knowledge_manager.lock().await;
         let results = manager
-            .search(query, source, Some(session_id))
+            .search(query, source, Some(session_id), active_scope)
             .await
             .map_err(|e| {
                 McpError::internal_error(format!("Knowledge search failed: {}", e), "knowledge")
@@ -195,6 +196,7 @@ impl KnowledgeProvider {
         pattern: Option<&str>,
         source: Option<&str>,
         session_id: &str,
+        active_scope: Option<&str>,
     ) -> Result<String, McpError> {
         let pattern = pattern.ok_or_else(|| {
             McpError::invalid_params(
@@ -211,7 +213,7 @@ impl KnowledgeProvider {
 
         let manager = self.knowledge_manager.lock().await;
         let results = manager
-            .match_content(pattern, source, Some(session_id))
+            .match_content(pattern, source, Some(session_id), active_scope)
             .await
             .map_err(|e| {
                 McpError::internal_error(format!("Knowledge match failed: {}", e), "knowledge")
@@ -237,5 +239,18 @@ impl KnowledgeProvider {
         }
 
         Ok(output)
+    }
+
+    /// Discover/refresh knowledge boxes (project `.box/`, org auto-probe, subscribed
+    /// remotes). Intended to be driven from a background task on the MCP server.
+    pub async fn sync_boxes(
+        &self,
+        projects: &[(std::path::PathBuf, String)],
+    ) -> Result<(), McpError> {
+        let manager = self.knowledge_manager.lock().await;
+        manager
+            .sync_boxes(projects)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Box sync failed: {}", e), "knowledge"))
     }
 }
