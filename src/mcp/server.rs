@@ -31,6 +31,7 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServiceExt,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 use tracing::debug;
@@ -112,6 +113,31 @@ fn discover_scopes(root: &std::path::Path) -> Vec<String> {
     found
 }
 
+/// Like `discover_scopes`, but returns (repo_path, scope) pairs — used by box sync
+/// to locate each project's `.box/` directory and bind it to the project scope.
+fn discover_projects(root: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
+    let mut found = Vec::new();
+
+    let mut check = |path: &std::path::Path| {
+        if path.join(".git").exists() {
+            found.push((path.to_path_buf(), crate::storage::derive_scope(path)));
+        }
+    };
+
+    check(root);
+
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                check(&path);
+            }
+        }
+    }
+
+    found
+}
+
 /// Build the instructions string, optionally including available scope hints.
 fn build_instructions(scopes: &[String]) -> String {
     let base = "This server provides memory tools for storing and retrieving AI context. \
@@ -165,7 +191,9 @@ pub struct McpServer {
     session: Arc<Mutex<SessionState>>,
     instructions: String,
     /// True when octobrain's working directory contains at least one git repo.
-    has_local_scopes: bool,
+    has_local_projects: bool,
+    /// Single-flight guard so background box sync runs at most once per session.
+    box_sync_started: Arc<AtomicBool>,
 }
 
 impl McpServer {
@@ -180,7 +208,24 @@ impl McpServer {
             knowledge: Arc::new(Mutex::new(None)),
             session: Arc::new(Mutex::new(SessionState::default())),
             instructions,
-            has_local_scopes,
+            has_local_projects,
+            box_sync_started: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Background, non-blocking box discovery + sync. Logs and swallows errors so a
+    /// missing embedding provider or offline remote never disrupts the session.
+    async fn run_box_sync_background(&self) {
+        let provider = match self.get_or_init_knowledge().await {
+            Ok(p) => p,
+            Err(e) => {
+                debug!("Box sync skipped (knowledge init failed): {:?}", e);
+                return;
+            }
+        };
+        let projects = discover_projects(&self.working_directory);
+        if let Err(e) = provider.sync_boxes(&projects).await {
+            debug!("Box sync failed: {:?}", e);
         }
     }
 
@@ -605,6 +650,7 @@ impl McpServer {
         let provider = self.get_or_init_knowledge().await?;
         let session = self.session.lock().await;
         let session_id = session.session_id.clone();
+        let active_scope = session.scope.clone();
         drop(session);
 
         match params.command {
@@ -614,6 +660,7 @@ impl McpServer {
                         params.query.as_deref(),
                         params.source.as_deref(),
                         &session_id,
+                        active_scope.as_deref(),
                     )
                     .await
             }
@@ -638,6 +685,7 @@ impl McpServer {
                         params.pattern.as_deref(),
                         params.source.as_deref(),
                         &session_id,
+                        active_scope.as_deref(),
                     )
                     .await
             }
@@ -729,6 +777,16 @@ impl ServerHandler for McpServer {
                     session.scope, session.role
                 );
             }
+        }
+
+        // Kick off non-blocking box discovery/sync (once per session) now that any
+        // handshake scope is established. Safe without a handshake too: it locates
+        // project .box/ dirs from the working directory and refreshes subscribed boxes.
+        if !self.box_sync_started.swap(true, Ordering::SeqCst) {
+            let server = self.clone();
+            tokio::spawn(async move {
+                server.run_box_sync_background().await;
+            });
         }
 
         // Store peer info and return server info (default behavior)

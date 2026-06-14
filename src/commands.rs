@@ -16,7 +16,7 @@ use anyhow::Result;
 use serde_json::Value;
 use std::io::{self, Write};
 
-use crate::cli::{Commands, KnowledgeCommand, MemoryCommand};
+use crate::cli::{BoxCommand, Commands, KnowledgeCommand, MemoryCommand};
 use crate::config::Config;
 use crate::constants::MAX_QUERIES;
 use crate::knowledge::KnowledgeManager;
@@ -35,6 +35,10 @@ pub async fn execute(config: &Config, command: Commands) -> Result<()> {
         Commands::Knowledge { command } => {
             let mut knowledge_manager = KnowledgeManager::new(config).await?;
             execute_knowledge_command(&mut knowledge_manager, command).await
+        }
+        Commands::Box { command } => {
+            let knowledge_manager = KnowledgeManager::new(config).await?;
+            execute_box_command(&knowledge_manager, command).await
         }
         Commands::Mcp { bind } => {
             // Initialize file-only logging for MCP server (no console output)
@@ -726,9 +730,10 @@ async fn execute_knowledge_command(
             Ok(())
         }
         KnowledgeCommand::Search { query, source } => {
-            let source_filter = source;
+            // Scope CLI search to the current project (its boxes + org + global + hot).
+            let active = crate::storage::derive_scope(&std::env::current_dir()?);
             let results = knowledge_manager
-                .search(&query, source_filter.as_deref(), None)
+                .search(&query, source.as_deref(), None, Some(&active))
                 .await?;
 
             if results.is_empty() {
@@ -784,8 +789,9 @@ async fn execute_knowledge_command(
             Ok(())
         }
         KnowledgeCommand::Match { pattern, source } => {
+            let active = crate::storage::derive_scope(&std::env::current_dir()?);
             let results = knowledge_manager
-                .match_content(&pattern, source.as_deref(), None)
+                .match_content(&pattern, source.as_deref(), None, Some(&active))
                 .await?;
             if results.is_empty() {
                 println!("No matches found");
@@ -793,6 +799,51 @@ async fn execute_knowledge_command(
                 use crate::knowledge::formatting::format_match_results;
                 println!("{}", format_match_results(&results));
             }
+            Ok(())
+        }
+    }
+}
+
+async fn execute_box_command(
+    knowledge_manager: &KnowledgeManager,
+    command: BoxCommand,
+) -> Result<()> {
+    match command {
+        BoxCommand::Import { url, scope, global } => {
+            println!("Importing box from {}...", url);
+            let count = knowledge_manager
+                .import_box(&url, scope.as_deref(), global)
+                .await?;
+            println!("✓ Imported box ({} files indexed)", count);
+            Ok(())
+        }
+        BoxCommand::Sync => {
+            let cwd = std::env::current_dir()?;
+            let scope = crate::storage::derive_scope(&cwd);
+            println!("Syncing boxes...");
+            knowledge_manager.sync_boxes(&[(cwd, scope)]).await?;
+            println!("✓ Boxes synced");
+            Ok(())
+        }
+        BoxCommand::List => {
+            let boxes = knowledge_manager.list_boxes()?;
+            if boxes.is_empty() {
+                println!("No subscribed boxes");
+            } else {
+                for b in boxes {
+                    let scope = if b.scope.is_empty() {
+                        "(global)"
+                    } else {
+                        b.scope.as_str()
+                    };
+                    println!("{}  scope={}  {}", b.box_id, scope, b.url);
+                }
+            }
+            Ok(())
+        }
+        BoxCommand::Remove { box_id } => {
+            knowledge_manager.remove_box(&box_id).await?;
+            println!("✓ Removed box {}", box_id);
             Ok(())
         }
     }
