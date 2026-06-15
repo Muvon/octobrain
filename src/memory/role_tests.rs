@@ -23,11 +23,24 @@ mod tests {
     fn test_predicate_no_role() {
         let query = MemoryQuery::default();
         let pred = build_scalar_predicate_test(Some("proj123"), None, &query);
-        assert_eq!(pred, "(scope = 'proj123' OR scope = '')");
+        assert_eq!(
+            pred,
+            "(scope = 'proj123' OR scope = '') AND state != 'archived'"
+        );
         assert!(
             !pred.contains("role"),
             "No role filter expected when role is None"
         );
+    }
+
+    #[test]
+    fn test_predicate_excludes_archived_always() {
+        // Archived tombstones must never surface in relevance search, regardless
+        // of scope/role/filters — the clause is unconditional.
+        let query = MemoryQuery::default();
+        assert!(build_scalar_predicate_test(Some("proj123"), None, &query)
+            .contains("state != 'archived'"));
+        assert!(build_scalar_predicate_test(None, None, &query).contains("state != 'archived'"));
     }
 
     #[test]

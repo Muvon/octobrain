@@ -37,7 +37,7 @@
 //! let reranker = RerankerIntegration::new(config);
 //! let query = "example query";
 //! let results: Vec<MemorySearchResult> = vec![];
-//! let reranked = reranker.rerank_memories(query, results).await?;
+//! let reranked = reranker.rerank_memories(query, results, 10).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -57,11 +57,20 @@ impl RerankerIntegration {
         Self { config }
     }
 
-    /// Rerank memory search results using octolib
+    /// Rerank memory search results using octolib.
+    ///
+    /// `top_n` is the number of results the CALLER asked for — it is what we
+    /// request from the reranker and the size we cap the output at. Previously
+    /// this used the fixed `config.final_top_k`, which silently overrode the
+    /// caller's `limit` (a `limit=5` request returned up to 10; a `limit=20`
+    /// request returned only 10). On any reranker failure we degrade gracefully
+    /// to the already-good pre-rerank ranking (truncated to `top_n`) instead of
+    /// failing the whole search.
     pub async fn rerank_memories(
         &self,
         query: &str,
         mut results: Vec<MemorySearchResult>,
+        top_n: usize,
     ) -> Result<Vec<MemorySearchResult>> {
         if !self.config.enabled || results.is_empty() {
             return Ok(results);
@@ -91,24 +100,33 @@ impl RerankerIntegration {
             .collect();
 
         // Call octolib reranker with optional timeout
-        let rerank_fut = octolib::reranker::rerank(
-            query,
-            documents,
-            provider,
-            model,
-            Some(self.config.final_top_k),
-        );
-        let rerank_response = if self.config.timeout_secs == 0 {
-            rerank_fut.await?
+        let rerank_fut = octolib::reranker::rerank(query, documents, provider, model, Some(top_n));
+        let rerank_outcome = if self.config.timeout_secs == 0 {
+            rerank_fut.await
         } else {
-            tokio::time::timeout(
+            match tokio::time::timeout(
                 std::time::Duration::from_secs(self.config.timeout_secs),
                 rerank_fut,
             )
             .await
-            .map_err(|_| {
-                anyhow::anyhow!("Reranker timed out after {}s", self.config.timeout_secs)
-            })??
+            {
+                Ok(inner) => inner,
+                Err(_) => Err(anyhow::anyhow!(
+                    "Reranker timed out after {}s",
+                    self.config.timeout_secs
+                )),
+            }
+        };
+
+        // Graceful degradation: a reranker outage/timeout must not fail the whole
+        // search — fall back to the pre-rerank hybrid ranking, capped to top_n.
+        let rerank_response = match rerank_outcome {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::warn!("Reranker failed ({}); falling back to hybrid ranking", e);
+                results.truncate(top_n);
+                return Ok(results);
+            }
         };
 
         // Map reranked results back to MemorySearchResult
