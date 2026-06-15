@@ -507,6 +507,12 @@ pub struct RememberParams {
     /// Minimum relevance score (0.0-1.0)
     #[schemars(range(min = 0.0, max = 1.0))]
     pub min_relevance: Option<f32>,
+    /// Only return memories created on/after this time (ISO-8601, e.g. "2026-06-01" or
+    /// "2026-06-01T00:00:00Z"). Use for temporal questions like "what did I decide last week".
+    pub created_after: Option<String>,
+    /// Only return memories created on/before this time (ISO-8601). Pair with created_after
+    /// to scope a window (e.g. a specific month).
+    pub created_before: Option<String>,
     /// Filter by scope. If omitted, returns memories from all scopes (global + current).
     pub scope: Option<String>,
     /// Filter by role. If omitted, returns memories for all roles.
@@ -604,7 +610,7 @@ impl McpServer {
 
     #[tool(
         name = "remember",
-        description = "Semantic search over stored memories. Call before memorize to avoid duplicates, and at task start to load context. Results include 1-hop graph neighbors automatically. Prefer 2-5 related query terms for broader coverage. Results show [CONFIRMED]/[INFERRED] trust labels."
+        description = "Semantic search over stored memories. Call before memorize to avoid duplicates, and at task start to load context. Results include 1-hop graph neighbors automatically. Prefer 2-5 related query terms for broader coverage. Results show [CONFIRMED]/[INFERRED] trust labels. For temporal questions (\"last week\", \"in May\"), set created_after/created_before (ISO-8601) to scope the time window — you know today's date, so compute the bounds."
     )]
     async fn remember(
         &self,
