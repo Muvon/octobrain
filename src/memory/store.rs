@@ -91,6 +91,11 @@ fn build_scalar_predicate(scope: Option<&str>, role: Option<&str>, query: &Memor
         parts.push(format!("role = '{}'", escape_sql(role)));
     }
 
+    // Archived memories are tombstones (manual archive before hard delete) — never
+    // surface them in relevance search. Working + Consolidated stay retrievable
+    // (multi-granularity recall: both the fine sources and the coarse parent).
+    parts.push("state != 'archived'".to_string());
+
     if let Some(ref memory_types) = query.memory_types {
         if !memory_types.is_empty() {
             let list = memory_types
@@ -765,9 +770,16 @@ impl MemoryStore {
         } else {
             None
         };
+        // The reranker must return what the CALLER asked for, not a fixed config
+        // value. Fall back to final_top_k only when the caller didn't set a limit.
+        let final_top_n = query
+            .limit
+            .unwrap_or(self.main_config.search.reranker.final_top_k);
         let final_results =
             if let (Some(query_text), Some(reranker)) = (reranker_query_text, reranker_clone) {
-                reranker.rerank_memories(&query_text, candidates).await?
+                reranker
+                    .rerank_memories(&query_text, candidates, final_top_n)
+                    .await?
             } else {
                 candidates
             };
@@ -1054,7 +1066,11 @@ impl MemoryStore {
             }
         }
 
-        if count == 0 {
+        // Require at least 2 neighbors before expanding. A centroid built from a
+        // single neighbor just drags the query toward that one (often noisy) doc —
+        // classic Rocchio drift, worst exactly on the sparse/long-tail queries PRF
+        // is meant to help. With 0-1 neighbors, keep the original query untouched.
+        if count < 2 {
             return Ok(query_embedding);
         }
 
@@ -1133,8 +1149,14 @@ impl MemoryStore {
             .execute_hybrid(QueryExecutionOptions::default())
             .await?;
 
-        // Max possible RRF score = 2/k (rank 0 in both vector and FTS)
-        let max_rrf_score = 2.0 / RRF_K;
+        // Normalize by 1/k (a perfect rank-0 hit in a SINGLE list), not 2/k.
+        // Normalizing by 2/k assumes a doc is rank-0 in BOTH vector and BM25, which
+        // never happens for paraphrased memories that only the dense leg finds (zero
+        // lexical overlap) — those topped out at 0.5 and got demoted below mediocre
+        // both-list hits. With 1/k, any rank-0 match (single- or dual-modality)
+        // reaches ~1.0 and the absolute scale is preserved (weak queries still score
+        // low, so abstention/min_relevance still work). Excess is clamped to 1.0.
+        let max_rrf_score = 1.0 / RRF_K;
 
         let recency_decay_days = self.main_config.search.hybrid.recency_decay_days;
         let mut results = Vec::new();

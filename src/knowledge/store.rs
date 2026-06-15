@@ -368,8 +368,10 @@ impl KnowledgeStore {
             // Regular vector search returns _distance (0-2 for cosine, lower is better)
             let relevance_scores: Vec<f32> = if use_hybrid {
                 // Hybrid search: normalize RRF scores to 0-1 range.
-                // Max possible RRF score is 2/k (when rank=0 in both vector and FTS).
-                let max_rrf_score = 2.0 / RRF_K;
+                // Normalize by 1/k (a perfect rank-0 hit in a SINGLE list), not 2/k:
+                // a chunk only the dense leg finds (no lexical overlap) otherwise caps
+                // at 0.5 and loses to mediocre both-list hits. Excess clamps to 1.0.
+                let max_rrf_score = 1.0 / RRF_K;
                 f32_column_opt(&batch, "_relevance_score")
                     .map(|arr| {
                         (0..arr.len())
