@@ -398,11 +398,23 @@ impl MemoryProvider {
             .map(|v| v as usize)
             .unwrap_or(5);
 
+        // Temporal scoping (pushed down to LanceDB via the created_at BTree index) and
+        // an optional relevance floor. All three were previously advertised-but-dead.
+        let created_after = parse_iso_datetime(arguments, "created_after");
+        let created_before = parse_iso_datetime(arguments, "created_before");
+        let min_relevance = arguments
+            .get("min_relevance")
+            .and_then(|v| v.as_f64())
+            .map(|v| (v as f32).clamp(0.0, 1.0));
+
         let memory_query = MemoryQuery {
             memory_types,
             tags,
             related_files,
             limit: Some(limit.min(50)),
+            min_relevance,
+            created_after,
+            created_before,
             ..Default::default()
         };
 
@@ -596,6 +608,23 @@ impl MemoryProvider {
             Ok("❌ Either 'memory_id' or 'query' must be provided".to_string())
         }
     }
+}
+
+/// Parse an ISO-8601 timestamp from MCP args. Accepts a full RFC3339 datetime
+/// ("2026-06-01T12:00:00Z") or a bare date ("2026-06-01" → midnight UTC). Returns
+/// None on absent/empty/unparseable input, so the temporal filter is simply skipped.
+fn parse_iso_datetime(arguments: &Value, key: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let raw = arguments.get(key)?.as_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.with_timezone(&chrono::Utc));
+    }
+    chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|ndt| ndt.and_utc())
 }
 
 /// Parse a JSON array argument into a non-empty `Vec<String>`, mirroring the
