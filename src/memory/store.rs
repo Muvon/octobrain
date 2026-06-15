@@ -861,11 +861,21 @@ impl MemoryStore {
     /// pushed down to LanceDB via `only_if()`. JSON-serialized fields (tags, related_files)
     /// are filtered in Rust after fetch since they can't be queried natively.
     async fn vector_search(&self, query: &MemoryQuery) -> Result<Vec<MemorySearchResult>> {
+        // memory.max_search_results = default page size; search.max_results = hard ceiling.
         let limit = query
             .limit
             .unwrap_or(self.config.max_search_results)
-            .min(self.config.max_search_results);
-        let min_relevance = query.min_relevance.unwrap_or(0.0);
+            .min(self.main_config.search.max_results);
+        // Relevance floor defaults to the configured search.similarity_threshold for
+        // semantic (text) queries; filter-only listings (no query_text, e.g. `recent`,
+        // `by-type`) keep a 0.0 floor so they aren't silently truncated by score.
+        let min_relevance = query
+            .min_relevance
+            .unwrap_or(if query.query_text.is_some() {
+                self.main_config.search.similarity_threshold
+            } else {
+                0.0
+            });
 
         let mut results = Vec::new();
 
@@ -1113,11 +1123,17 @@ impl MemoryStore {
         // query_text is guaranteed Some by validate()
         let query_text = query.vector_query.as_deref().unwrap();
 
+        // memory.max_search_results = default page size; search.max_results = hard ceiling.
         let limit = query
             .filters
             .limit
-            .unwrap_or(self.config.max_search_results);
-        let min_relevance = query.filters.min_relevance.unwrap_or(0.0);
+            .unwrap_or(self.config.max_search_results)
+            .min(self.main_config.search.max_results);
+        // Hybrid always carries query text → apply the configured relevance floor.
+        let min_relevance = query
+            .filters
+            .min_relevance
+            .unwrap_or(self.main_config.search.similarity_threshold);
 
         let raw_embedding = crate::embedding::generate_embedding(
             query_text,

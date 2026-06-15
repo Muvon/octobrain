@@ -35,12 +35,16 @@ max_tokens_per_batch = 100000
 timeout_secs = 30
 
 [search]
-# Similarity threshold for memory search (0.0 to 1.0)
-# Lower values = more results, higher values = fewer but more relevant
+# Default minimum relevance for SEMANTIC (text) queries — a memory must score at
+# least this to be returned. Filter-only listings (recent, by-type, by-tags) are
+# unaffected. A query may override this per-call via its own min_relevance.
+# Lower = more results, higher = fewer but more relevant. Range 0.0-1.0.
 # Default: 0.3
 similarity_threshold = 0.3
 
-# Maximum number of results to return from search
+# Hard ceiling on results returned from any search — the search layer never
+# returns more than this, even if a caller requests a larger limit. The default
+# page size (when no limit is given) is memory.max_search_results below.
 # Default: 50
 max_results = 50
 
@@ -128,7 +132,8 @@ auto_cleanup_days = 365
 # Default: 0.1
 cleanup_min_importance = 0.1
 
-# Maximum memories returned in search
+# Default page size for search — how many results to return when a caller gives
+# no explicit limit. The absolute hard ceiling is search.max_results above.
 # Default: 50
 max_search_results = 50
 
