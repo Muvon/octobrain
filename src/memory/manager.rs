@@ -37,6 +37,16 @@ use crate::embedding::{create_embedding_provider_from_parts, parse_provider_mode
 /// dominant search cost; at 100 the maintenance cost dominates the write path.
 const MAINTENANCE_EVERY_N_WRITES: usize = 250;
 
+/// RRF constant for fusing per-query result lists in `remember_multi` — the same
+/// k=60 the in-store hybrid fusion uses. Rank-based fusion is scale-free, so it
+/// avoids mixing the incomparable weighted-sum magnitudes of per-query searches.
+const MULTI_QUERY_RRF_K: f32 = 60.0;
+
+/// Relevance multiplier applied to a memory that an active `Supersedes` edge marks
+/// as outdated. Soft (not a delete): keeps the stale fact retrievable for audit
+/// while pushing the current fact above it on knowledge-update queries.
+const SUPERSEDED_PENALTY: f32 = 0.1;
+
 /// Parameters for the memorize() call — groups the optional fields to stay under clippy's arg limit.
 #[derive(Debug)]
 pub struct MemorizeParams {
@@ -563,7 +573,47 @@ impl MemoryManager {
         let mut search_query = filters.unwrap_or_default();
         search_query.query_text = Some(query.to_string());
 
-        self.store.search_memories(&search_query).await
+        let results = self.store.search_memories(&search_query).await?;
+        Ok(self.suppress_superseded(results).await)
+    }
+
+    /// Down-rank memories that an active `Supersedes` edge marks as outdated.
+    ///
+    /// A memory M is superseded when some stored relationship `X Supersedes M`
+    /// exists (target_id == M.id). Its relevance is multiplied by
+    /// `SUPERSEDED_PENALTY` (soft — never deleted), so the current fact outranks
+    /// the stale one on knowledge-update queries while the old fact stays
+    /// queryable for history. Edges are only HONORED here, never auto-created —
+    /// detecting a genuine contradiction needs semantic judgment (an LLM), which
+    /// octobrain deliberately avoids on the hot path. Best-effort: a relationship
+    /// lookup failure leaves that result untouched rather than dropping it.
+    async fn suppress_superseded(
+        &self,
+        mut results: Vec<MemorySearchResult>,
+    ) -> Vec<MemorySearchResult> {
+        if results.len() < 2 {
+            return results; // nothing to reorder
+        }
+        let mut changed = false;
+        for r in results.iter_mut() {
+            let rels = match self.store.get_memory_relationships(&r.memory.id).await {
+                Ok(rels) => rels,
+                Err(_) => continue,
+            };
+            let superseded = rels.iter().any(|rel| {
+                matches!(rel.relationship_type, RelationshipType::Supersedes)
+                    && rel.target_id == r.memory.id
+            });
+            if superseded {
+                r.relevance_score *= SUPERSEDED_PENALTY;
+                r.selection_reason = format!("{} [superseded]", r.selection_reason);
+                changed = true;
+            }
+        }
+        if changed {
+            super::types::sort_by_relevance_desc(&mut results);
+        }
+        results
     }
 
     /// Remember (search) memories based on multiple queries with relevance-based merging
@@ -581,72 +631,69 @@ impl MemoryManager {
             return self.remember(&queries[0], filters).await;
         }
 
-        // Multiple queries - search each and merge results by relevance
+        // Multiple queries: fuse the per-query ranked lists with Reciprocal Rank
+        // Fusion. RRF is rank-based and scale-free, so it correctly rewards a
+        // memory that ranks solidly across several queries — unlike the old
+        // keep-max + flat-10%-boost heuristic, which mixed the per-query weighted
+        // sums (computed on incomparable scales) and discarded a robust #2-across-
+        // five-queries in favor of a one-off #1.
         let base_filters = filters.unwrap_or_default();
-        let mut all_results: std::collections::HashMap<String, MemorySearchResult> =
-            std::collections::HashMap::new();
-        let mut query_count: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let limit = base_filters.limit.unwrap_or(self.config.max_search_results);
 
-        // Search with each query
+        // Keep the best-scoring result object per memory for display, and the
+        // per-query ranked id lists for fusion.
+        let mut best: std::collections::HashMap<String, MemorySearchResult> =
+            std::collections::HashMap::new();
+        let mut ranked_lists: Vec<Vec<String>> = Vec::with_capacity(queries.len());
+
         for query in queries {
             let mut search_query = base_filters.clone();
             search_query.query_text = Some(query.clone());
+            // Over-fetch per query so fusion has more than the final-k to combine.
+            search_query.limit = Some((limit * 3).min(self.config.max_search_results));
 
             let results = self.store.search_memories(&search_query).await?;
-
+            let mut ids = Vec::with_capacity(results.len());
             for result in results {
-                let memory_id = result.memory.id.clone();
-
-                // Track how many queries matched this memory
-                *query_count.entry(memory_id.clone()).or_insert(0) += 1;
-
-                // Keep the result with highest relevance score
-                match all_results.get(&memory_id) {
-                    Some(existing) if existing.relevance_score >= result.relevance_score => {
-                        // Keep existing with higher score
-                    }
+                let id = result.memory.id.clone();
+                ids.push(id.clone());
+                match best.get(&id) {
+                    Some(existing) if existing.relevance_score >= result.relevance_score => {}
                     _ => {
-                        // Use this result (higher score or first occurrence)
-                        all_results.insert(memory_id, result);
+                        best.insert(id, result);
                     }
                 }
             }
+            ranked_lists.push(ids);
         }
 
-        // Convert to vector and boost scores for memories that matched multiple queries
-        let mut final_results: Vec<MemorySearchResult> = all_results
+        let fused = rrf_fuse(&ranked_lists);
+        let max_fused = fused
+            .values()
+            .copied()
+            .fold(0.0_f32, f32::max)
+            .max(f32::EPSILON);
+        let n_queries = queries.len();
+
+        let mut final_results: Vec<MemorySearchResult> = best
             .into_iter()
-            .map(|(memory_id, mut result)| {
-                let matches = query_count.get(&memory_id).unwrap_or(&1);
-
-                // Boost relevance score for memories matching multiple queries
-                if *matches > 1 {
-                    let boost_factor = 1.0 + ((*matches as f32 - 1.0) * 0.1); // 10% boost per additional match
-                    result.relevance_score = (result.relevance_score * boost_factor).min(1.0);
-
-                    // Update selection reason to indicate multi-query match
-                    result.selection_reason = format!(
-                        "Matched {} of {} queries: {}",
-                        matches,
-                        queries.len(),
-                        result.selection_reason
-                    );
-                }
-
+            .map(|(id, mut result)| {
+                let fused_score = fused.get(&id).copied().unwrap_or(0.0);
+                let matched = ranked_lists.iter().filter(|l| l.contains(&id)).count();
+                // Normalize to [0,1] for display; ordering is by fused score.
+                result.relevance_score = (fused_score / max_fused).clamp(0.0, 1.0);
+                result.selection_reason = format!(
+                    "RRF over {}/{} queries: {}",
+                    matched, n_queries, result.selection_reason
+                );
                 result
             })
             .collect();
 
-        // Sort by relevance score (highest first)
         super::types::sort_by_relevance_desc(&mut final_results);
+        final_results.truncate(limit);
 
-        // Apply limit if specified in filters
-        if let Some(limit) = base_filters.limit {
-            final_results.truncate(limit);
-        }
-
-        Ok(final_results)
+        Ok(self.suppress_superseded(final_results).await)
     }
 
     /// Forget (delete) a memory by ID
@@ -1408,6 +1455,23 @@ impl MemoryManager {
     pub fn disable_reranker(&mut self) {
         self.store.disable_reranker();
     }
+}
+
+/// Reciprocal Rank Fusion over several ranked id lists.
+///
+/// Returns `id -> fused_score` where `fused_score = Σ 1/(k + rank_i)` over the
+/// lists that contain the id (`rank_i` is the 0-based position in list i, `k =
+/// MULTI_QUERY_RRF_K`). Scale-free: depends only on ranks, never on the per-query
+/// relevance magnitudes (which are weighted sums on incomparable scales). Pure
+/// function so it is unit-testable without LanceDB.
+pub(crate) fn rrf_fuse(ranked_lists: &[Vec<String>]) -> std::collections::HashMap<String, f32> {
+    let mut fused: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+    for list in ranked_lists {
+        for (rank, id) in list.iter().enumerate() {
+            *fused.entry(id.clone()).or_insert(0.0) += 1.0 / (MULTI_QUERY_RRF_K + rank as f32);
+        }
+    }
+    fused
 }
 
 /// Greedy clustering on a candidate / neighbors list.
