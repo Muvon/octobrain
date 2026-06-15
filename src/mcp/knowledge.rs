@@ -21,6 +21,11 @@ use crate::config::Config;
 use crate::knowledge::KnowledgeManager;
 use crate::mcp::types::McpError;
 
+/// Max characters of a knowledge section returned per search hit. Generous enough
+/// to surface a full parent section (capped at 4*chunk_size at write time) while
+/// keeping a multi-result response within a reasonable token budget for the agent.
+const KNOWLEDGE_PREVIEW_CHARS: usize = 1500;
+
 /// Knowledge tools provider
 #[derive(Clone)]
 pub struct KnowledgeProvider {
@@ -88,14 +93,26 @@ impl KnowledgeProvider {
                 output.push('\n');
             }
 
-            // Show content preview (first 300 chars)
-            let content_preview = if result.chunk.content.chars().count() > 300 {
+            // Return the full parent SECTION (what the chunker stored as parent_content
+            // for exactly this purpose), not the small embedded child. Showing the
+            // 300-char child slice defeated the parent/child design for the agent —
+            // the primary consumer — leaving it a fragment instead of the section.
+            // Parent is already capped at 4*chunk_size at write time, so a generous
+            // display cap is safe.
+            let body = result
+                .chunk
+                .parent_content
+                .as_deref()
+                .unwrap_or(&result.chunk.content);
+            let content_preview = if body.chars().count() > KNOWLEDGE_PREVIEW_CHARS {
                 format!(
                     "{}...",
-                    result.chunk.content.chars().take(300).collect::<String>()
+                    body.chars()
+                        .take(KNOWLEDGE_PREVIEW_CHARS)
+                        .collect::<String>()
                 )
             } else {
-                result.chunk.content.clone()
+                body.to_string()
             };
             output.push_str(&content_preview);
             output.push('\n');
