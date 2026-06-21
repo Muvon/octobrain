@@ -225,6 +225,29 @@ See [MCP Integration](#mcp-integration) for Claude Desktop setup.
 - **Query Expansion (HyDE-lite)** — Pseudo-relevance feedback for +10-30% recall on long-tail queries
 - **MCP Protocol** — Full MCP 2025-03-26 compliance for AI tool integration
 
+## Benchmarks
+
+Retrieval quality of octobrain's knowledge system on standard [BEIR](https://github.com/beir-cellar/beir) datasets — **nDCG@10**, fully local, no LLM judge, using the default local embedder `bge-small-en-v1.5` (384-dim, 33M params). Each corpus passage is indexed through octobrain's real retrieval path and scored against the official qrels (metrics reproduce `pytrec_eval`).
+
+| Dataset | octobrain vector | octobrain hybrid | BM25¹ | bge-small-en-v1.5² |
+|---|---|---|---|---|
+| **SciFact** (5.2K docs, 300 q) | 0.722 | **0.742** | 0.665 | 0.713 |
+| **NFCorpus** (3.6K docs, 323 q) | 0.341 | **0.363** | 0.325 | 0.343 |
+
+- **vector** = dense-only retrieval; reproduces the embedder's published BEIR numbers (validates the harness).
+- **hybrid** = BM25 + vector fused with Reciprocal Rank Fusion (k=60) — octobrain's default. Adds **+2 nDCG@10** over the bare embedding and beats classic BM25 on both datasets.
+
+¹ Canonical BM25 from the [BEIR paper](https://arxiv.org/abs/2104.08663) (Anserini/Lucene, k1=0.9 b=0.4).
+² From the [bge-small-en-v1.5 model card](https://huggingface.co/BAAI/bge-small-en-v1.5) (MTEB).
+
+> Scope: this measures the **ranking** layer (embedding + BM25 fusion + reranking). BEIR passages are pre-chunked, so octobrain's chunking strategy is not exercised here.
+
+Reproduce (downloads the datasets, builds a release binary, runs fully offline):
+
+```bash
+cd benches && bash scripts/run_retrieval.sh
+```
+
 ## Configuration
 
 Configuration is stored in `~/.local/share/octobrain/config.toml`. All options have sensible defaults.

@@ -59,6 +59,112 @@ impl KnowledgeManager {
         })
     }
 
+    /// Embed and store a document's chunks. Returns the number of chunks stored.
+    /// Shared ingest tail used by every indexer (URL, file, box, stored note).
+    async fn embed_and_store(
+        &self,
+        source: &str,
+        title: &str,
+        scope: &str,
+        content_hash: &str,
+        chunks: Vec<KnowledgeChunk>,
+        session_id: Option<&str>,
+    ) -> Result<usize> {
+        if chunks.is_empty() {
+            return Ok(0);
+        }
+
+        let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+        let embeddings = crate::embedding::generate_embeddings_batch(
+            texts,
+            self.embedding_provider.as_ref(),
+            self.embedding_timeout_secs,
+        )
+        .await?;
+
+        self.store
+            .store_chunks(
+                source,
+                title,
+                scope,
+                content_hash,
+                &chunks,
+                &embeddings,
+                session_id,
+            )
+            .await?;
+
+        Ok(chunks.len())
+    }
+
+    /// Rerank knowledge results with the configured cross-encoder, degrading
+    /// gracefully to the pre-rerank order (truncated to `top_n`) on any failure.
+    /// The reranked document text is the parent section when present (richer
+    /// signal), else the chunk content.
+    async fn rerank(
+        &self,
+        query: &str,
+        mut results: Vec<KnowledgeSearchResult>,
+        top_n: usize,
+    ) -> Vec<KnowledgeSearchResult> {
+        let cfg = &self.search_config.reranker;
+        let (provider, model) = match cfg.model.split_once(':') {
+            Some(pm) => pm,
+            None => {
+                tracing::warn!("Invalid reranker model '{}'; skipping rerank", cfg.model);
+                results.truncate(top_n);
+                return results;
+            }
+        };
+
+        let documents: Vec<String> = results
+            .iter()
+            .map(|r| {
+                r.chunk
+                    .parent_content
+                    .clone()
+                    .unwrap_or_else(|| r.chunk.content.clone())
+            })
+            .collect();
+
+        let rerank_fut = octolib::reranker::rerank(query, documents, provider, model, Some(top_n));
+        let outcome = if cfg.timeout_secs == 0 {
+            rerank_fut.await
+        } else {
+            match tokio::time::timeout(std::time::Duration::from_secs(cfg.timeout_secs), rerank_fut)
+                .await
+            {
+                Ok(inner) => inner,
+                Err(_) => Err(anyhow::anyhow!(
+                    "Reranker timed out after {}s",
+                    cfg.timeout_secs
+                )),
+            }
+        };
+
+        match outcome {
+            Ok(response) => {
+                let mut reranked = Vec::with_capacity(response.results.len());
+                for rr in response.results {
+                    if let Some(original) = results.get(rr.index) {
+                        let mut hit = original.clone();
+                        hit.relevance_score = rr.relevance_score as f32;
+                        reranked.push(hit);
+                    }
+                }
+                reranked
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Knowledge reranker failed ({}); falling back to hybrid ranking",
+                    e
+                );
+                results.truncate(top_n);
+                results
+            }
+        }
+    }
+
     /// Search knowledge base with on-demand indexing
     pub async fn search(
         &self,
@@ -92,18 +198,37 @@ impl KnowledgeManager {
         // its ancestors. None = unscoped (no filter, all scopes) — mirrors memory.
         let scopes = crate::knowledge::boxes::visible_scopes(active_scope);
 
-        // Search with configurable limit and hybrid flag
-        self.store
+        // When reranking, pull a wider candidate set and let the cross-encoder
+        // pick the final top-K; otherwise fetch exactly what we return. Empty
+        // queries (filter-only) skip reranking — there's nothing to score.
+        let rerank = self.search_config.reranker.enabled && !query.trim().is_empty();
+        let candidate_limit = if rerank {
+            self.search_config
+                .reranker
+                .top_k_candidates
+                .max(self.config.max_results)
+        } else {
+            self.config.max_results
+        };
+
+        let results = self
+            .store
             .search(
                 &query_embedding,
                 query,
                 source_ref,
-                self.config.max_results,
+                candidate_limit,
                 use_hybrid,
                 session_id,
                 scopes.as_deref(),
             )
-            .await
+            .await?;
+
+        if rerank {
+            Ok(self.rerank(query, results, self.config.max_results).await)
+        } else {
+            Ok(results)
+        }
     }
 
     /// Check if source needs indexing (not indexed or outdated)
@@ -158,11 +283,11 @@ impl KnowledgeManager {
             if is_fresh {
                 // Fetch to check if content changed
                 let (content_type, bytes) = self.fetch_source(&source).await?;
-                let (_, new_hash, _) =
-                    self.chunker
-                        .extract_and_chunk(&source, &content_type, &bytes)?;
+                let doc = self
+                    .chunker
+                    .extract_and_chunk(&source, &content_type, &bytes)?;
 
-                if new_hash == content_hash {
+                if doc.content_hash == content_hash {
                     return Ok(IndexResult {
                         source,
                         chunks_created: 0,
@@ -175,11 +300,11 @@ impl KnowledgeManager {
 
         // Fetch and index
         let (content_type, bytes) = self.fetch_source(&source).await?;
-        let (title, content_hash, chunks) =
-            self.chunker
-                .extract_and_chunk(&source, &content_type, &bytes)?;
+        let doc = self
+            .chunker
+            .extract_and_chunk(&source, &content_type, &bytes)?;
 
-        if chunks.is_empty() {
+        if doc.chunks.is_empty() {
             return Ok(IndexResult {
                 source,
                 chunks_created: 0,
@@ -188,31 +313,14 @@ impl KnowledgeManager {
             });
         }
 
-        // Generate embeddings using proper batch API
-        let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-        let embeddings = crate::embedding::generate_embeddings_batch(
-            texts,
-            self.embedding_provider.as_ref(),
-            self.embedding_timeout_secs,
-        )
-        .await?;
-
         // Store (persistent hot knowledge — global scope, no session_id)
-        self.store
-            .store_chunks(
-                &source,
-                &title,
-                "",
-                &content_hash,
-                &chunks,
-                &embeddings,
-                None,
-            )
+        let chunks_created = self
+            .embed_and_store(&source, &doc.title, "", &doc.content_hash, doc.chunks, None)
             .await?;
 
         Ok(IndexResult {
             source,
-            chunks_created: chunks.len(),
+            chunks_created,
             was_cached: false,
             content_changed: true,
         })
@@ -221,33 +329,15 @@ impl KnowledgeManager {
     /// Internal indexing (always reindexes if outdated)
     async fn index_source_internal(&self, source: &str) -> Result<()> {
         let (content_type, bytes) = self.fetch_source(source).await?;
-        let (title, content_hash, chunks) =
-            self.chunker
-                .extract_and_chunk(source, &content_type, &bytes)?;
+        let doc = self
+            .chunker
+            .extract_and_chunk(source, &content_type, &bytes)?;
 
-        if chunks.is_empty() {
+        if doc.chunks.is_empty() {
             return Ok(());
         }
 
-        // Generate embeddings using proper batch API
-        let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-        let embeddings = crate::embedding::generate_embeddings_batch(
-            texts,
-            self.embedding_provider.as_ref(),
-            self.embedding_timeout_secs,
-        )
-        .await?;
-
-        self.store
-            .store_chunks(
-                source,
-                &title,
-                "",
-                &content_hash,
-                &chunks,
-                &embeddings,
-                None,
-            )
+        self.embed_and_store(source, &doc.title, "", &doc.content_hash, doc.chunks, None)
             .await?;
 
         Ok(())
@@ -405,70 +495,41 @@ impl KnowledgeManager {
         }
 
         let bytes = content.as_bytes();
-        let (title, content_hash, chunks) =
-            self.chunker
-                .extract_and_chunk(&source, &ContentType::PlainText, bytes)?;
+        let doc = self
+            .chunker
+            .extract_and_chunk(&source, &ContentType::PlainText, bytes)?;
 
-        if chunks.is_empty() {
-            // Content too small for chunker — create a single chunk directly
-            let chunk = KnowledgeChunk {
+        // Content too small for the chunker to split — store it as one chunk.
+        let chunks = if doc.chunks.is_empty() {
+            vec![KnowledgeChunk {
                 id: uuid::Uuid::new_v4().to_string(),
                 source: source.clone(),
-                source_title: title.clone(),
+                source_title: doc.title.clone(),
                 chunk_index: 0,
                 content: content.to_string(),
                 parent_content: None,
                 section_path: vec![],
                 char_start: 0,
                 char_end: content.len(),
-            };
-            let embedding = crate::embedding::generate_embedding(
-                content,
-                self.embedding_provider.as_ref(),
-                self.embedding_timeout_secs,
-            )
-            .await?;
-            self.store
-                .store_chunks(
-                    &source,
-                    &title,
-                    "",
-                    &content_hash,
-                    &[chunk],
-                    &[embedding],
-                    Some(session_id),
-                )
-                .await?;
-            return Ok(StoreResult {
-                source,
-                chunks_created: 1,
-            });
-        }
+            }]
+        } else {
+            doc.chunks
+        };
 
-        // Generate embeddings in batch
-        let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-        let embeddings = crate::embedding::generate_embeddings_batch(
-            texts,
-            self.embedding_provider.as_ref(),
-            self.embedding_timeout_secs,
-        )
-        .await?;
-
-        self.store
-            .store_chunks(
+        let chunks_created = self
+            .embed_and_store(
                 &source,
-                &title,
+                &doc.title,
                 "",
-                &content_hash,
-                &chunks,
-                &embeddings,
+                &doc.content_hash,
+                chunks,
                 Some(session_id),
             )
             .await?;
 
         Ok(StoreResult {
             source,
-            chunks_created: chunks.len(),
+            chunks_created,
         })
     }
 
@@ -658,40 +719,30 @@ impl KnowledgeManager {
                 }
             };
 
-            let (title, content_hash, chunks) =
-                self.chunker
-                    .extract_and_chunk(&source, &content_type, &bytes)?;
-            if chunks.is_empty() {
+            let doc = self
+                .chunker
+                .extract_and_chunk(&source, &content_type, &bytes)?;
+            if doc.chunks.is_empty() {
                 continue;
             }
 
             // Smart reindex: skip files whose content is unchanged (embedding is the
             // expensive part; re-extraction/hashing is cheap).
             if let Some((existing_hash, _)) = self.store.get_source_metadata(&source).await? {
-                if existing_hash == content_hash {
+                if existing_hash == doc.content_hash {
                     continue;
                 }
             }
 
-            let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-            let embeddings = crate::embedding::generate_embeddings_batch(
-                texts,
-                self.embedding_provider.as_ref(),
-                self.embedding_timeout_secs,
+            self.embed_and_store(
+                &source,
+                &doc.title,
+                scope,
+                &doc.content_hash,
+                doc.chunks,
+                None,
             )
             .await?;
-
-            self.store
-                .store_chunks(
-                    &source,
-                    &title,
-                    scope,
-                    &content_hash,
-                    &chunks,
-                    &embeddings,
-                    None,
-                )
-                .await?;
             reindexed += 1;
         }
 

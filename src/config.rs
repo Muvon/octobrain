@@ -48,7 +48,6 @@ pub struct SearchConfig {
     /// Reranker configuration for improving search accuracy
     pub reranker: RerankerConfig,
     /// Pseudo-relevance feedback (PRF / HyDE-lite) query expansion
-    #[serde(default)]
     pub hyde: HydeConfig,
 }
 
