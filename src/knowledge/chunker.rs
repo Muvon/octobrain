@@ -7,6 +7,14 @@ use crate::config::KnowledgeConfig;
 use crate::knowledge::content::{self, ContentType};
 use crate::knowledge::types::KnowledgeChunk;
 
+/// Output of extracting and chunking a source: the document title, a hash of the
+/// extracted content (for change detection), and the per-section child chunks.
+pub struct ChunkedDocument {
+    pub title: String,
+    pub content_hash: String,
+    pub chunks: Vec<KnowledgeChunk>,
+}
+
 pub struct ContentChunker {
     config: KnowledgeConfig,
 }
@@ -17,13 +25,12 @@ impl ContentChunker {
     }
 
     /// Extract text from any supported content type, then chunk.
-    /// Returns (title, content_hash, chunks)
     pub fn extract_and_chunk(
         &self,
         source: &str,
         content_type: &ContentType,
         raw: &[u8],
-    ) -> Result<(String, String, Vec<KnowledgeChunk>)> {
+    ) -> Result<ChunkedDocument> {
         match content_type {
             ContentType::Html => {
                 let html = String::from_utf8_lossy(raw);
@@ -94,16 +101,15 @@ impl ContentChunker {
     }
 
     /// Parse plain text/markdown and chunk into semantic pieces.
-    /// Returns (title, content_hash, chunks)
-    fn parse_text_and_chunk(
-        &self,
-        source: &str,
-        text: &str,
-    ) -> Result<(String, String, Vec<KnowledgeChunk>)> {
+    fn parse_text_and_chunk(&self, source: &str, text: &str) -> Result<ChunkedDocument> {
         let title = self.extract_title_from_text(text);
         let content_hash = self.compute_hash(text);
         let chunks = self.chunk_markdown(source, &title, text)?;
-        Ok((title, content_hash, chunks))
+        Ok(ChunkedDocument {
+            title,
+            content_hash,
+            chunks,
+        })
     }
 
     /// Extract title from text: first markdown heading, or first non-empty line (capped at 100 chars)
@@ -125,12 +131,7 @@ impl ContentChunker {
     }
 
     /// Parse HTML and chunk into semantic pieces
-    /// Returns (title, content_hash, chunks)
-    fn parse_html_and_chunk(
-        &self,
-        url: &str,
-        html: &str,
-    ) -> Result<(String, String, Vec<KnowledgeChunk>)> {
+    fn parse_html_and_chunk(&self, url: &str, html: &str) -> Result<ChunkedDocument> {
         // Try readability extraction first to strip nav/ads/boilerplate.
         // Falls back to raw HTML for pages that aren't article-like (API refs, indexes, etc.)
         let (title, clean_html) = self
@@ -146,7 +147,11 @@ impl ContentChunker {
         // Parse markdown to detect section hierarchy and chunk
         let chunks = self.chunk_markdown(url, &title, &markdown)?;
 
-        Ok((title, content_hash, chunks))
+        Ok(ChunkedDocument {
+            title,
+            content_hash,
+            chunks,
+        })
     }
 
     /// Extract main article content using Mozilla Readability algorithm.

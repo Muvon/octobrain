@@ -27,10 +27,22 @@ exclude = [
 [[bin]]
 name = "octobrain"
 path = "src/main.rs"
+
+# Local retrieval-quality benchmark (BEIR). Gated behind the `bench` feature so
+# it never compiles into normal/release builds. Run with:
+#   cargo run --release --features bench --bin beir_bench -- <dataset_dir> [label]
+[[bin]]
+name = "beir_bench"
+path = "src/bin/beir_bench.rs"
+required-features = ["bench"]
+
 [features]
 default = ["fastembed", "huggingface"]
 fastembed = ["octolib/fastembed"]
 huggingface = ["octolib/huggingface"]
+# Compiles the beir_bench binary. No extra deps — uses serde_json + octolib,
+# already pulled in by the library.
+bench = []
 
 [dependencies]
 lancedb = { version = "0.26.2", default-features = false }

@@ -55,7 +55,14 @@ pub struct KnowledgeStore {
 impl KnowledgeStore {
     pub async fn new(vector_dim: usize) -> Result<Self> {
         let db_path = crate::storage::get_system_storage_dir()?.join("knowledge");
-        std::fs::create_dir_all(&db_path)?;
+        Self::open_at(&db_path, vector_dim).await
+    }
+
+    /// Open (or create) a knowledge store at an explicit directory. Used by the
+    /// retrieval benchmark to run against an isolated LanceDB without touching
+    /// the user's real knowledge database.
+    pub async fn open_at(db_path: &std::path::Path, vector_dim: usize) -> Result<Self> {
+        std::fs::create_dir_all(db_path)?;
 
         let db = connect(db_path.to_str().unwrap()).execute().await?;
         let schema = Self::build_schema(vector_dim);
@@ -284,6 +291,97 @@ impl KnowledgeStore {
         // searchable without brute-force fallback on the unindexed portion.
         self.table.optimize(OptimizeAction::All).await.ok();
 
+        Ok(())
+    }
+
+    /// Bulk-ingest one row per passage `(id, title, text, embedding)`. Unlike
+    /// `store_chunks`, this neither deletes by source nor optimizes per call —
+    /// rows are added in batches and the index is rebuilt once at the end, so
+    /// ingesting N passages is a single pass. Each passage becomes a standalone
+    /// chunk (chunk_index 0, no parent, global scope). Used only by the retrieval
+    /// benchmark, so it's gated behind the `bench` feature (no dead code in
+    /// normal builds).
+    #[cfg(feature = "bench")]
+    pub async fn bulk_store(
+        &self,
+        ids: &[String],
+        titles: &[String],
+        texts: &[String],
+        embeddings: &[Vec<f32>],
+    ) -> Result<()> {
+        assert_eq!(ids.len(), titles.len(), "ids/titles length mismatch");
+        assert_eq!(ids.len(), texts.len(), "ids/texts length mismatch");
+        assert_eq!(
+            ids.len(),
+            embeddings.len(),
+            "ids/embeddings length mismatch"
+        );
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let now_millis = Utc::now().timestamp_millis();
+        const BATCH: usize = 2048;
+
+        for start in (0..ids.len()).step_by(BATCH) {
+            let end = (start + BATCH).min(ids.len());
+            let n = end - start;
+            let str_col = |s: &[String]| {
+                StringArray::from(s[start..end].iter().map(|x| x.as_str()).collect::<Vec<_>>())
+            };
+
+            // Empty section_path list per row.
+            let mut section_path_builder =
+                arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+            for _ in 0..n {
+                section_path_builder.append(true);
+            }
+
+            let embedding_values: Vec<f32> = embeddings[start..end]
+                .iter()
+                .flat_map(|e| e.iter().copied())
+                .collect();
+            let embedding_array = FixedSizeListArray::try_new(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                self.vector_dim as i32,
+                Arc::new(Float32Array::from(embedding_values)),
+                None,
+            )?;
+
+            let batch = RecordBatch::try_new(
+                self.schema.clone(),
+                vec![
+                    Arc::new(str_col(ids)),                                     // id
+                    Arc::new(str_col(ids)),                                     // source
+                    Arc::new(str_col(titles)),                                  // source_title
+                    Arc::new(StringArray::from(vec![None as Option<&str>; n])), // session_id
+                    Arc::new(Int32Array::from(vec![0i32; n])),                  // chunk_index
+                    Arc::new(str_col(texts)),                                   // content
+                    Arc::new(StringArray::from(vec![""; n])),                   // parent_content
+                    Arc::new(section_path_builder.finish()),                    // section_path
+                    Arc::new(Int32Array::from(vec![0i32; n])),                  // char_start
+                    Arc::new(Int32Array::from(
+                        texts[start..end]
+                            .iter()
+                            .map(|t| t.len() as i32)
+                            .collect::<Vec<_>>(),
+                    )), // char_end
+                    Arc::new(str_col(ids)),                                     // content_hash
+                    Arc::new(TimestampMillisecondArray::from(vec![now_millis; n])), // indexed_at
+                    Arc::new(TimestampMillisecondArray::from(vec![now_millis; n])), // last_checked
+                    Arc::new(embedding_array),                                  // embedding
+                    Arc::new(StringArray::from(vec![""; n])),                   // scope
+                ],
+            )?;
+
+            use arrow::record_batch::RecordBatchIterator;
+            use std::iter::once;
+            let batch_reader = RecordBatchIterator::new(once(Ok(batch)), self.schema.clone());
+            self.table.add(batch_reader).execute().await?;
+        }
+
+        // Single index rebuild for the whole ingest.
+        self.table.optimize(OptimizeAction::All).await.ok();
         Ok(())
     }
 

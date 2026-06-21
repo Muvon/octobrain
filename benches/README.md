@@ -1,16 +1,63 @@
 # Octobrain Benchmarks
 
-Reproducible quality benchmarks for octobrain's memory architecture. Everything
-runs in Docker — no host install, no Python on your machine. Bring your own
-LLM (any OpenAI-compatible endpoint: Ollama Cloud, OpenAI, Together, Groq, etc).
+Reproducible quality benchmarks for octobrain. Two kinds live here:
+**retrieval-quality** (knowledge system) is native Rust, fully local, metric-only
+— no Docker, no LLM (see [below](#retrieval-quality-knowledge-system)). The
+**memory** benchmarks (LongMemEval etc.) are LLM-judged and run in Docker —
+bring your own LLM (any OpenAI-compatible endpoint).
 
 ## Status
 
 | Benchmark | License | Status | Notes |
 |---|---|---|---|
+| [BEIR retrieval](https://github.com/beir-cellar/beir) | Apache-2.0 | wired | Knowledge-system nDCG@10; local, no LLM, no Docker |
 | [LongMemEval](https://github.com/xiaowu0162/longmemeval) | MIT | wired | 500 questions across 6 memory abilities |
 | [Memora](https://github.com/geniesinc/Memora) | tbd | planned | "From Recall to Forgetting" — FAMA metric |
 | [LoCoMo](https://github.com/snap-research/locomo) | research | planned | 35-session multi-modal benchmark |
+
+## Retrieval quality (knowledge system)
+
+Measures how well octobrain's knowledge retrieval ranks relevant passages on
+standard [BEIR](https://github.com/beir-cellar/beir) datasets, reported as
+**nDCG@10 / Recall@10 / Recall@100 / MRR@10** against the official qrels (metrics
+reproduce `pytrec_eval`: linear gain, log2 discount, score-desc / docid-desc
+ordering, graded relevance for NFCorpus). No LLM judge — just the embedder + the
+real `KnowledgeStore` retrieval path. The same index is queried three ways:
+`vector` (dense only), `hybrid` (BM25 + vector RRF), `hybrid+rerank` (cross-encoder).
+
+```bash
+cd benches
+bash scripts/run_retrieval.sh                              # scifact + nfcorpus, bge-small
+DATASETS="scifact" bash scripts/run_retrieval.sh          # one dataset
+EMBED_MODEL="fastembed:nomic-ai/nomic-embed-text-v1.5" bash scripts/run_retrieval.sh
+BEIR_MAX_QUERIES=50 bash scripts/run_retrieval.sh         # quick smoke
+```
+
+The harness builds `cargo run --release --features bench --bin beir_bench`,
+downloads each BEIR zip into `benches/data/`, indexes the corpus **once** per
+`(dataset, embedding model)` (cached under the system temp dir; `BEIR_FRESH=1`
+to rebuild), and writes `results.jsonl` + per-scenario logs under
+`benches/results/retrieval-<ts>/`. Env knobs: `BEIR_SCENARIOS` (subset of
+`vector,hybrid,hybrid+rerank`), `BEIR_RERANK_DEPTH` (default 50), `RERANK_MODEL`.
+
+Latest numbers (bge-small-en-v1.5, default config) are in the top-level
+[README Benchmarks section](../README.md#benchmarks).
+
+### Findings
+
+- **vector / hybrid validated**: dense-only nDCG@10 reproduces the embedder's
+  published BEIR numbers (SciFact 0.722 vs 0.713, NFCorpus 0.341 vs 0.343), and
+  hybrid (BM25 + vector RRF, the default) adds a consistent ~+2 nDCG, beating
+  classic BM25 on both. The harness is trustworthy.
+- **⚠️ reranker is a no-op (needs investigation)**: `hybrid+rerank` returned
+  *byte-identical* metrics to `hybrid` for **two different** fastembed
+  cross-encoders (`jina-reranker-v2-base-multilingual` and `bge-reranker-base`),
+  with zero errors. octolib sorts results by score, so identical output across
+  two models means the fastembed reranker path yields degenerate scores that
+  never reorder. The default config **enables this reranker for memory and
+  knowledge search**, so it is silently doing nothing — confirm with a focused
+  octolib/fastembed-rs repro and fix (or switch reranker provider) before
+  relying on reranking. Rerank is therefore *excluded* from the headline numbers.
 
 ## Quick start
 

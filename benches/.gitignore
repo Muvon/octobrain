@@ -4,3 +4,5 @@ results/*
 !results/README.md
 __pycache__/
 *.pyc
+# Downloaded BEIR datasets (fetched on demand by scripts/run_retrieval.sh)
+data/
