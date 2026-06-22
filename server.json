@@ -1,217 +1,28 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Muvon/octobrain",
+  "title": "Octobrain",
   "description": "Persistent memory for AI assistants with semantic search and knowledge graph relationships.",
-  "name_for_human": "Octobrain",
-  "name_for_model": "octobrain",
   "version": "0.9.0",
-  "repositories": [
+  "websiteUrl": "https://github.com/muvon/octobrain",
+  "repository": {
+    "url": "https://github.com/muvon/octobrain",
+    "source": "github"
+  },
+  "packages": [
     {
-      "type": "github",
-      "owner": "Muvon",
-      "repo": "octobrain"
-    }
-  ],
-  "homepage": "https://github.com/muvon/octobrain",
-  "pricing": "free",
-  "modes": {
-    "stdio": {
-      "command": "octobrain",
-      "args": ["mcp"],
+      "registryType": "cargo",
+      "identifier": "octobrain",
+      "version": "0.9.0",
       "transport": {
         "type": "stdio"
-      }
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ]
     }
-  },
-  "tools": [
-    {
-      "name": "memorize",
-      "description": "Store important information, insights, or context in memory for future reference.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "title": {
-            "type": "string",
-            "description": "Short, descriptive title for the memory",
-            "minLength": 5,
-            "maxLength": 200
-          },
-          "content": {
-            "type": "string",
-            "description": "Detailed content to remember - explanations, code snippets, insights, decisions, etc.",
-            "minLength": 10,
-            "maxLength": 10000
-          },
-          "memory_type": {
-            "type": "string",
-            "description": "Category of memory for better organization",
-            "enum": ["code", "architecture", "bug_fix", "feature", "documentation", "user_preference", "decision", "learning", "configuration", "testing", "performance", "security", "insight"],
-            "default": "code"
-          },
-          "importance": {
-            "type": "number",
-            "description": "Importance score from 0.0 to 1.0 (higher = more important for retention)",
-            "minimum": 0.0,
-            "maximum": 1.0,
-            "default": 0.5
-          },
-          "tags": {
-            "type": "array",
-            "description": "Optional tags for categorization and easier searching",
-            "items": { "type": "string" },
-            "maxItems": 10
-          },
-          "related_files": {
-            "type": "array",
-            "description": "Optional file paths related to this memory",
-            "items": { "type": "string" },
-            "maxItems": 20
-          }
-        },
-        "required": ["title", "content"]
-      }
-    },
-    {
-      "name": "remember",
-      "description": "Search and retrieve stored memories using semantic search. Find relevant past information, decisions, patterns, or context based on your query.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "query": {
-            "oneOf": [
-              {
-                "type": "string",
-                "description": "Single search query - use for specific searches. Express in human terms for semantic search",
-                "minLength": 3,
-                "maxLength": 500
-              },
-              {
-                "type": "array",
-                "description": "RECOMMENDED: Array of related search terms for comprehensive results.",
-                "items": {
-                  "type": "string",
-                  "minLength": 3,
-                  "maxLength": 500
-                },
-                "minItems": 1,
-                "maxItems": 5
-              }
-            ],
-            "description": "PREFER ARRAY OF RELATED TERMS for comprehensive search. Single string only for very specific searches."
-          },
-          "memory_types": {
-            "type": "array",
-            "description": "Optional filter by memory types",
-            "items": {
-              "type": "string",
-              "enum": ["code", "architecture", "bug_fix", "feature", "documentation", "user_preference", "decision", "learning", "configuration", "testing", "performance", "security", "insight"]
-            }
-          },
-          "tags": {
-            "type": "array",
-            "description": "Optional filter by tags",
-            "items": { "type": "string" }
-          },
-          "related_files": {
-            "type": "array",
-            "description": "Optional filter by related files",
-            "items": { "type": "string" }
-          },
-          "limit": {
-            "type": "integer",
-            "description": "Maximum number of memories to return",
-            "minimum": 1,
-            "maximum": 5,
-            "default": 5
-          },
-          "max_tokens": {
-            "type": "integer",
-            "description": "Maximum tokens allowed in output before truncation (default: 2000, set to 0 for unlimited)",
-            "minimum": 0,
-            "default": 2000
-          }
-        },
-        "required": ["query"]
-      }
-    },
-    {
-      "name": "forget",
-      "description": "Permanently remove specific memories by ID or forget multiple memories matching certain criteria.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "memory_id": {
-            "type": "string",
-            "description": "Specific memory ID to forget (get this from remember results)"
-          },
-          "query": {
-            "type": "string",
-            "description": "Query to find memories to forget (alternative to memory_id)"
-          },
-          "memory_types": {
-            "type": "array",
-            "description": "Filter by memory types when using query",
-            "items": {
-              "type": "string",
-              "enum": ["code", "architecture", "bug_fix", "feature", "documentation", "user_preference", "decision", "learning", "configuration", "testing", "performance", "security", "insight"]
-            }
-          },
-          "tags": {
-            "type": "array",
-            "description": "Filter by tags when using query",
-            "items": { "type": "string" }
-          },
-          "confirm": {
-            "type": "boolean",
-            "description": "Must be true to confirm deletion",
-            "const": true
-          }
-        },
-        "required": ["confirm"]
-      }
-    },
-    {
-      "name": "auto_link",
-      "description": "Manually trigger automatic linking for a memory to find and connect related memories based on semantic similarity.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "memory_id": {
-            "type": "string",
-            "description": "Memory ID to auto-link with similar memories"
-          }
-        },
-        "required": ["memory_id"]
-      }
-    },
-    {
-      "name": "memory_graph",
-      "description": "Retrieve a memory graph showing a memory and all its connected memories through relationships. Enables multi-hop reasoning and context discovery.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "memory_id": {
-            "type": "string",
-            "description": "Root memory ID to build graph from"
-          },
-          "depth": {
-            "type": "integer",
-            "description": "Depth of graph traversal (1-3 recommended, higher = more memories)",
-            "minimum": 1,
-            "maximum": 5,
-            "default": 2
-          },
-          "max_tokens": {
-            "type": "integer",
-            "description": "Maximum tokens allowed in output before truncation (default: 2000, set to 0 for unlimited)",
-            "minimum": 0,
-            "default": 2000
-          }
-        },
-        "required": ["memory_id"]
-      }
-    }
-  ],
-  "categories": ["memory", "knowledge-management", "ai-assistant"],
-  "tags": ["memory", "semantic-search", "knowledge-graph", "ai-assistant", "persistent-memory"]
+  ]
 }
