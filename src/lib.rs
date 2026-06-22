@@ -18,6 +18,8 @@
 //! using LanceDB for vector storage and semantic search capabilities.
 
 pub mod arrow_helpers;
+pub mod cli;
+pub mod commands;
 pub mod config;
 pub mod constants;
 pub mod embedding;
