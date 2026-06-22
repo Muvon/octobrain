@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.9.0] - 2026-06-22
+
+### 📋 Release Summary
+
+This release introduces advanced retrieval capabilities, including RRF-fuse multi-query search, git-backed knowledge boxes, and expanded filtering options for memory management (b9b8ba0e, ac538ad0, 62cc2784). System performance and reliability are improved through refined search configurations, updated dependency pinning, and a more robust multi-arch deployment pipeline (e4302fb4, 8ffe8082, 207ec20c). Several bug fixes enhance search accuracy, reranking logic, and scope assignment across sessions (31c4c801, 6165cf3e, 7500f60d).
+
+
+### ✨ New Features & Enhancements
+
+- **bench**: implement BEIR retrieval benchmarking `4ebc1c48`
+- **config**: wire search.similarity_threshold and search.max_results into retrieval `e4302fb4`
+- **memory**: RRF-fuse multi-query retrieval and honor Supersedes edges `b9b8ba0e`
+- **mcp**: expose temporal and relevance filters on remember `62cc2784`
+- **knowledge**: implement git-backed knowledge boxes `ac538ad0`
+- **config**: add timeouts for embeddings and reranker `8ffe8082`
+
+### 🔧 Improvements & Optimizations
+
+- **core**: move module declarations to library crate `49e722bb`
+- **memory**: spawn initialization tasks in background `3ffcbd80`
+- **memory**: replace project identifiers with scopes `59b42389`
+- **memory**: rename project to scope across system `249da8b8`
+- **release**: add multi-arch Docker build and push `207ec20c`
+
+### 🐛 Bug Fixes & Stability
+
+- **search**: reranker limit, RRF normalization, archived exclusion, PRF guard `31c4c801`
+- **mcp**: return full parent section from knowledge search `6165cf3e`
+- **memory**: allow empty scope in predicate filters `c6b3a43e`
+- **mcp**: assign correct scope to session `7500f60d`
+
+### 📚 Documentation & Examples
+
+- **mcp**: guide agents to create supersedes links on knowledge updates `fe52b977`
+- **memory**: add timeout example to reranker config `17e77ef5`
+
+### 🔄 Other Changes
+
+5 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.8.0] - 2026-06-07
 
 ### 📋 Release Summary
