@@ -16,21 +16,9 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{fmt, EnvFilter};
 
-mod arrow_helpers;
-mod cli;
-mod commands;
-mod config;
-mod constants;
-mod embedding;
-mod knowledge;
-mod mcp;
-mod memory;
-mod sql;
-mod storage;
-mod vector_optimizer;
-
-use cli::{Cli, Commands};
-use config::Config;
+use octobrain::cli::{Cli, Commands};
+use octobrain::commands;
+use octobrain::config::Config;
 
 #[tokio::main]
 async fn main() -> Result<()> {
