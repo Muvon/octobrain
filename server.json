@@ -8,15 +8,5 @@
   "repository": {
     "url": "https://github.com/muvon/octobrain",
     "source": "github"
-  },
-  "packages": [
-    {
-      "registryType": "mcpb",
-      "identifier": "https://github.com/muvon/octobrain/releases/download/0.9.0/octobrain-0.9.0-placeholder.mcpb",
-      "fileSha256": "PLACEHOLDER",
-      "transport": {
-        "type": "stdio"
-      }
-    }
-  ]
+  }
 }
