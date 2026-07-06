@@ -70,9 +70,9 @@ html2text = "0.16"
 dom_smoothie = "0.16"
 reqwest = { version = "0.13", features = ["rustls"], default-features = false }
 colored = "3.1"
-pdf-extract = "0.10"
+pdf-extract = "0.12"
 zip = { version = "8.4", default-features = false, features = ["deflate"] }
-quick-xml = "0.39"
+quick-xml = "0.41"
 
 # MCP SDK (official Rust SDK for Model Context Protocol)
 rmcp = { version = "1.3.0", features = ["server", "transport-streamable-http-server", "transport-io", "macros"] }
