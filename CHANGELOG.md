@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.9.1] - 2026-07-06
+
+### 📋 Release Summary
+
+This release improves system integration through automated MCP registry publishing and updated configuration schemas (377345b8, c5790756, 1501e14a). General stability and performance have been enhanced via comprehensive dependency updates across Rust and core libraries (ade92bf4, f860712f, db6c8a3a).
+
+
+### 🔧 Improvements & Optimizations
+
+- **config**: remove placeholder package definition `e5b6774b`
+- **release**: specify runner for homebrew notification `1501e14a`
+- **release**: automate MCP registry publishing `377345b8`
+- **server**: add crates.io registry base URL `f8d725fd`
+- **mcp**: update registry identifier and config schema `c5790756`
+
+### 🔄 Other Changes
+
+3 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.9.0] - 2026-06-22
 
 ### 📋 Release Summary
