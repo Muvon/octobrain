@@ -306,6 +306,7 @@ jobs:
   notify-homebrew:
     name: Notify Homebrew Tap
     needs: release
+    runs-on: ubuntu-24.04
     steps:
       - name: Dispatch update to homebrew-tap
         run: |
