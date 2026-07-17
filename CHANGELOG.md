@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.3] - 2026-07-17
+
+### 📋 Release Summary
+
+This release includes routine maintenance to ensure system stability and security through updated project dependencies (1e848fec).
+
+
+### 🔄 Other Changes
+
+1 maintenance, dependency, and tooling update not listed individually.
+
 ## [0.9.2] - 2026-07-17
 
 ### 📋 Release Summary
