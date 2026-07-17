@@ -46,7 +46,68 @@ static TOOLS_FULL: OnceLock<Vec<Tool>> = OnceLock::new();
 static TOOLS_FULL_NO_GLOBAL: OnceLock<Vec<Tool>> = OnceLock::new();
 
 fn tools_full() -> &'static Vec<Tool> {
-    TOOLS_FULL.get_or_init(|| McpServer::tool_router().list_all())
+    TOOLS_FULL.get_or_init(|| {
+        McpServer::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|mut tool| {
+                let mut schema = tool.input_schema.as_ref().clone();
+                inline_schema_refs(&mut schema);
+                tool.input_schema = Arc::new(schema);
+                tool
+            })
+            .collect()
+    })
+}
+
+/// Inline every `$ref` into its `$defs` target and drop `$defs`/`$schema`,
+/// producing flat self-contained tool schemas. Some inference backends (e.g.
+/// Together's `thinkingmachines/Inkling`) silently return an EMPTY generation
+/// when a tool schema uses `$ref` indirection — flat inline schemas are the
+/// portable shape for tool calling across providers.
+fn inline_schema_refs(schema: &mut serde_json::Map<String, serde_json::Value>) {
+    let defs = match schema.remove("$defs") {
+        Some(serde_json::Value::Object(defs)) => defs,
+        _ => serde_json::Map::new(),
+    };
+    schema.remove("$schema");
+    for value in schema.values_mut() {
+        resolve_refs(value, &defs);
+    }
+}
+
+fn resolve_refs(value: &mut serde_json::Value, defs: &serde_json::Map<String, serde_json::Value>) {
+    match value {
+        serde_json::Value::Object(obj) => {
+            if let Some(reference) = obj.remove("$ref") {
+                let name = reference
+                    .as_str()
+                    .and_then(|r| r.rsplit('/').next())
+                    .unwrap_or_default();
+                let mut target = defs
+                    .get(name)
+                    .unwrap_or_else(|| panic!("unresolved $ref to '{}' in tool schema", name))
+                    .clone();
+                resolve_refs(&mut target, defs);
+                if let serde_json::Value::Object(target) = target {
+                    for (k, v) in target {
+                        // Sibling keys on the $ref site (e.g. a field-level
+                        // description) take precedence over the def's own.
+                        obj.entry(k).or_insert(v);
+                    }
+                }
+            }
+            for nested in obj.values_mut() {
+                resolve_refs(nested, defs);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                resolve_refs(item, defs);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn strip_fields(fields: &[&str]) -> Vec<Tool> {
@@ -360,7 +421,15 @@ fn to_rmcp_error(e: crate::mcp::types::McpError) -> McpError {
 // Shared enum types for schema constraints
 // ============================================================================
 
-/// Memory category for organization and filtering
+// NOTE: variants in these enums must NOT carry doc comments — schemars turns a
+// documented variant into a `oneOf`-of-`const` schema, and some inference
+// backends (e.g. Together's Inkling endpoint) silently return an empty
+// generation when a `$ref` with sibling keys points at a `oneOf`/`anyOf` def.
+// Plain variants collapse into a portable `"enum": [...]`; describe the values
+// in the type-level or field-level doc instead (same pattern as octofs).
+
+/// Memory category for organization and filtering.
+/// 'other' is a catch-all for unrecognized types — maps to Insight internally.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryType {
@@ -385,42 +454,35 @@ pub enum MemoryType {
     Communication,
     Process,
     Insight,
-    /// Catch-all for unrecognized types — maps to Insight internally
     #[serde(other)]
     Other,
 }
 
-/// Trust tier for memory source attribution
+/// Trust tier for memory source attribution: 'user_confirmed' — user explicitly
+/// stated or approved this fact; 'agent_inferred' — AI-inferred conclusion.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceTrust {
-    /// User explicitly stated or approved this fact
     UserConfirmed,
-    /// AI-inferred conclusion
     AgentInferred,
 }
 
-/// Relationship type between memories
+/// Relationship type between memories: related_to (general association),
+/// depends_on (A needs B), supersedes (A replaces B), similar (near-duplicate),
+/// conflicts (contradicts), implements (concrete implementation of abstract
+/// concept), extends (builds on top of), achieves (this memory contributes to /
+/// advances a Goal memory — `consolidate(goal_id)` later folds all Achieves
+/// sources into a single consolidated parent).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationshipKind {
-    /// General association
     RelatedTo,
-    /// A needs B
     DependsOn,
-    /// A replaces B
     Supersedes,
-    /// Near-duplicate
     Similar,
-    /// Contradicts
     Conflicts,
-    /// Concrete implementation of abstract concept
     Implements,
-    /// Builds on top of
     Extends,
-    /// This memory contributes to / advances a Goal memory.
-    /// Use when memorizing context tied to a goal — `consolidate(goal_id)` later
-    /// folds all Achieves sources into a single consolidated parent.
     Achieves,
 }
 
@@ -445,10 +507,30 @@ pub struct RelationshipSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum QueryInput {
-    /// Single semantic search query
     Single(String),
-    /// 2-5 related terms for comprehensive coverage — preferred over single query
     Multiple(Vec<String>),
+}
+
+/// Inline `anyOf` schema for [`QueryInput`]. Hand-written (octofs-style) so the
+/// field gets an inline composition instead of a `$ref` into `$defs` — a `$ref`
+/// with a sibling `description` pointing at an `anyOf` def breaks some
+/// inference backends (empty generation). `anyOf` over `oneOf` for wider
+/// cross-stack support.
+fn query_input_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+    serde_json::from_value(serde_json::json!({
+        "anyOf": [
+            {
+                "type": "string",
+                "description": "Single semantic search query"
+            },
+            {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "2-5 related terms for comprehensive coverage — preferred over single query"
+            }
+        ]
+    }))
+    .expect("static schema is valid JSON")
 }
 
 // ============================================================================
@@ -494,6 +576,7 @@ pub struct MemorizeParams {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RememberParams {
     /// String or array of 2-5 related terms. Array preferred for broader semantic coverage.
+    #[schemars(schema_with = "query_input_schema")]
     pub query: QueryInput,
     /// Narrow results to specific memory categories
     pub memory_types: Option<Vec<MemoryType>>,
@@ -538,26 +621,25 @@ pub struct ForgetParams {
     pub role: Option<String>,
 }
 
-/// Command for the knowledge tool
+/// Command for the knowledge tool: search (semantic search across indexed
+/// knowledge), store (store raw text content under a unique key,
+/// session-scoped), delete (delete stored content by key), read (read full
+/// content of a URL or local file — fallback when search is insufficient),
+/// match (search indexed content by regex pattern, like grep).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeAction {
-    /// Semantic search across indexed knowledge
     Search,
-    /// Store raw text content under a unique key (session-scoped)
     Store,
-    /// Delete stored content by key
     Delete,
-    /// Read full content of a URL or local file (fallback when search is insufficient)
     Read,
-    /// Search indexed content by regex pattern (like grep)
     Match,
 }
 
 /// Knowledge tool parameters
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct KnowledgeParams {
-    /// Command to execute
+    /// Command to execute: search, store, delete, read, match
     pub command: KnowledgeAction,
     /// [search] What to search for, in natural language (required for search)
     #[schemars(length(min = 3, max = 500))]
