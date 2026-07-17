@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.2] - 2026-07-17
+
+### 📋 Release Summary
+
+This release improves MCP tool integration by optimizing schema structures and refining documentation for better usability (ea8990a6).
+
+
+### 🐛 Bug Fixes & Stability
+
+- **mcp**: flatten tool schemas and refine docs `ea8990a6`
+
 ## [0.9.1] - 2026-07-06
 
 ### 📋 Release Summary
