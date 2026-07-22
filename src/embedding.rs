@@ -33,15 +33,16 @@ pub async fn generate_embedding(
     timeout_secs: u64,
 ) -> anyhow::Result<Vec<f32>> {
     let fut = provider.generate_embedding(text);
-    if timeout_secs == 0 {
-        fut.await
+    let (embedding, _usage) = if timeout_secs == 0 {
+        fut.await?
     } else {
         tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut)
             .await
             .map_err(|_| {
                 anyhow::anyhow!("Embedding generation timed out after {}s", timeout_secs)
-            })?
-    }
+            })??
+    };
+    Ok(embedding)
 }
 
 /// Generate embeddings for multiple texts using batch API, with optional timeout from config.
@@ -51,8 +52,8 @@ pub async fn generate_embeddings_batch(
     timeout_secs: u64,
 ) -> anyhow::Result<Vec<Vec<f32>>> {
     let fut = provider.generate_embeddings_batch(texts, InputType::None);
-    if timeout_secs == 0 {
-        fut.await
+    let (embeddings, _usage) = if timeout_secs == 0 {
+        fut.await?
     } else {
         tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), fut)
             .await
@@ -61,6 +62,7 @@ pub async fn generate_embeddings_batch(
                     "Batch embedding generation timed out after {}s",
                     timeout_secs
                 )
-            })?
-    }
+            })??
+    };
+    Ok(embeddings)
 }
