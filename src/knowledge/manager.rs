@@ -583,9 +583,9 @@ impl KnowledgeManager {
 
         let dest = crate::storage::get_boxes_dir()?.join(boxes::slug(&box_id));
         if dest.exists() {
-            boxes::pull(&dest).ok();
+            boxes::pull(&dest).await.ok();
         } else {
-            boxes::clone(url, &dest)?;
+            boxes::clone(url, &dest).await?;
         }
 
         let count = self.index_box_dir(&dest, &box_id, &scope).await?;
@@ -595,7 +595,7 @@ impl KnowledgeManager {
             url: url.to_string(),
             box_id: box_id.clone(),
             scope: scope.clone(),
-            last_commit: boxes::head_commit(&dest).unwrap_or_default(),
+            last_commit: boxes::head_commit(&dest).await.unwrap_or_default(),
             last_synced: Utc::now().to_rfc3339(),
         });
         registry.save()?;
@@ -650,7 +650,7 @@ impl KnowledgeManager {
                 continue;
             }
             let url = boxes::org_box_url(&org);
-            let exists = boxes::remote_exists(&url);
+            let exists = boxes::remote_exists(&url).await;
             registry.probed.insert(
                 org.clone(),
                 boxes::ProbeResult {
@@ -674,14 +674,15 @@ impl KnowledgeManager {
         for b in registry.boxes.clone() {
             let dest = boxes_dir.join(boxes::slug(&b.box_id));
             if dest.exists() {
-                boxes::pull(&dest).ok();
-            } else if boxes::clone(&b.url, &dest).is_err() {
+                boxes::pull(&dest).await.ok();
+            } else if boxes::clone(&b.url, &dest).await.is_err() {
                 continue; // unreachable/offline — keep whatever is already indexed
             }
             match self.index_box_dir(&dest, &b.box_id, &b.scope).await {
                 Ok(_) => {
+                    let last_commit = boxes::head_commit(&dest).await.unwrap_or_default();
                     if let Some(entry) = registry.boxes.iter_mut().find(|e| e.box_id == b.box_id) {
-                        entry.last_commit = boxes::head_commit(&dest).unwrap_or_default();
+                        entry.last_commit = last_commit;
                         entry.last_synced = Utc::now().to_rfc3339();
                         dirty = true;
                     }

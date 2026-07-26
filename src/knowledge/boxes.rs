@@ -24,7 +24,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use tokio::process::Command;
 
 use crate::knowledge::content::ContentType;
 
@@ -262,26 +262,32 @@ fn git() -> Command {
     let mut c = Command::new("git");
     // Never block on a credential prompt — private/unreachable repos just fail fast.
     c.env("GIT_TERMINAL_PROMPT", "0");
+    // Box sync runs in a detached MCP task. Keep its network-capable git work
+    // asynchronous so stdin EOF can shut the runtime down, and terminate git if
+    // that task is cancelled while the MCP client disconnects.
+    c.kill_on_drop(true);
     c
 }
 
 /// True when the remote exists and is reachable (no auth prompt).
-pub fn remote_exists(url: &str) -> bool {
+pub async fn remote_exists(url: &str) -> bool {
     git()
         .args(["ls-remote", url])
         .output()
+        .await
         .map(|o| o.status.success() && !o.stdout.is_empty())
         .unwrap_or(false)
 }
 
 /// Shallow-clone a remote box into `dest`.
-pub fn clone(url: &str, dest: &Path) -> Result<()> {
+pub async fn clone(url: &str, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let out = git()
         .args(["clone", "--depth", "1", url, &dest.to_string_lossy()])
         .output()
+        .await
         .context("Failed to run git clone")?;
     if !out.status.success() {
         anyhow::bail!("git clone failed: {}", String::from_utf8_lossy(&out.stderr));
@@ -290,10 +296,11 @@ pub fn clone(url: &str, dest: &Path) -> Result<()> {
 }
 
 /// Fast-forward pull an existing clone. Returns Ok(()) even if already up to date.
-pub fn pull(dir: &Path) -> Result<()> {
+pub async fn pull(dir: &Path) -> Result<()> {
     let out = git()
         .args(["-C", &dir.to_string_lossy(), "pull", "--ff-only"])
         .output()
+        .await
         .context("Failed to run git pull")?;
     if !out.status.success() {
         anyhow::bail!("git pull failed: {}", String::from_utf8_lossy(&out.stderr));
@@ -302,10 +309,11 @@ pub fn pull(dir: &Path) -> Result<()> {
 }
 
 /// Current HEAD commit of a clone, if resolvable.
-pub fn head_commit(dir: &Path) -> Option<String> {
+pub async fn head_commit(dir: &Path) -> Option<String> {
     let out = git()
         .args(["-C", &dir.to_string_lossy(), "rev-parse", "HEAD"])
         .output()
+        .await
         .ok()?;
     if !out.status.success() {
         return None;
