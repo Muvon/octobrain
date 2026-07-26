@@ -2,6 +2,8 @@
 # This file contains default values for octobrain configuration
 # It will be copied to the system config directory on first run
 
+version = 1
+
 [embedding]
 # Embedding model for memory operations
 # Format: provider:model
