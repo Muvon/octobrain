@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.9.4] - 2026-07-26
+
+### 📋 Release Summary
+
+This release improves knowledge management performance through asynchronous operations (9591da0d) and updates core system dependencies for better stability (60ed412f, 833f33ef). Additionally, a fix ensures more reliable embedding provider integrations (6aac8f7a).
+
+
+### 🔧 Improvements & Optimizations
+
+- **knowledge**: make git operations asynchronous `9591da0d`
+
+### 🐛 Bug Fixes & Stability
+
+- **embedding**: handle provider response tuples `6aac8f7a`
+
+### 🔄 Other Changes
+
+2 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.9.3] - 2026-07-17
 
 ### 📋 Release Summary
