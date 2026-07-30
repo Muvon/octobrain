@@ -13,14 +13,14 @@
 // limitations under the License.
 
 //! MCP Server implementation using the official rmcp SDK
-//! Provides MCP 2025-03-26 protocol compliance with stdio and HTTP transports
+//! Provides MCP 2026-07-28 protocol compliance with stdio and HTTP transports
 
 use anyhow::Result;
 use rmcp::{
     handler::server::{wrapper::Parameters, ServerHandler},
     model::{
-        Implementation, InitializeRequestParams, InitializeResult, ListToolsResult,
-        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+        Implementation, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
+        ServerCapabilities, ServerInfo, Tool,
     },
     schemars::JsonSchema,
     service::RequestContext,
@@ -253,8 +253,10 @@ pub struct McpServer {
     instructions: String,
     /// True when octobrain's working directory contains at least one git repo.
     has_local_projects: bool,
-    /// Single-flight guard so background box sync runs at most once per session.
-    box_sync_started: Arc<AtomicBool>,
+    /// Whether the session context has been applied from client capabilities.
+    /// Applied once on the first request so a later state change is not
+    /// overwritten; also single-flights the background box sync.
+    session_applied: Arc<AtomicBool>,
 }
 
 impl McpServer {
@@ -270,8 +272,69 @@ impl McpServer {
             session: Arc::new(Mutex::new(SessionState::default())),
             instructions,
             has_local_projects,
-            box_sync_started: Arc::new(AtomicBool::new(false)),
+            session_applied: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Apply the octomind session context from client capabilities
+    /// (`experimental.session`) on the first request.
+    ///
+    /// Works for both protocol eras: modern clients (2026-07-28) carry
+    /// capabilities in every request's `_meta`, legacy clients set them during
+    /// the `initialize` handshake — `RequestContext::client_capabilities()`
+    /// resolves both.
+    async fn ensure_session_context(&self, context: &RequestContext<RoleServer>) {
+        if self.session_applied.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        if let Some(capabilities) = context.client_capabilities() {
+            if let Some(experimental) = &capabilities.experimental {
+                if let Some(session_obj) = experimental.get("session") {
+                    let scope = session_obj
+                        .get("scope")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let role = session_obj
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let session_id = session_obj
+                        .get("session_id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    let git = session_obj
+                        .get("git")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+
+                    let mut session = self.session.lock().await;
+                    let should_lock_scope = git || !self.has_local_projects;
+                    session.scope = if should_lock_scope { scope } else { None };
+                    session.role = role;
+                    if let Some(sid) = session_id {
+                        session.session_id = sid;
+                    }
+                    // Always lock (session received) — strips role from schema.
+                    // scope_locked strips scope from schema too, only when meaningful.
+                    session.role_locked = session.role.is_some();
+                    session.scope_locked = should_lock_scope;
+
+                    debug!(
+                        "Session locked: scope={:?}, role={:?}",
+                        session.scope, session.role
+                    );
+                }
+            }
+        }
+
+        // Kick off non-blocking box discovery/sync now that any session scope is
+        // established. Safe without a session too: it locates project .box/ dirs
+        // from the working directory and refreshes subscribed boxes.
+        let server = self.clone();
+        tokio::spawn(async move {
+            server.run_box_sync_background().await;
+        });
     }
 
     /// Background, non-blocking box discovery + sync. Logs and swallows errors so a
@@ -669,8 +732,10 @@ impl McpServer {
     )]
     async fn memorize(
         &self,
+        context: RequestContext<RoleServer>,
         Parameters(params): Parameters<MemorizeParams>,
     ) -> Result<String, McpError> {
+        self.ensure_session_context(&context).await;
         // global=true only meaningful when scope is locked; overrides to global scope ("")
         let session_scope_locked = self.session.lock().await.scope_locked;
         let effective_scope = if session_scope_locked && params.global == Some(true) {
@@ -696,8 +761,10 @@ impl McpServer {
     )]
     async fn remember(
         &self,
+        context: RequestContext<RoleServer>,
         Parameters(params): Parameters<RememberParams>,
     ) -> Result<String, McpError> {
+        self.ensure_session_context(&context).await;
         let provider = self
             .get_memory_provider(params.scope.clone(), params.role.clone())
             .await?;
@@ -716,8 +783,10 @@ impl McpServer {
     )]
     async fn forget(
         &self,
+        context: RequestContext<RoleServer>,
         Parameters(params): Parameters<ForgetParams>,
     ) -> Result<String, McpError> {
+        self.ensure_session_context(&context).await;
         let provider = self
             .get_memory_provider(params.scope.clone(), params.role.clone())
             .await?;
@@ -733,8 +802,10 @@ impl McpServer {
     )]
     async fn knowledge(
         &self,
+        context: RequestContext<RoleServer>,
         Parameters(params): Parameters<KnowledgeParams>,
     ) -> Result<String, McpError> {
+        self.ensure_session_context(&context).await;
         let provider = self.get_or_init_knowledge().await?;
         let session = self.session.lock().await;
         let session_id = session.session_id.clone();
@@ -790,7 +861,7 @@ impl McpServer {
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_protocol_version(ProtocolVersion::V_2025_03_26)
+            .with_protocol_version(ProtocolVersion::V_2026_07_28)
             .with_server_info(
                 Implementation::new("octobrain", env!("CARGO_PKG_VERSION"))
                     .with_title("Octobrain Memory Server")
@@ -805,8 +876,9 @@ impl ServerHandler for McpServer {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        self.ensure_session_context(&context).await;
         let session = self.session.lock().await;
         let tools = if session.role_locked && session.scope_locked {
             tools_locked().clone() // strip scope + role
@@ -815,72 +887,11 @@ impl ServerHandler for McpServer {
         } else {
             tools_full_no_global().clone()
         };
-        Ok(ListToolsResult {
-            tools,
-            meta: None,
-            next_cursor: None,
-        })
+        Ok(ListToolsResult::with_all_items(tools))
     }
 
-    /// Extract scope/role from experimental capabilities during initialize handshake
-    async fn initialize(
-        &self,
-        request: InitializeRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<InitializeResult, McpError> {
-        // Extract session from capabilities.experimental.session
-        if let Some(experimental) = &request.capabilities.experimental {
-            if let Some(session_obj) = experimental.get("session") {
-                let scope = session_obj
-                    .get("scope")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let role = session_obj
-                    .get("role")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let session_id = session_obj
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let git = session_obj
-                    .get("git")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-
-                let mut session = self.session.lock().await;
-                let should_lock_scope = git || !self.has_local_projects;
-                session.scope = if should_lock_scope { scope } else { None };
-                session.role = role;
-                if let Some(sid) = session_id {
-                    session.session_id = sid;
-                }
-                // Always lock (handshake received) — strips role from schema.
-                // scope_locked strips scope from schema too, only when meaningful.
-                session.role_locked = session.role.is_some();
-                session.scope_locked = should_lock_scope;
-
-                debug!(
-                    "Session locked: scope={:?}, role={:?}",
-                    session.scope, session.role
-                );
-            }
-        }
-
-        // Kick off non-blocking box discovery/sync (once per session) now that any
-        // handshake scope is established. Safe without a handshake too: it locates
-        // project .box/ dirs from the working directory and refreshes subscribed boxes.
-        if !self.box_sync_started.swap(true, Ordering::SeqCst) {
-            let server = self.clone();
-            tokio::spawn(async move {
-                server.run_box_sync_background().await;
-            });
-        }
-
-        // Store peer info and return server info (default behavior)
-        if context.peer.peer_info().is_none() {
-            context.peer.set_peer_info(request);
-        }
-        Ok(self.get_info())
-    }
+    // The default `initialize` (legacy clients) and `discover` (2026-07-28
+    // clients) implementations handle peer info and version negotiation; the
+    // session scope/role is applied per-request in `ensure_session_context`,
+    // which covers both eras.
 }
