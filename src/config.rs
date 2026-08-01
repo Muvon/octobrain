@@ -12,19 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fs::Permissions;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
+use octolib::utils::config_file;
+use octolib::utils::config_migration::MigrationPlan;
 use serde::{Deserialize, Serialize};
-use tempfile::NamedTempFile;
-use toml_edit::DocumentMut;
 
 use crate::memory::types::MemoryConfig;
 
 const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../config-templates/default.toml");
+
+/// Releases before the `version` stamp existed shipped what is now v1, so a
+/// config with no version is v1 rather than a broken file.
 const LEGACY_CONFIG_VERSION: u32 = 1;
+
+/// Octobrain's version chain. The driver (version walk, guards, table merging)
+/// and the file primitives (lock, backup, atomic replace) live in octolib;
+/// only the per-version steps belong here.
+///
+/// Add a `VersionMigration { from: N, to: N + 1, apply }` here in the same
+/// commit that bumps `version` in `config-templates/default.toml` — the driver
+/// then walks v1 -> v2 -> v3 in order on its own.
+fn plan() -> MigrationPlan {
+    MigrationPlan::new("octobrain", Vec::new()).with_missing_version(LEGACY_CONFIG_VERSION)
+}
 
 /// Embedding configuration for memory operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,49 +189,41 @@ impl Config {
     }
 
     fn load_from_path(config_path: &Path) -> Result<Self> {
-        Self::load_from_path_with(config_path, persist_migrated_config)
+        // Fast path: a current (or absent-but-creatable) config must not take the
+        // write lock. Only an actual migration serialises.
+        if config_path.exists() {
+            let original = std::fs::read_to_string(config_path)
+                .with_context(|| format!("failed to read config {}", config_path.display()))?;
+            if plan().migrate(&original, DEFAULT_CONFIG_TEMPLATE)?.is_none() {
+                return parse_and_validate(&original, &format!("config {}", config_path.display()));
+            }
+        }
+
+        config_file::with_lock(config_path, || Self::load_from_path_locked(config_path))
     }
 
-    fn load_from_path_with<P>(config_path: &Path, persist_migration: P) -> Result<Self>
-    where
-        P: FnOnce(&Path, &[u8], &[u8]) -> Result<()>,
-    {
-        let template_version = required_version(DEFAULT_CONFIG_TEMPLATE, "embedded template")?;
-        let template_config = parse_and_validate(DEFAULT_CONFIG_TEMPLATE, "embedded template")?;
-
+    fn load_from_path_locked(config_path: &Path) -> Result<Self> {
         if !config_path.exists() {
-            create_config_exactly(config_path, DEFAULT_CONFIG_TEMPLATE.as_bytes())?;
-            return Ok(template_config);
+            config_file::atomic_write(config_path, DEFAULT_CONFIG_TEMPLATE.as_bytes(), None)?;
+            return parse_and_validate(DEFAULT_CONFIG_TEMPLATE, "embedded template");
         }
 
         let original = std::fs::read_to_string(config_path)
             .with_context(|| format!("failed to read config {}", config_path.display()))?;
-        let mut document = original
-            .parse::<DocumentMut>()
-            .with_context(|| format!("config {} is not valid TOML", config_path.display()))?;
-        let user_version = user_version(&document)?;
+        let migration = plan().migrate(&original, DEFAULT_CONFIG_TEMPLATE)?;
+        let content = migration
+            .as_ref()
+            .map_or(original.as_str(), |migration| migration.content.as_str());
 
-        if user_version > template_version {
-            anyhow::bail!(
-                "Config {} has version {}, but this binary only supports version {}. Upgrade octobrain before using this config.",
-                config_path.display(),
-                user_version,
-                template_version
-            );
+        // The user's file is replaced only once the migrated document is known
+        // to load and validate.
+        let config = parse_and_validate(content, &format!("config {}", config_path.display()))?;
+
+        if let Some(migration) = migration {
+            config_file::apply_migration(config_path, original.as_bytes(), &migration)?;
+            debug_assert_eq!(config.version, migration.to_version);
         }
 
-        if user_version == template_version {
-            return parse_and_validate(&original, &format!("config {}", config_path.display()));
-        }
-
-        migrate(&mut document, user_version, template_version)?;
-        let migrated = document.to_string();
-        let config = parse_and_validate(
-            &migrated,
-            &format!("migrated config {}", config_path.display()),
-        )?;
-
-        persist_migration(config_path, original.as_bytes(), migrated.as_bytes())?;
         Ok(config)
     }
 
@@ -245,191 +249,20 @@ fn parse_and_validate(content: &str, source: &str) -> Result<Config> {
     Ok(config)
 }
 
-fn required_version(content: &str, source: &str) -> Result<u32> {
-    let document = content
-        .parse::<DocumentMut>()
-        .with_context(|| format!("{source} is not valid TOML"))?;
-    document_version(&document)?
-        .ok_or_else(|| anyhow::anyhow!("{source} does not declare a config version"))
-}
-
-fn user_version(document: &DocumentMut) -> Result<u32> {
-    Ok(document_version(document)?.unwrap_or(LEGACY_CONFIG_VERSION))
-}
-
+/// `serde` default for configs written before the version stamp existed.
 fn legacy_config_version() -> u32 {
     LEGACY_CONFIG_VERSION
 }
 
-fn document_version(document: &DocumentMut) -> Result<Option<u32>> {
-    let Some(item) = document.as_table().get("version") else {
-        return Ok(None);
-    };
-    let version = item
-        .as_integer()
-        .ok_or_else(|| anyhow::anyhow!("config version must be a positive integer"))?;
-    let version = u32::try_from(version)
-        .map_err(|_| anyhow::anyhow!("config version must be a positive integer"))?;
-    if version == 0 {
-        anyhow::bail!("config version must be a positive integer");
-    }
-    Ok(Some(version))
-}
-
-fn migrate(document: &mut DocumentMut, version: u32, target_version: u32) -> Result<()> {
-    migrate_with(document, version, target_version, migrate_one_version)
-}
-
-fn migrate_with<M>(
-    document: &mut DocumentMut,
-    mut version: u32,
-    target_version: u32,
-    mut migrate_one: M,
-) -> Result<()>
-where
-    M: FnMut(&mut DocumentMut, u32) -> Result<()>,
-{
-    while version < target_version {
-        migrate_one(document, version)?;
-
-        let migrated_version = document_version(document)?.ok_or_else(|| {
-            anyhow::anyhow!("config migration from version {version} did not set a version")
-        })?;
-        if migrated_version != version + 1 {
-            anyhow::bail!(
-                "config migration from version {} produced version {}, expected {}",
-                version,
-                migrated_version,
-                version + 1
-            );
-        }
-        version = migrated_version;
-    }
-
-    Ok(())
-}
-
-fn migrate_one_version(_document: &mut DocumentMut, version: u32) -> Result<()> {
-    // Add an explicit arm here only when the matching schema version is released.
-    anyhow::bail!(
-        "No config migration exists from version {} to version {}",
-        version,
-        version + 1
-    )
-}
-
-#[allow(dead_code)] // Used by explicit migration functions once version 2 exists.
-fn set_version(document: &mut DocumentMut, version: u32) -> Result<()> {
-    if version == 0 {
-        anyhow::bail!("config version must be a positive integer");
-    }
-
-    let next_version = toml_edit::Value::from(i64::from(version));
-    if let Some(version_item) = document.as_table_mut().get_mut("version") {
-        let decor = version_item
-            .as_value()
-            .ok_or_else(|| anyhow::anyhow!("config version must be a positive integer"))?
-            .decor()
-            .clone();
-        let mut next_version = next_version;
-        *next_version.decor_mut() = decor;
-        *version_item = toml_edit::Item::Value(next_version);
-    } else {
-        document
-            .as_table_mut()
-            .insert("version", toml_edit::Item::Value(next_version));
-    }
-
-    Ok(())
-}
-
-fn create_config_exactly(config_path: &Path, content: &[u8]) -> Result<()> {
-    let parent = parent_directory(config_path);
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create config directory {}", parent.display()))?;
-
-    let temp = prepare_temp_file(config_path, content, None)?;
-    temp.persist_noclobber(config_path).map_err(|error| {
-        anyhow::anyhow!(
-            "failed to create config {}: {}",
-            config_path.display(),
-            error.error
-        )
-    })?;
-    Ok(())
-}
-
-fn persist_migrated_config(config_path: &Path, original: &[u8], migrated: &[u8]) -> Result<()> {
-    persist_migrated_config_with(config_path, original, migrated, |temp, path| {
-        temp.persist(path).map_err(|error| {
-            anyhow::anyhow!(
-                "failed to atomically replace config {}: {}",
-                path.display(),
-                error.error
-            )
-        })?;
-        Ok(())
-    })
-}
-
-fn persist_migrated_config_with<R>(
-    config_path: &Path,
-    original: &[u8],
-    migrated: &[u8],
-    replace: R,
-) -> Result<()>
-where
-    R: FnOnce(NamedTempFile, &Path) -> Result<()>,
-{
-    let permissions = std::fs::metadata(config_path)
-        .with_context(|| format!("failed to inspect config {}", config_path.display()))?
-        .permissions();
-    let replacement = prepare_temp_file(config_path, migrated, Some(permissions.clone()))?;
-
-    let backup_path = backup_path(config_path);
-    let backup = prepare_temp_file(&backup_path, original, Some(permissions))?;
-    backup.persist(&backup_path).map_err(|error| {
-        anyhow::anyhow!(
-            "failed to write config backup {}: {}",
-            backup_path.display(),
-            error.error
-        )
-    })?;
-
-    replace(replacement, config_path)
-}
-
-fn prepare_temp_file(
-    destination: &Path,
-    content: &[u8],
-    permissions: Option<Permissions>,
-) -> Result<NamedTempFile> {
-    let parent = parent_directory(destination);
-    let mut temp = NamedTempFile::new_in(parent)
-        .with_context(|| format!("failed to create temporary file in {}", parent.display()))?;
-    temp.write_all(content)
-        .with_context(|| format!("failed to write temporary config in {}", parent.display()))?;
-    if let Some(permissions) = permissions {
-        temp.as_file()
-            .set_permissions(permissions)
-            .context("failed to preserve config permissions")?;
-    }
-    temp.as_file()
-        .sync_all()
-        .context("failed to sync temporary config")?;
-    Ok(temp)
-}
-
-fn parent_directory(path: &Path) -> &Path {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-}
-
-fn backup_path(config_path: &Path) -> PathBuf {
-    let mut path = config_path.as_os_str().to_os_string();
-    path.push(".backup");
-    PathBuf::from(path)
+/// Where [`config_file::apply_migration`] puts the pre-migration copy.
+#[cfg(test)]
+fn backup_path(config_path: &Path, version: u32) -> std::path::PathBuf {
+    let file_name = config_path
+        .file_name()
+        .expect("config path must have a file name")
+        .to_string_lossy()
+        .into_owned();
+    config_path.with_file_name(format!("{file_name}.v{version}.bak"))
 }
 
 /// Reranker configuration for improving search result accuracy
@@ -450,6 +283,8 @@ pub struct RerankerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use octolib::utils::config_migration::{merge_missing, VersionMigration};
+    use toml_edit::DocumentMut;
 
     fn legacy_v1_config() -> String {
         DEFAULT_CONFIG_TEMPLATE.replacen("version = 1\n\n", "", 1)
@@ -491,7 +326,7 @@ mod tests {
         assert_eq!(config.version, 1);
         assert_eq!(config.search.similarity_threshold, 0.77);
         assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
-        assert!(!backup_path(&path).exists());
+        assert!(!backup_path(&path, 1).exists());
     }
 
     #[test]
@@ -509,41 +344,7 @@ mod tests {
 
         assert_eq!(config.search.similarity_threshold, 0.61);
         assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
-        assert!(!backup_path(&path).exists());
-    }
-
-    #[test]
-    fn migration_engine_runs_each_version_once_and_is_idempotent() {
-        let mut document = "# user comment\nversion = 1\ncustom = \"keep\"\n"
-            .parse::<DocumentMut>()
-            .unwrap();
-        let mut steps = Vec::new();
-
-        migrate_with(&mut document, 1, 3, |document, version| {
-            steps.push(version);
-            set_version(document, version + 1)
-        })
-        .unwrap();
-
-        assert_eq!(steps, vec![1, 2]);
-        assert_eq!(document_version(&document).unwrap(), Some(3));
-        assert!(document.to_string().contains("# user comment"));
-        assert!(document.to_string().contains("custom = \"keep\""));
-
-        let migrated = document.to_string();
-        migrate_with(&mut document, 3, 3, |_document, _version| {
-            panic!("an at-target migration must not run")
-        })
-        .unwrap();
-        assert_eq!(document.to_string(), migrated);
-
-        let mut unversioned = "# legacy comment\ncustom = \"keep\"\n"
-            .parse::<DocumentMut>()
-            .unwrap();
-        set_version(&mut unversioned, 2).unwrap();
-        assert_eq!(document_version(&unversioned).unwrap(), Some(2));
-        assert!(unversioned.to_string().contains("# legacy comment"));
-        assert!(unversioned.to_string().contains("custom = \"keep\""));
+        assert!(!backup_path(&path, 1).exists());
     }
 
     #[test]
@@ -555,53 +356,115 @@ mod tests {
         std::fs::write(&invalid_path, &invalid).unwrap();
         assert!(Config::load_from_path(&invalid_path).is_err());
         assert_eq!(std::fs::read(&invalid_path).unwrap(), invalid.as_bytes());
-        assert!(!backup_path(&invalid_path).exists());
+        assert!(!backup_path(&invalid_path, 1).exists());
 
         let future_path = directory.path().join("future.toml");
         let future = DEFAULT_CONFIG_TEMPLATE.replacen("version = 1", "version = 2", 1);
         std::fs::write(&future_path, &future).unwrap();
         assert!(Config::load_from_path(&future_path).is_err());
         assert_eq!(std::fs::read(&future_path).unwrap(), future.as_bytes());
-        assert!(!backup_path(&future_path).exists());
+        assert!(!backup_path(&future_path, 2).exists());
+    }
+
+    /// The chain is currently empty (v1 is the only released schema); this is
+    /// the contract a future `VersionMigration` will run under: steps execute
+    /// in order, once each, and the driver stamps every intermediate version.
+    #[test]
+    fn chain_walks_v1_to_v3_one_step_at_a_time() {
+        const V3_TEMPLATE: &str = "version = 3\n\n[two]\na = 1\n\n[three]\nb = 2\n";
+
+        fn add_two(document: &mut DocumentMut, template: &DocumentMut) -> Result<()> {
+            merge_missing(document.as_table_mut(), template.as_table(), "two")
+        }
+        fn add_three(document: &mut DocumentMut, template: &DocumentMut) -> Result<()> {
+            merge_missing(document.as_table_mut(), template.as_table(), "three")
+        }
+
+        let chained = MigrationPlan::new(
+            "octobrain",
+            vec![
+                VersionMigration {
+                    from: 1,
+                    to: 2,
+                    apply: add_two,
+                },
+                VersionMigration {
+                    from: 2,
+                    to: 3,
+                    apply: add_three,
+                },
+            ],
+        )
+        .with_missing_version(LEGACY_CONFIG_VERSION);
+
+        // No version field at all: treated as v1 and walked all the way to v3.
+        let migration = chained
+            .migrate("# user comment\ncustom = \"keep\"\n", V3_TEMPLATE)
+            .unwrap()
+            .expect("an unversioned config must migrate");
+
+        assert_eq!(migration.from_version, 1);
+        assert_eq!(migration.to_version, 3);
+        assert!(migration.content.contains("# user comment"));
+
+        let migrated: toml::Value = toml::from_str(&migration.content).unwrap();
+        assert_eq!(migrated["version"].as_integer(), Some(3));
+        assert_eq!(migrated["custom"].as_str(), Some("keep"));
+        assert_eq!(migrated["two"]["a"].as_integer(), Some(1));
+        assert_eq!(migrated["three"]["b"].as_integer(), Some(2));
+
+        // Re-running the now-current document is a no-op.
+        assert!(chained
+            .migrate(&migration.content, V3_TEMPLATE)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
-    fn failed_atomic_replace_leaves_original_config_intact() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        let original = DEFAULT_CONFIG_TEMPLATE.to_owned();
-        let replacement = original.replacen("version = 1", "version = 2", 1);
-        std::fs::write(&path, &original).unwrap();
-
-        let result = persist_migrated_config_with(
-            &path,
-            original.as_bytes(),
-            replacement.as_bytes(),
-            |_temp, _path| anyhow::bail!("simulated atomic replace failure"),
-        );
-
-        assert!(result.is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
-        assert_eq!(
-            std::fs::read(backup_path(&path)).unwrap(),
-            original.as_bytes()
-        );
+    fn template_is_the_target_version_and_needs_no_migration() {
+        assert_eq!(plan().target_version(DEFAULT_CONFIG_TEMPLATE).unwrap(), 1);
+        assert!(plan()
+            .migrate(DEFAULT_CONFIG_TEMPLATE, DEFAULT_CONFIG_TEMPLATE)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
-    fn successful_persistence_backs_up_and_atomically_replaces_config() {
+    fn migration_backs_up_the_original_and_replaces_atomically() {
+        const V2_TEMPLATE: &str = "version = 2\n\n[two]\na = 1\n";
+
+        fn add_two(document: &mut DocumentMut, template: &DocumentMut) -> Result<()> {
+            merge_missing(document.as_table_mut(), template.as_table(), "two")
+        }
+
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
-        let original = DEFAULT_CONFIG_TEMPLATE.to_owned();
-        let replacement = original.replacen("version = 1", "version = 2", 1);
-        std::fs::write(&path, &original).unwrap();
+        let original = "version = 1\n";
+        std::fs::write(&path, original).unwrap();
 
-        persist_migrated_config(&path, original.as_bytes(), replacement.as_bytes()).unwrap();
+        let chained = MigrationPlan::new(
+            "octobrain",
+            vec![VersionMigration {
+                from: 1,
+                to: 2,
+                apply: add_two,
+            }],
+        );
+        let migration = chained.migrate(original, V2_TEMPLATE).unwrap().unwrap();
+        config_file::apply_migration(&path, original.as_bytes(), &migration).unwrap();
 
-        assert_eq!(std::fs::read(&path).unwrap(), replacement.as_bytes());
         assert_eq!(
-            std::fs::read(backup_path(&path)).unwrap(),
-            original.as_bytes()
+            std::fs::read_to_string(backup_path(&path, 1)).unwrap(),
+            original
+        );
+        let written: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["version"].as_integer(), Some(2));
+
+        // Idempotent: re-applying the same migration must not clobber the backup.
+        config_file::apply_migration(&path, original.as_bytes(), &migration).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(backup_path(&path, 1)).unwrap(),
+            original
         );
     }
 }

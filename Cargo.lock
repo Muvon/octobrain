@@ -5075,9 +5075,7 @@ dependencies = [
 
 [[package]]
 name = "octolib"
-version = "0.26.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2670d79e233bfa9d79e77b1a00797d21681eda596bf73cfbd91d56d2769d6774"
+version = "0.29.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5088,6 +5086,7 @@ dependencies = [
  "candle-transformers",
  "dirs",
  "fastembed",
+ "fs4",
  "hex",
  "hf-hub 0.4.3",
  "jsonschema",
@@ -5100,7 +5099,9 @@ dependencies = [
  "tiktoken-rs",
  "tokenizers",
  "tokio",
+ "toml_edit",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
