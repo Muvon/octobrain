@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.10.0] - 2026-08-01
+
+### 📋 Release Summary
+
+This release introduces session context management for improved AI conversation states (3a17d8a0) and implements versioned configuration migrations to ensure seamless updates (58f158ec). General system stability and performance have been enhanced through updated dependencies and refined configuration logic (4ca672e7, b9509012, 3c28d4ad, 7da7fa4e).
+
+
+### ✨ New Features & Enhancements
+
+- **mcp**: implement session context and update deps `3a17d8a0`
+- **config**: implement versioned configuration migration `58f158ec`
+
+### 🔧 Improvements & Optimizations
+
+- **config**: reformat long lines for readability `4ca672e7`
+- **config**: migrate configuration logic to octolib `3c28d4ad`
+
+### 🔄 Other Changes
+
+2 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.9.4] - 2026-07-26
 
 ### 📋 Release Summary
