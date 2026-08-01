@@ -194,7 +194,10 @@ impl Config {
         if config_path.exists() {
             let original = std::fs::read_to_string(config_path)
                 .with_context(|| format!("failed to read config {}", config_path.display()))?;
-            if plan().migrate(&original, DEFAULT_CONFIG_TEMPLATE)?.is_none() {
+            if plan()
+                .migrate(&original, DEFAULT_CONFIG_TEMPLATE)?
+                .is_none()
+            {
                 return parse_and_validate(&original, &format!("config {}", config_path.display()));
             }
         }
@@ -457,7 +460,8 @@ mod tests {
             std::fs::read_to_string(backup_path(&path, 1)).unwrap(),
             original
         );
-        let written: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let written: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written["version"].as_integer(), Some(2));
 
         // Idempotent: re-applying the same migration must not clobber the backup.
