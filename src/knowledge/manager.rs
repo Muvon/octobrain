@@ -317,6 +317,7 @@ impl KnowledgeManager {
         let chunks_created = self
             .embed_and_store(&source, &doc.title, "", &doc.content_hash, doc.chunks, None)
             .await?;
+        self.store.optimize().await;
 
         Ok(IndexResult {
             source,
@@ -339,6 +340,7 @@ impl KnowledgeManager {
 
         self.embed_and_store(source, &doc.title, "", &doc.content_hash, doc.chunks, None)
             .await?;
+        self.store.optimize().await;
 
         Ok(())
     }
@@ -526,6 +528,7 @@ impl KnowledgeManager {
                 Some(session_id),
             )
             .await?;
+        self.store.optimize().await;
 
         Ok(StoreResult {
             source,
@@ -749,10 +752,17 @@ impl KnowledgeManager {
 
         // Prune sources removed from the box since the last sync.
         let prefix = boxes::source_prefix(box_id);
+        let mut pruned = 0usize;
         for existing in self.store.list_sources_with_prefix(&prefix).await? {
             if !current.contains(&existing) {
                 self.store.delete_source(&existing).await?;
+                pruned += 1;
             }
+        }
+
+        // One compaction for the whole sweep; skip entirely on a no-op sync.
+        if reindexed > 0 || pruned > 0 {
+            self.store.optimize().await;
         }
 
         Ok(reindexed)

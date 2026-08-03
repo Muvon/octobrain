@@ -632,6 +632,13 @@ impl MemoryStore {
         // Index part is the one that absorbs the unindexed delta into the
         // existing IVF index without retraining. Compact merges small files.
         self.memories_table.optimize(OptimizeAction::All).await?;
+        // Relationships churn hardest — auto-linking writes up to
+        // 2 * max_auto_links rows per memorize, one fragment each. Without
+        // compaction the table degrades into thousands of single-row fragments,
+        // and every later insert rewrites a manifest listing all of them.
+        self.relationships_table
+            .optimize(OptimizeAction::All)
+            .await?;
         Ok(())
     }
 

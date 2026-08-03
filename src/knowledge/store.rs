@@ -287,17 +287,21 @@ impl KnowledgeStore {
         let batch_reader = RecordBatchIterator::new(once(Ok(batch)), self.schema.clone());
         self.table.add(batch_reader).execute().await?;
 
-        // Compact fragments and update FTS/scalar indexes so new chunks are immediately
-        // searchable without brute-force fallback on the unindexed portion.
-        self.table.optimize(OptimizeAction::All).await.ok();
-
         Ok(())
     }
 
+    /// Compact fragments, prune old versions, and update FTS/scalar indexes so
+    /// new chunks are searchable without brute-force fallback on the unindexed
+    /// portion. Callers run this once per indexing operation — NOT per document
+    /// — so a box sweep over N changed files pays one compaction, not N.
+    pub async fn optimize(&self) {
+        self.table.optimize(OptimizeAction::All).await.ok();
+    }
+
     /// Bulk-ingest one row per passage `(id, title, text, embedding)`. Unlike
-    /// `store_chunks`, this neither deletes by source nor optimizes per call —
-    /// rows are added in batches and the index is rebuilt once at the end, so
-    /// ingesting N passages is a single pass. Each passage becomes a standalone
+    /// `store_chunks`, this doesn't delete existing rows by source — rows are
+    /// added in batches and the index is rebuilt once at the end, so ingesting
+    /// N passages is a single pass. Each passage becomes a standalone
     /// chunk (chunk_index 0, no parent, global scope). Used only by the retrieval
     /// benchmark, so it's gated behind the `bench` feature (no dead code in
     /// normal builds).

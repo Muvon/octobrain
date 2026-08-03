@@ -37,6 +37,12 @@ use crate::embedding::{create_embedding_provider_from_parts, parse_provider_mode
 /// dominant search cost; at 100 the maintenance cost dominates the write path.
 const MAINTENANCE_EVERY_N_WRITES: usize = 250;
 
+/// Hours between marker-gated LanceDB maintenance passes at startup. The
+/// write-counter trigger above only fires within one long-lived process;
+/// short-lived MCP sessions never reach 250 writes, so without this pass
+/// fragmentation and old versions accrue unbounded across sessions.
+const MAINTENANCE_INTERVAL_HOURS: i64 = 24;
+
 /// RRF constant for fusing per-query result lists in `remember_multi` — the same
 /// k=60 the in-store hybrid fusion uses. Rank-based fusion is scale-free, so it
 /// avoids mixing the incomparable weighted-sum magnitudes of per-query searches.
@@ -171,6 +177,26 @@ impl MemoryManager {
             };
             tokio::spawn(async move {
                 bg.maybe_sleep_consolidate().await.ok();
+            });
+        }
+
+        // Table-wide maintenance (compaction + version prune + index refresh).
+        // Marker is shared, not per-scope, because it optimizes the whole DB;
+        // written before the pass runs so concurrent session startups within
+        // the same window don't stampede compaction.
+        let maintenance_marker = db_path.join(".last_maintenance");
+        let due = std::fs::read_to_string(&maintenance_marker)
+            .ok()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s.trim()).ok())
+            .map(|t| (Utc::now() - t.with_timezone(&Utc)).num_hours() >= MAINTENANCE_INTERVAL_HOURS)
+            .unwrap_or(true);
+        if due {
+            std::fs::write(&maintenance_marker, Utc::now().to_rfc3339()).ok();
+            let store = manager.store.clone();
+            tokio::spawn(async move {
+                if let Err(e) = store.run_maintenance().await {
+                    tracing::warn!("Startup LanceDB maintenance failed: {}", e);
+                }
             });
         }
 
