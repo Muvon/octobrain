@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.10.1] - 2026-08-03
+
+### 📋 Release Summary
+
+This release improves overall system performance through an optimized knowledge database compaction strategy (593c2f7c). These enhancements ensure more efficient memory management and improved stability for AI conversation states.
+
+
+### 🔧 Improvements & Optimizations
+
+- **knowledge**: optimize database compaction strategy `593c2f7c`
+
 ## [0.10.0] - 2026-08-01
 
 ### 📋 Release Summary
