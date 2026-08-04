@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.10.2] - 2026-08-04
+
+### 📋 Release Summary
+
+This release includes routine dependency updates to ensure optimal system stability and security (c242f277).
+
+
+### 🔄 Other Changes
+
+1 maintenance, dependency, and tooling update not listed individually.
+
 ## [0.10.1] - 2026-08-03
 
 ### 📋 Release Summary

@@ -3,7 +3,7 @@
   "name": "io.github.Muvon/octobrain",
   "title": "Octobrain",
   "description": "Persistent memory for AI assistants with semantic search and knowledge graph relationships.",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "websiteUrl": "https://github.com/muvon/octobrain",
   "repository": {
     "url": "https://github.com/muvon/octobrain",
