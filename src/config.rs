@@ -257,15 +257,16 @@ fn legacy_config_version() -> u32 {
     LEGACY_CONFIG_VERSION
 }
 
-/// Where [`config_file::apply_migration`] puts the pre-migration copy.
+/// Backups sitting next to `config_path`. The naming scheme is octolib's, so
+/// tests here only ever ask whether a backup was made, never what it's called.
 #[cfg(test)]
-fn backup_path(config_path: &Path, version: u32) -> std::path::PathBuf {
-    let file_name = config_path
-        .file_name()
-        .expect("config path must have a file name")
-        .to_string_lossy()
-        .into_owned();
-    config_path.with_file_name(format!("{file_name}.v{version}.bak"))
+fn backups(config_path: &Path) -> Vec<std::path::PathBuf> {
+    let parent = config_path.parent().expect("config path must have a parent");
+    std::fs::read_dir(parent)
+        .expect("config directory must be readable")
+        .map(|entry| entry.expect("directory entry must be readable").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "bak"))
+        .collect()
 }
 
 /// Reranker configuration for improving search result accuracy
@@ -329,7 +330,7 @@ mod tests {
         assert_eq!(config.version, 1);
         assert_eq!(config.search.similarity_threshold, 0.77);
         assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
-        assert!(!backup_path(&path, 1).exists());
+        assert!(backups(&path).is_empty());
     }
 
     #[test]
@@ -347,7 +348,7 @@ mod tests {
 
         assert_eq!(config.search.similarity_threshold, 0.61);
         assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
-        assert!(!backup_path(&path, 1).exists());
+        assert!(backups(&path).is_empty());
     }
 
     #[test]
@@ -359,14 +360,14 @@ mod tests {
         std::fs::write(&invalid_path, &invalid).unwrap();
         assert!(Config::load_from_path(&invalid_path).is_err());
         assert_eq!(std::fs::read(&invalid_path).unwrap(), invalid.as_bytes());
-        assert!(!backup_path(&invalid_path, 1).exists());
+        assert!(backups(&invalid_path).is_empty());
 
         let future_path = directory.path().join("future.toml");
         let future = DEFAULT_CONFIG_TEMPLATE.replacen("version = 1", "version = 2", 1);
         std::fs::write(&future_path, &future).unwrap();
         assert!(Config::load_from_path(&future_path).is_err());
         assert_eq!(std::fs::read(&future_path).unwrap(), future.as_bytes());
-        assert!(!backup_path(&future_path, 2).exists());
+        assert!(backups(&future_path).is_empty());
     }
 
     /// The chain is currently empty (v1 is the only released schema); this is
@@ -454,21 +455,16 @@ mod tests {
             }],
         );
         let migration = chained.migrate(original, V2_TEMPLATE).unwrap().unwrap();
-        config_file::apply_migration(&path, original.as_bytes(), &migration).unwrap();
+        let backup = config_file::apply_migration(&path, original.as_bytes(), &migration).unwrap();
 
-        assert_eq!(
-            std::fs::read_to_string(backup_path(&path, 1)).unwrap(),
-            original
-        );
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), original);
         let written: toml::Value =
             toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written["version"].as_integer(), Some(2));
 
         // Idempotent: re-applying the same migration must not clobber the backup.
         config_file::apply_migration(&path, original.as_bytes(), &migration).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(backup_path(&path, 1)).unwrap(),
-            original
-        );
+        assert_eq!(backups(&path), vec![backup.clone()]);
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), original);
     }
 }
