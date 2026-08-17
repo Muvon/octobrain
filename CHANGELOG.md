@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.11.0] - 2026-08-17
+
+### 📋 Release Summary
+
+This release introduces improved knowledge retrieval by adding support for accept headers in URL requests (58d56e5a). Additionally, system stability and performance have been enhanced through updated core dependencies and streamlined release workflows (d972c7b3, b596be4c, bd7c7b3d, f80654ff).
+
+
+### ✨ New Features & Enhancements
+
+- **knowledge**: add accept header to url requests `58d56e5a`
+
+### 🔧 Improvements & Optimizations
+
+- **release**: add npm publish step to workflow `f80654ff`
+
+### 🔄 Other Changes
+
+3 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.10.2] - 2026-08-04
 
 ### 📋 Release Summary
