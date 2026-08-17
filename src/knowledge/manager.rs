@@ -437,6 +437,7 @@ impl KnowledgeManager {
 
         let response = client
             .get(url)
+            .header("accept", "text/markdown, text/html;q=0.9, */*;q=0.8")
             .send()
             .await
             .context("Failed to fetch URL")?;

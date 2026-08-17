@@ -261,7 +261,9 @@ fn legacy_config_version() -> u32 {
 /// tests here only ever ask whether a backup was made, never what it's called.
 #[cfg(test)]
 fn backups(config_path: &Path) -> Vec<std::path::PathBuf> {
-    let parent = config_path.parent().expect("config path must have a parent");
+    let parent = config_path
+        .parent()
+        .expect("config path must have a parent");
     std::fs::read_dir(parent)
         .expect("config directory must be readable")
         .map(|entry| entry.expect("directory entry must be readable").path())
