@@ -60,11 +60,22 @@ fn tools_full() -> &'static Vec<Tool> {
     })
 }
 
-/// Inline every `$ref` into its `$defs` target and drop `$defs`/`$schema`,
-/// producing flat self-contained tool schemas. Some inference backends (e.g.
-/// Together's `thinkingmachines/Inkling`) silently return an EMPTY generation
-/// when a tool schema uses `$ref` indirection — flat inline schemas are the
-/// portable shape for tool calling across providers.
+/// Inline every `$ref` into its `$defs` target, drop `$defs`/`$schema`, and
+/// strip the `null` branch from nullable types — producing flat, scalar-typed
+/// self-contained tool schemas.
+///
+/// Two backend quirks make this the portable shape for tool calling:
+/// - `$ref` indirection: some backends (e.g. Together's
+///   `thinkingmachines/Inkling`) silently return an EMPTY generation.
+/// - nullable types: schemars emits `"type": ["number", "null"]` and
+///   `anyOf: [{...}, {"type": "null"}]` for `Option<T>` fields. Alibaba Model
+///   Studio's compatible-mode endpoint resolves an argument's type from a
+///   scalar `"type"` only; on the array form it falls back to string and
+///   constrains the model to emit `"0.6"` instead of `0.6`, which then fails
+///   this server's own parameter deserialization. Verified live across
+///   qwen3.8-max, qwen3.7-max/plus and qwen3.6-flash.
+///
+/// Dropping the null branch is lossless: optionality is carried by `required`.
 fn inline_schema_refs(schema: &mut serde_json::Map<String, serde_json::Value>) {
     let defs = match schema.remove("$defs") {
         Some(serde_json::Value::Object(defs)) => defs,
@@ -100,6 +111,7 @@ fn resolve_refs(value: &mut serde_json::Value, defs: &serde_json::Map<String, se
             for nested in obj.values_mut() {
                 resolve_refs(nested, defs);
             }
+            strip_null_variants(obj);
         }
         serde_json::Value::Array(items) => {
             for item in items.iter_mut() {
@@ -107,6 +119,38 @@ fn resolve_refs(value: &mut serde_json::Value, defs: &serde_json::Map<String, se
             }
         }
         _ => {}
+    }
+}
+
+/// Collapse `"type": [T, "null"]` to `T` and `anyOf: [X, {"type": "null"}]` to
+/// `X`, merging the surviving variant into the parent so field-level keys
+/// (description) win over the inlined ones.
+fn strip_null_variants(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    let collapsed_type = obj
+        .get_mut("type")
+        .and_then(|t| t.as_array_mut())
+        .and_then(|types| {
+            types.retain(|t| t.as_str() != Some("null"));
+            (types.len() == 1).then(|| types[0].clone())
+        });
+    if let Some(single) = collapsed_type {
+        obj.insert("type".to_string(), single);
+    }
+
+    for key in ["anyOf", "oneOf"] {
+        let only = obj
+            .get_mut(key)
+            .and_then(|v| v.as_array_mut())
+            .and_then(|variants| {
+                variants.retain(|v| v.get("type").and_then(|t| t.as_str()) != Some("null"));
+                (variants.len() == 1).then(|| variants[0].clone())
+            });
+        if let Some(serde_json::Value::Object(only)) = only {
+            obj.remove(key);
+            for (k, v) in only {
+                obj.entry(k).or_insert(v);
+            }
+        }
     }
 }
 
@@ -894,4 +938,56 @@ impl ServerHandler for McpServer {
     // clients) implementations handle peer info and version negotiation; the
     // session scope/role is applied per-request in `ensure_session_context`,
     // which covers both eras.
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    /// Every advertised tool schema must carry a scalar `"type"` and no
+    /// null-only `anyOf` branch. Qwen models (verified on qwen3.8-max /
+    /// qwen3.7-max / qwen3.6-flash via Alibaba Model Studio) fail to resolve a
+    /// non-scalar type and emit that argument as a string — `"0.6"` instead of
+    /// `0.6` — which this server then rejects while deserializing parameters.
+    #[test]
+    fn tool_schemas_carry_scalar_types() {
+        fn check(value: &serde_json::Value, path: &str) {
+            match value {
+                serde_json::Value::Object(obj) => {
+                    assert!(
+                        !obj.get("type").is_some_and(|t| t.is_array()),
+                        "non-scalar type at {}: {}",
+                        path,
+                        value
+                    );
+                    for key in ["anyOf", "oneOf"] {
+                        if let Some(serde_json::Value::Array(variants)) = obj.get(key) {
+                            assert!(
+                                !variants
+                                    .iter()
+                                    .any(|v| v.get("type").and_then(|t| t.as_str()) == Some("null")),
+                                "null variant in {} at {}",
+                                key,
+                                path
+                            );
+                        }
+                    }
+                    for (k, v) in obj {
+                        check(v, &format!("{}.{}", path, k));
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        check(item, path);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for tool in tools_full() {
+            let schema = serde_json::Value::Object(tool.input_schema.as_ref().clone());
+            check(&schema, &tool.name);
+        }
+    }
 }
