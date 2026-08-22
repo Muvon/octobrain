@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.11.1] - 2026-08-22
+
+### 📋 Release Summary
+
+This release improves MCP tool schemas and clarifies knowledge tool URL restrictions (d4268122, 26b2d382). Additionally, system dependencies have been updated to ensure stability (dd25097e).
+
+
+### 🔧 Improvements & Optimizations
+
+- **mcp**: strip null variants from tool schemas `d4268122`
+- **mcp**: clarify knowledge tool url restrictions `26b2d382`
+
+### 🔄 Other Changes
+
+1 maintenance, dependency, and tooling update not listed individually.
+
 ## [0.11.0] - 2026-08-17
 
 ### 📋 Release Summary

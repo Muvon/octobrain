@@ -5063,7 +5063,7 @@ dependencies = [
 
 [[package]]
 name = "octobrain"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "alloc-stdlib",
  "anyhow",
