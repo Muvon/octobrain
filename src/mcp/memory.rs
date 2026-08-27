@@ -316,33 +316,41 @@ impl MemoryProvider {
         Ok(msg)
     }
 
+    /// Parse the `query` argument: a string, an array of strings, or a stringified
+    /// JSON array. Some models (e.g. GLM via Z.ai) stringify the array for
+    /// union-typed params — `"[\"a\", \"b\"]"` — which would otherwise be searched
+    /// as one literal query.
+    fn parse_query_arg(value: Option<&Value>) -> Result<Vec<String>, McpError> {
+        match value {
+        Some(Value::String(s)) => match serde_json::from_str::<Vec<String>>(s) {
+            Ok(queries) if !queries.is_empty() => Ok(queries),
+            _ => Ok(vec![s.clone()]),
+        },
+        Some(Value::Array(arr)) => {
+            let queries: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+
+            if queries.is_empty() {
+                return Err(McpError::invalid_params(
+                    "Invalid query array: must contain at least one non-empty string",
+                    "remember",
+                ));
+            }
+
+            Ok(queries)
+        }
+        _ => Err(McpError::invalid_params(
+            "Missing required parameter 'query': must be a string or array of strings describing what to search for",
+            "remember",
+        )),
+    }
+    }
     /// Execute the remember tool
     pub async fn execute_remember(&self, arguments: &Value) -> Result<String, McpError> {
-        // Parse queries - handle both string and array inputs
-        let queries: Vec<String> = match arguments.get("query") {
-            Some(Value::String(s)) => vec![s.clone()],
-            Some(Value::Array(arr)) => {
-                let queries: Vec<String> = arr
-                    .iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect();
-
-                if queries.is_empty() {
-                    return Err(McpError::invalid_params(
-                        "Invalid query array: must contain at least one non-empty string",
-                        "remember",
-                    ));
-                }
-
-                queries
-            }
-            _ => {
-                return Err(McpError::invalid_params(
-					"Missing required parameter 'query': must be a string or array of strings describing what to search for",
-					"remember"
-				));
-            }
-        };
+        // Parse queries - handle string, array, and stringified-array inputs
+        let queries: Vec<String> = parse_query_arg(arguments.get("query"))?;
 
         // Validate queries
         if queries.len() > MAX_QUERIES {
@@ -656,5 +664,44 @@ fn parse_memory_types(arguments: &Value) -> Option<Vec<MemoryType>> {
         None
     } else {
         Some(types)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_query_arg;
+    use serde_json::json;
+
+    #[test]
+    fn stringified_array_is_unwrapped() {
+        let args = json!({ "query": "[\"volt energy purchase\", \"energy buying API\"]" });
+        let queries = parse_query_arg(args.get("query")).expect("parses");
+        assert_eq!(queries, vec!["volt energy purchase", "energy buying API"]);
+    }
+
+    #[test]
+    fn plain_string_stays_single_query() {
+        let args = json!({ "query": "volt energy purchase" });
+        let queries = parse_query_arg(args.get("query")).expect("parses");
+        assert_eq!(queries, vec!["volt energy purchase"]);
+    }
+
+    #[test]
+    fn array_passes_through() {
+        let args = json!({ "query": ["a first query", "a second query"] });
+        let queries = parse_query_arg(args.get("query")).expect("parses");
+        assert_eq!(queries, vec!["a first query", "a second query"]);
+    }
+
+    #[test]
+    fn missing_query_is_rejected() {
+        let args = json!({});
+        assert!(parse_query_arg(args.get("query")).is_err());
+    }
+
+    #[test]
+    fn empty_array_is_rejected() {
+        let args = json!({ "query": [] });
+        assert!(parse_query_arg(args.get("query")).is_err());
     }
 }
