@@ -1014,7 +1014,14 @@ mod schema_tests {
     #[test]
     fn tool_annotations_survive_strip_variants() {
         // (name, read_only, destructive, idempotent, open_world)
-        let expected: &[(&str, Option<bool>, Option<bool>, Option<bool>, Option<bool>)] = &[
+        type AnnotationRow = (
+            &'static str,
+            Option<bool>,
+            Option<bool>,
+            Option<bool>,
+            Option<bool>,
+        );
+        let expected: &[AnnotationRow] = &[
             (
                 "memorize",
                 Some(false),
