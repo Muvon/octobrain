@@ -315,38 +315,6 @@ impl MemoryProvider {
         }
         Ok(msg)
     }
-
-    /// Parse the `query` argument: a string, an array of strings, or a stringified
-    /// JSON array. Some models (e.g. GLM via Z.ai) stringify the array for
-    /// union-typed params — `"[\"a\", \"b\"]"` — which would otherwise be searched
-    /// as one literal query.
-    fn parse_query_arg(value: Option<&Value>) -> Result<Vec<String>, McpError> {
-        match value {
-        Some(Value::String(s)) => match serde_json::from_str::<Vec<String>>(s) {
-            Ok(queries) if !queries.is_empty() => Ok(queries),
-            _ => Ok(vec![s.clone()]),
-        },
-        Some(Value::Array(arr)) => {
-            let queries: Vec<String> = arr
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect();
-
-            if queries.is_empty() {
-                return Err(McpError::invalid_params(
-                    "Invalid query array: must contain at least one non-empty string",
-                    "remember",
-                ));
-            }
-
-            Ok(queries)
-        }
-        _ => Err(McpError::invalid_params(
-            "Missing required parameter 'query': must be a string or array of strings describing what to search for",
-            "remember",
-        )),
-    }
-    }
     /// Execute the remember tool
     pub async fn execute_remember(&self, arguments: &Value) -> Result<String, McpError> {
         // Parse queries - handle string, array, and stringified-array inputs
@@ -664,6 +632,38 @@ fn parse_memory_types(arguments: &Value) -> Option<Vec<MemoryType>> {
         None
     } else {
         Some(types)
+    }
+}
+
+/// Parse the `query` argument: a string, an array of strings, or a stringified
+/// JSON array. Some models (e.g. GLM via Z.ai) stringify the array for
+/// union-typed params — `"[\"a\", \"b\"]"` — which would otherwise be searched
+/// as one literal query.
+fn parse_query_arg(value: Option<&Value>) -> Result<Vec<String>, McpError> {
+    match value {
+        Some(Value::String(s)) => match serde_json::from_str::<Vec<String>>(s) {
+            Ok(queries) if !queries.is_empty() => Ok(queries),
+            _ => Ok(vec![s.clone()]),
+        },
+        Some(Value::Array(arr)) => {
+            let queries: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+
+            if queries.is_empty() {
+                return Err(McpError::invalid_params(
+                    "Invalid query array: must contain at least one non-empty string",
+                    "remember",
+                ));
+            }
+
+            Ok(queries)
+        }
+        _ => Err(McpError::invalid_params(
+            "Missing required parameter 'query': must be a string or array of strings describing what to search for",
+            "remember",
+        )),
     }
 }
 
