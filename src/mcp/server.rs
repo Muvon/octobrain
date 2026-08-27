@@ -772,8 +772,14 @@ pub struct KnowledgeParams {
 impl McpServer {
     #[tool(
         name = "memorize",
-        description = "Store information, insights, or context in memory. Call remember first to avoid duplicates. Set source='user_confirmed' for user-stated facts (importance 0.8-1.0), 'agent_inferred' for AI conclusions (0.3-0.6). Skip transient state or things easily re-derived.\n\nUse related_to[] to link the new memory to existing ones in the same call. Relationship types: related_to, depends_on, supersedes, similar, conflicts, implements, extends, achieves, closes.\n\nKnowledge updates: when a new fact replaces or corrects an existing memory (a value changed, a decision was reversed), memorize the new fact with related_to=[{target_id: <old_id>, relationship_type: 'supersedes'}]. Retrieval then ranks the current fact above the outdated one, which stays queryable for history. remember first to find the old_id.\n\nGoal workflow:\n1. memorize a 'goal' type memory for the task — captures intent\n2. For each contributing memory: memorize with related_to=[{target_id: goal_id, relationship_type: 'achieves'}]\n3. When the task closes: memorize the completion / lesson-learned note with related_to=[{target_id: goal_id, relationship_type: 'closes'}]. This triggers automatic consolidation — your closing memo becomes the consolidated parent, all Achieves sources transition to Consolidated state with dampened importance (still queryable for audit). Importance of the closing memo is bumped to max(sources) * 1.1. No separate consolidate call needed.\n\nglobal=true (only available when session scope is locked): stores the memory in the shared global scope instead of the locked project scope. Use this for cross-project facts — user preferences, personal habits, universal conventions, tool choices — things that apply regardless of which project is active. Do NOT use global for project-specific knowledge."
-        annotations(title = "Memorize", destructive_hint = false, open_world_hint = false)
+        description = "Store information, insights, or context in memory. Call remember first to avoid duplicates. Set source='user_confirmed' for user-stated facts (importance 0.8-1.0), 'agent_inferred' for AI conclusions (0.3-0.6). Skip transient state or things easily re-derived.\n\nUse related_to[] to link the new memory to existing ones in the same call. Relationship types: related_to, depends_on, supersedes, similar, conflicts, implements, extends, achieves, closes.\n\nKnowledge updates: when a new fact replaces or corrects an existing memory (a value changed, a decision was reversed), memorize the new fact with related_to=[{target_id: <old_id>, relationship_type: 'supersedes'}]. Retrieval then ranks the current fact above the outdated one, which stays queryable for history. remember first to find the old_id.\n\nGoal workflow:\n1. memorize a 'goal' type memory for the task — captures intent\n2. For each contributing memory: memorize with related_to=[{target_id: goal_id, relationship_type: 'achieves'}]\n3. When the task closes: memorize the completion / lesson-learned note with related_to=[{target_id: goal_id, relationship_type: 'closes'}]. This triggers automatic consolidation — your closing memo becomes the consolidated parent, all Achieves sources transition to Consolidated state with dampened importance (still queryable for audit). Importance of the closing memo is bumped to max(sources) * 1.1. No separate consolidate call needed.\n\nglobal=true (only available when session scope is locked): stores the memory in the shared global scope instead of the locked project scope. Use this for cross-project facts — user preferences, personal habits, universal conventions, tool choices — things that apply regardless of which project is active. Do NOT use global for project-specific knowledge.",
+        annotations(
+            title = "Memorize",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn memorize(
         &self,
@@ -802,7 +808,7 @@ impl McpServer {
 
     #[tool(
         name = "remember",
-        description = "Semantic search over stored memories. Call before memorize to avoid duplicates, and at task start to load context. Results include 1-hop graph neighbors automatically. Prefer 2-5 related query terms for broader coverage. Results show [CONFIRMED]/[INFERRED] trust labels. For temporal questions (\"last week\", \"in May\"), set created_after/created_before (ISO-8601) to scope the time window — you know today's date, so compute the bounds."
+        description = "Semantic search over stored memories. Call before memorize to avoid duplicates, and at task start to load context. Results include 1-hop graph neighbors automatically. Prefer 2-5 related query terms for broader coverage. Results show [CONFIRMED]/[INFERRED] trust labels. For temporal questions (\"last week\", \"in May\"), set created_after/created_before (ISO-8601) to scope the time window — you know today's date, so compute the bounds.",
         annotations(title = "Remember", read_only_hint = true, open_world_hint = false)
     )]
     async fn remember(
@@ -825,8 +831,14 @@ impl McpServer {
 
     #[tool(
         name = "forget",
-        description = "Permanently delete memories. Irreversible — requires confirm=true. Use memory_id for single deletion, or query+filters for bulk removal. Don't forget memories just because they're old — importance decay handles that. Only delete when information is wrong or superseded."
-        annotations(title = "Forget", destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+        description = "Permanently delete memories. Irreversible — requires confirm=true. Use memory_id for single deletion, or query+filters for bulk removal. Don't forget memories just because they're old — importance decay handles that. Only delete when information is wrong or superseded.",
+        annotations(
+            title = "Forget",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn forget(
         &self,
@@ -845,10 +857,10 @@ impl McpServer {
 
     #[tool(
         name = "knowledge",
-        description = "Knowledge base with five commands. The 'source' parameter (when used) ALWAYS refers to a SINGLE FILE or URL — never a directory; passing a directory path is an error. URLs are fetched anonymously — public documentation and information pages only, never API endpoints that need credentials (GitHub Actions logs, private repos, etc. return 403; use the platform's own CLI for those). 'search': semantic search across indexed content — provide source (single URL or file) to auto-index on-the-fly, omit to search all indexed sources. 'store': save raw text under a unique key (session-scoped, auto-cleaned) — error if key exists, delete first to replace. 'delete': remove stored content by key. 'read': fetch and return the FULL text content of a single URL or file — use ONLY as a last resort when search results are insufficient; prefer 'search' for targeted retrieval. 'match': search indexed content by regex pattern (like grep) — returns matching lines only; prefer 'search' for semantic queries, use 'match' for exact string/regex patterns. Supported file types: .html, .txt, .md, .pdf, .docx."
+        description = "Knowledge base with five commands. The 'source' parameter (when used) ALWAYS refers to a SINGLE FILE or URL — never a directory; passing a directory path is an error. URLs are fetched anonymously — public documentation and information pages only, never API endpoints that need credentials (GitHub Actions logs, private repos, etc. return 403; use the platform's own CLI for those). 'search': semantic search across indexed content — provide source (single URL or file) to auto-index on-the-fly, omit to search all indexed sources. 'store': save raw text under a unique key (session-scoped, auto-cleaned) — error if key exists, delete first to replace. 'delete': remove stored content by key. 'read': fetch and return the FULL text content of a single URL or file — use ONLY as a last resort when search results are insufficient; prefer 'search' for targeted retrieval. 'match': search indexed content by regex pattern (like grep) — returns matching lines only; prefer 'search' for semantic queries, use 'match' for exact string/regex patterns. Supported file types: .html, .txt, .md, .pdf, .docx.",
         // Mixed commands: `delete` mutates stored content and URL fetch
         // reaches the open world — spec defaults kept deliberately.
-        annotations(title = "Knowledge", destructive_hint = true, open_world_hint = true)
+        annotations(title = "Knowledge", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
     async fn knowledge(
         &self,
