@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.12.0] - 2026-08-29
+
+### 📋 Release Summary
+
+Added MCP tool annotations and verification coverage, while improving existing query handling and tool descriptions for a clearer, more consistent experience (671deac4, ee02a0bc, 1f3561d6, 07fa5d08, 51da279d). Updated the README with CLI features and setup guidance, along with refreshed dependency versions and lockfile updates (f4a78c87, 5d688f19, e0797172, 354842e6).
+
+
+### ✨ New Features & Enhancements
+
+- **mcp**: add tool annotations and verification test `671deac4`
+
+### 🔧 Improvements & Optimizations
+
+- **mcp**: move parse_query_arg to standalone function `ee02a0bc`
+- **mcp**: improve query argument parsing in memory tool `1f3561d6`
+- **mcp**: introduce AnnotationRow type in tests `51da279d`
+- **mcp**: update tool annotations and descriptions `07fa5d08`
+
+### 📚 Documentation & Examples
+
+- **readme**: document CLI features and setup `f4a78c87`
+
+### 🔄 Other Changes
+
+3 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.11.1] - 2026-08-22
 
 ### 📋 Release Summary
