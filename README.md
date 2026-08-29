@@ -5,8 +5,23 @@
 [![Crates.io](https://img.shields.io/crates/v/octobrain.svg)](https://crates.io/crates/octobrain)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org/)
+[![CI](https://github.com/Muvon/octobrain/actions/workflows/ci.yml/badge.svg)](https://github.com/Muvon/octobrain/actions/workflows/ci.yml)
 
 _MCP Registry: `mcp-name: io.github.Muvon/octobrain`_
+
+## Table of Contents
+- [Why Octobrain?](#why-octobrain)
+- [Quick Start](#quick-start)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Features](#features)
+- [Benchmarks](#benchmarks)
+- [Configuration](#configuration)
+- [Memory Types](#memory-types)
+- [MCP Integration](#mcp-integration)
+- [Storage Locations](#storage-locations)
+- [Contributing](#contributing)
+- [License](#license)
 
 **Octobrain** gives your AI assistant a long-term memory. Store code insights, architecture decisions, bug fixes, and knowledge — then retrieve them with semantic search in future sessions. Works as a CLI tool or as an MCP server for integration with Claude Desktop and other AI tools.
 
@@ -58,6 +73,18 @@ cargo build --release
 ./target/release/octobrain --help
 ```
 
+### Docker
+
+```bash
+docker pull ghcr.io/muvon/octobrain:latest
+```
+
+### Homebrew (macOS/Linux)
+
+```bash
+brew install muvon/tap/octobrain
+```
+
 ### Feature Flags
 
 Octobrain supports multiple embedding providers:
@@ -77,6 +104,12 @@ cargo build --release
 cargo build --no-default-features --release
 ```
 
+### Shell Completions
+
+```bash
+make install-completions  # bash, zsh, fish
+```
+
 For API-based embeddings, set the appropriate environment variable:
 - `VOYAGE_API_KEY` for Voyage AI
 - `OPENAI_API_KEY` for OpenAI
@@ -88,6 +121,10 @@ For API-based embeddings, set the appropriate environment variable:
 ### Memory Management
 
 Store and retrieve insights, decisions, and context:
+
+All `memory` subcommands accept global flags:
+- `--scope <string>` — Override project scope (default: auto-detected from Git remote)
+- `--role <string>` — Filter by role (e.g. "developer", "reviewer")
 
 ```bash
 # Store a memory
@@ -121,6 +158,18 @@ octobrain memory update <id> --title "New Title" --add-tags "new-tag"
 
 # Delete a memory
 octobrain memory forget --memory-id <id>
+
+# Get memories relevant to the current Git commit
+octobrain memory current-commit
+
+# Show memory statistics
+octobrain memory stats
+
+# Clean up old/low-importance memories
+octobrain memory cleanup
+
+# ⚠️ Delete ALL memory data
+octobrain memory clear-all --yes
 ```
 
 ### Memory Consolidation
@@ -166,6 +215,9 @@ Index and search web content, docs, and files:
 # Index a URL
 octobrain knowledge index https://docs.rs/tokio/latest/tokio/
 
+# Index a local file (.txt, .md, .pdf, .docx, .html)
+octobrain knowledge index ./docs/architecture.md
+
 # Search knowledge base
 octobrain knowledge search "how to handle async tasks"
 
@@ -194,6 +246,27 @@ octobrain knowledge delete https://example.com/docs
 octobrain knowledge delete-stored "meeting-notes"
 ```
 
+### Knowledge Boxes
+
+Import and sync git-backed knowledge bundles scoped to your projects:
+
+```bash
+# Import a remote git repo as a knowledge box
+octobrain box import https://github.com/org/docs-repo.git
+
+# Import at global scope (visible in every project)
+octobrain box import https://github.com/org/docs-repo.git --global
+
+# Pull and re-index all subscribed boxes + local .box/ directories
+octobrain box sync
+
+# List subscribed boxes
+octobrain box list
+
+# Remove a box
+octobrain box remove github.com/org/docs-repo
+```
+
 ### MCP Server
 
 Run as an MCP server for integration with Claude Desktop and other AI tools:
@@ -208,6 +281,8 @@ octobrain mcp --bind 0.0.0.0:12345
 
 **Available MCP Tools:**
 
+| Tool | Description |
+|------|-------------|
 | `memorize` | Store memories with metadata; optional `related_to` for inline relationships |
 | `remember` | Semantic search with filters; returns 1-hop graph neighbors |
 | `forget` | Delete memories (requires confirmation) |
@@ -218,14 +293,14 @@ See [MCP Integration](#mcp-integration) for Claude Desktop setup.
 
 - **Semantic Search** — Find memories by meaning using vector embeddings, not exact keyword matches
 - **Hybrid Search** — Combines BM25 full-text search with vector similarity for better results
-- **Reranking Support** — Optional cross-encoder reranking for 20-35% accuracy improvement
+- **Reranking Support** — Pluggable cross-encoder reranking stage (provider-dependent)
 - **Auto-Linking** — Automatically connects semantically similar memories (Zettelkasten-style)
 - **Temporal Decay** — Ebbinghaus forgetting curve for importance management
 - **Knowledge Indexing** — Ingest URLs, PDFs, docs for retrieval
 - **Project Scoping** — Isolate memories per Git project or share across projects
 - **Role Filtering** — Tag memories by role (developer, reviewer, etc.)
 - **Query Expansion (HyDE-lite)** — Pseudo-relevance feedback for +10-30% recall on long-tail queries
-- **MCP Protocol** — Full MCP 2025-03-26 compliance for AI tool integration
+- **MCP Protocol** — Full MCP 2026-07-28 compliance for AI tool integration
 
 ## Benchmarks
 
@@ -244,6 +319,8 @@ Retrieval quality of octobrain's knowledge system on standard [BEIR](https://git
 
 > Scope: this measures the **ranking** layer (embedding + BM25 fusion + reranking). BEIR passages are pre-chunked, so octobrain's chunking strategy is not exercised here.
 
+> ⚠️ **Reranker status:** The cross-encoder reranker is currently a no-op with fastembed models (byte-identical results to hybrid-only). Rerank is excluded from the numbers above pending investigation. See [`benches/README.md`](benches/README.md#findings) for details.
+
 Reproduce (downloads the datasets, builds a release binary, runs fully offline):
 
 ```bash
@@ -253,6 +330,8 @@ cd benches && bash scripts/run_retrieval.sh
 ## Configuration
 
 Configuration is stored in `~/.local/share/octobrain/config.toml`. All options have sensible defaults.
+
+Override the config location with `OCTOBRAIN_CONFIG_PATH=/path/to/config.toml`.
 
 ### Key Settings
 
@@ -357,7 +436,7 @@ Data is stored in platform-specific directories:
 | Linux | `~/.local/share/octobrain/` or `$XDG_DATA_HOME/octobrain/` |
 | Windows | `%APPDATA%\octobrain\` |
 
-Project-specific memories are isolated by Git remote URL hash.
+Project-specific memories are isolated by normalized Git remote URL (e.g., `github.com/org/repo`).
 
 ## Contributing
 
@@ -365,9 +444,10 @@ Contributions are welcome! Please:
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Run `cargo clippy` and fix all warnings
-4. Run `cargo test --no-default-features`
-5. Submit a pull request
+3. Run `cargo fmt --all` to format code
+4. Run `cargo clippy` and fix all warnings
+5. Run `cargo test --no-default-features`
+6. Submit a pull request
 
 ### Development Setup
 
