@@ -110,6 +110,12 @@ test-all-features: ## Run tests with all features
 	cargo test --verbose --no-default-features --features "fastembed,huggingface"
 	@echo "$(GREEN)Tests passed with all features$(NC)"
 
+
+.PHONY: coverage
+coverage: ## Generate test coverage report (cargo-llvm-cov)
+	@echo "$(YELLOW)Generating coverage report...$(NC)"
+	cargo llvm-cov --summary-only --all-features --ignore-filename-regex '_tests\.rs$$'
+	@echo "$(GREEN)Coverage report generated$(NC)"
 .PHONY: check-features
 check-features: ## Check all feature combinations
 	@echo "$(YELLOW)Checking all feature combinations...$(NC)"
