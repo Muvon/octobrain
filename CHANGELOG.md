@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.12.1] - 2026-08-31
+
+### 📋 Release Summary
+
+Security was improved by addressing 16 vulnerable dependencies in the project’s requirements (8eab1210). Supporting libraries and the Rust toolchain were updated, and coverage reporting was refined as part of ongoing maintenance (f370bd4c, b848ceaf, 13a8ce67, 11ca6871, 3416d59d).
+
+
+### 🔧 Improvements & Optimizations
+
+- **toolchain**: update Rust version to 1.98.0 `b848ceaf`
+- **coverage**: configure coverage reporting `13a8ce67`
+
+### 🐛 Bug Fixes & Stability
+
+- **security**: fix(deps): 16 vulnerable dependencies in requirements.txt `8eab1210`
+
+### 🔄 Other Changes
+
+3 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.12.0] - 2026-08-29
 
 ### 📋 Release Summary
