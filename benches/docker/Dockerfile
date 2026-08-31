@@ -6,7 +6,7 @@
 # symbols that ort.pyke.io's prebuilt ONNX Runtime is linked against, causing
 # link-time failures on octobrain's release build with default (fastembed +
 # huggingface) features. Trixie matches what the prebuilt expects.
-FROM rust:1.95-trixie AS rust-builder
+FROM rust:1.98-trixie AS rust-builder
 
 RUN apt-get update -qq && \
     apt-get install -y -qq --no-install-recommends \

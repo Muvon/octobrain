@@ -29,7 +29,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        rust: [1.95.0]
+        rust: [1.98.0]
         include:
           - os: ubuntu-latest
             rust: beta
@@ -159,7 +159,7 @@ jobs:
             --user 0:0 \
             -v "$(pwd):/workspace" \
             -w /workspace \
-            rust:1.95.0-alpine3.22 \
+            rust:1.98.0-alpine3.22 \
             sh -c '
               set -eu
               apk add --no-cache \
@@ -181,14 +181,14 @@ jobs:
               export CPLUS_INCLUDE_PATH=/tmp/include
 
               # Pin the toolchain to the exact alpine-musl triple. rust-toolchain.toml
-              # specifies just channel = 1.95.0; on later rustup invocations after the
+              # specifies just channel = 1.98.0; on later rustup invocations after the
               # ORT/apk steps, rustup re-detects the host and has been observed to
               # flip from aarch64-unknown-linux-musl to -gnu, then auto-installs a
               # fresh gnu toolchain with no musl rust-std, producing the rustc error
               # E0463 "cannot find crate for core".
               # RUSTUP_TOOLCHAIN with an explicit triple overrides the toml resolution
               # and bypasses host re-detection.
-              export RUSTUP_TOOLCHAIN=1.95.0-${{ matrix.target }}
+              export RUSTUP_TOOLCHAIN=1.98.0-${{ matrix.target }}
 
               rustup target add ${{ matrix.target }}
 
