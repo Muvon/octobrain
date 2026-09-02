@@ -5061,7 +5061,7 @@ dependencies = [
 
 [[package]]
 name = "octobrain"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "alloc-stdlib",
  "anyhow",

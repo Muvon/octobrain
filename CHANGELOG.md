@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.12.2] - 2026-09-02
+
+### 📋 Release Summary
+
+This release updates octolib and its transitive dependencies to newer versions (e5638614). No new user-facing features are included.
+
+
+### 🔄 Other Changes
+
+1 maintenance, dependency, and tooling update not listed individually.
+
 ## [0.12.1] - 2026-08-31
 
 ### 📋 Release Summary
