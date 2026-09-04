@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.13.0] - 2026-09-04
+
+### 📋 Release Summary
+
+This release adds a maintenance command for managing memory state (3df1717f). Memory maintenance is more reliable, with improved access-write handling and retry behavior (19c1429f), alongside optimized release builds and updated dependencies (4752013d, c1d4300d).
+
+
+### ✨ New Features & Enhancements
+
+- **memory**: expose maintenance command `3df1717f`
+
+### 🔧 Improvements & Optimizations
+
+- **toolchain**: remove Rust toolchain pin `2a4289cf`
+
+### 🐛 Bug Fixes & Stability
+
+- **memory**: throttle access writes and retry maintenance `19c1429f`
+
+### 🔄 Other Changes
+
+2 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.12.2] - 2026-09-02
 
 ### 📋 Release Summary
