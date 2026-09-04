@@ -66,6 +66,16 @@ impl MemoryProvider {
         })
     }
 
+    /// Await an in-flight LanceDB maintenance pass. Called on server shutdown so
+    /// compaction started at session start isn't dropped when the runtime goes away.
+    pub async fn drain_pending_maintenance(&self) {
+        self.memory_manager
+            .lock()
+            .await
+            .drain_pending_maintenance()
+            .await;
+    }
+
     /// Execute the memorize tool with enhanced error handling
     pub async fn execute_memorize(&self, arguments: &Value) -> Result<String, McpError> {
         // Validate input parameters exist before processing

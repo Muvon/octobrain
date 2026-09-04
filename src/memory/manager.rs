@@ -185,9 +185,7 @@ impl MemoryManager {
         }
 
         // Table-wide maintenance (compaction + version prune + index refresh).
-        // Marker is shared, not per-scope, because it optimizes the whole DB;
-        // written before the pass runs so concurrent session startups within
-        // the same window don't stampede compaction.
+        // Marker is shared, not per-scope, because it optimizes the whole DB.
         let maintenance_marker = db_path.join(".last_maintenance");
         let due = std::fs::read_to_string(&maintenance_marker)
             .ok()
@@ -195,16 +193,15 @@ impl MemoryManager {
             .map(|t| (Utc::now() - t.with_timezone(&Utc)).num_hours() >= MAINTENANCE_INTERVAL_HOURS)
             .unwrap_or(true);
         if due {
-            // Claim the slot with a short lease rather than a full interval. The pass is
-            // fire-and-forget in a process that exits with the MCP session, so a run that
-            // gets killed mid-compaction must retry within the hour — stamping the full
-            // interval up front made a killed pass look successful and let fragmentation
-            // compound for another day.
+            // Claim the slot with a short lease, not a full interval. The pass runs on a
+            // background task in a process that exits with the MCP session, so a run that
+            // gets cut short must retry within the hour — stamping the full interval up
+            // front made a killed pass look successful and let fragmentation compound.
             let lease =
                 Utc::now() - Duration::hours(MAINTENANCE_INTERVAL_HOURS - MAINTENANCE_RETRY_HOURS);
             std::fs::write(&maintenance_marker, lease.to_rfc3339()).ok();
             let store = manager.store.clone();
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 match store.run_maintenance().await {
                     Ok(()) => {
                         std::fs::write(&maintenance_marker, Utc::now().to_rfc3339()).ok();
@@ -212,6 +209,9 @@ impl MemoryManager {
                     Err(e) => tracing::warn!("Startup LanceDB maintenance failed: {}", e),
                 }
             });
+            // Registered, not detached: the MCP server awaits this on shutdown, otherwise
+            // the runtime drops mid-compaction and the pass never finishes.
+            *manager.pending_maintenance.lock().await = Some(handle);
         }
 
         Ok(manager)
@@ -560,10 +560,21 @@ impl MemoryManager {
         self.drain_pending_maintenance().await;
     }
 
-    /// Await an in-flight maintenance task if one is running. Called from
-    /// `drain_pending_auto_links` so retrieval after a `consolidate_goal`
-    /// sees a fully-merged index.
-    async fn drain_pending_maintenance(&self) {
+    /// Run a full maintenance pass and wait for it. Unlike the background passes this
+    /// is synchronous, so `octobrain memory maintenance` can compact a badly fragmented
+    /// table without a session teardown cutting it off part-way.
+    pub async fn run_maintenance(&self) -> Result<()> {
+        // Startup already spawned a pass if one was due; let it finish rather than
+        // compacting the same table from two tasks at once.
+        self.drain_pending_maintenance().await;
+        self.store.run_maintenance().await
+    }
+
+    /// Await an in-flight maintenance task if one is running, so a compaction pass is
+    /// not dropped when the runtime shuts down. Also called from
+    /// `drain_pending_auto_links` so retrieval after a `consolidate_goal` sees a
+    /// fully-merged index.
+    pub async fn drain_pending_maintenance(&self) {
         let handle = {
             let mut guard = self.pending_maintenance.lock().await;
             guard.take()

@@ -34,7 +34,12 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, warn};
+
+/// How long stdio shutdown waits for an in-flight maintenance pass before giving up.
+/// Long enough for a normal incremental compaction, short enough that a wedged pass
+/// can't strand the process after the client is gone.
+const MAINTENANCE_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Tools with scope+role stripped — built once.
 static TOOLS_LOCKED: OnceLock<Vec<Tool>> = OnceLock::new();
@@ -466,6 +471,7 @@ impl McpServer {
     /// Run server using stdio transport
     pub async fn run_stdio(self) -> Result<()> {
         let transport = rmcp::transport::stdio();
+        let memory = self.memory.clone();
 
         self.serve(transport)
             .await
@@ -473,6 +479,23 @@ impl McpServer {
             .waiting()
             .await
             .map_err(|e| anyhow::anyhow!("MCP server task failed: {}", e))?;
+
+        // Returning here drops the runtime and every task on it. A LanceDB compaction
+        // pass takes far longer than the client's disconnect, so without this wait it is
+        // killed part-way every session and the table never gets compacted. Capped so a
+        // stuck pass can't keep the process alive indefinitely.
+        let provider = memory.lock().await.clone();
+        if let Some(provider) = provider {
+            if tokio::time::timeout(
+                MAINTENANCE_SHUTDOWN_GRACE,
+                provider.drain_pending_maintenance(),
+            )
+            .await
+            .is_err()
+            {
+                warn!("maintenance still running at shutdown; abandoning it");
+            }
+        }
 
         Ok(())
     }

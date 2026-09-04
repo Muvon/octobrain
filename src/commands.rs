@@ -487,6 +487,12 @@ async fn execute_memory_command(
             print!("{}", stats.format());
         }
 
+        MemoryCommand::Maintenance => {
+            println!("Compacting memory tables (this can take a while on a large database)...");
+            memory_manager.run_maintenance().await?;
+            println!("✅ Maintenance complete.");
+        }
+
         MemoryCommand::Cleanup { yes } => {
             if !yes {
                 print!("Are you sure you want to clean up old memories? (y/N): ");

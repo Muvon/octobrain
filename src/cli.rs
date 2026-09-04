@@ -244,6 +244,11 @@ pub enum MemoryCommand {
     /// Show memory statistics
     Stats,
 
+    /// Compact the memory tables and refresh indices. Blocks until finished — run this
+    /// when searches have slowed down; an MCP session is too short-lived to complete a
+    /// compaction of a badly fragmented table.
+    Maintenance,
+
     /// Clean up old memories
     Cleanup {
         /// Confirm cleanup without prompting
