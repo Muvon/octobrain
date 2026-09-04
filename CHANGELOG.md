@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.13.1] - 2026-09-04
+
+### 📋 Release Summary
+
+Updated locked dependencies for improved project reliability (6d3afb44). CI now cancels superseded runs, helping changes receive feedback more efficiently (ea678c31).
+
+
+### 🔧 Improvements & Optimizations
+
+- **workflow**: cancel superseded CI runs `ea678c31`
+
+### 🔄 Other Changes
+
+1 maintenance, dependency, and tooling update not listed individually.
+
 ## [0.13.0] - 2026-09-04
 
 ### 📋 Release Summary
