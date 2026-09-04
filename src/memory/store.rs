@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use std::sync::Arc;
 
 // Arrow imports
@@ -35,6 +35,11 @@ use lancedb::{
 /// Based on: https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf
 /// "Experiments indicate that k = 60 was near-optimal"
 const RRF_K: f32 = 60.0;
+
+/// Minimum age of `last_accessed` before a search bumps it again. Access stats only
+/// feed decay scoring, so hourly granularity is plenty — and it keeps the read path
+/// from turning every search into a write.
+const ACCESS_BUMP_MIN_INTERVAL_MINUTES: i64 = 60;
 
 /// Rocchio query expansion: `alpha * query + (1 - alpha) * centroid`, then L2-normalized.
 ///
@@ -803,10 +808,19 @@ impl MemoryStore {
     /// Uses LanceDB partial column update so the embedding column is never rewritten —
     /// no re-embedding cost on the read path.
     async fn record_accesses_best_effort(&self, results: &[MemorySearchResult]) {
-        if results.is_empty() {
+        // Throttled: a bump is a LanceDB UPDATE, which appends a fragment and writes
+        // one deletion file per fragment it touches. Unthrottled, every search
+        // fragments the table further, and the next search then has more fragments to
+        // scan — the table degrades until search is pure file-open overhead.
+        let cutoff = Utc::now() - Duration::minutes(ACCESS_BUMP_MIN_INTERVAL_MINUTES);
+        let ids: Vec<&str> = results
+            .iter()
+            .filter(|r| r.memory.metadata.decay.last_accessed < cutoff)
+            .map(|r| r.memory.id.as_str())
+            .collect();
+        if ids.is_empty() {
             return;
         }
-        let ids: Vec<&str> = results.iter().map(|r| r.memory.id.as_str()).collect();
         if let Err(e) = self.record_accesses(&ids).await {
             tracing::warn!("record_accesses failed (search still succeeded): {}", e);
         }

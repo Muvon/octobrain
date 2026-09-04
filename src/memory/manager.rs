@@ -43,6 +43,10 @@ const MAINTENANCE_EVERY_N_WRITES: usize = 250;
 /// fragmentation and old versions accrue unbounded across sessions.
 const MAINTENANCE_INTERVAL_HOURS: i64 = 24;
 
+/// How soon a maintenance pass that never reported success is retried. Keeps a run
+/// killed by session teardown from blocking the next attempt for a full interval.
+const MAINTENANCE_RETRY_HOURS: i64 = 1;
+
 /// RRF constant for fusing per-query result lists in `remember_multi` — the same
 /// k=60 the in-store hybrid fusion uses. Rank-based fusion is scale-free, so it
 /// avoids mixing the incomparable weighted-sum magnitudes of per-query searches.
@@ -191,11 +195,21 @@ impl MemoryManager {
             .map(|t| (Utc::now() - t.with_timezone(&Utc)).num_hours() >= MAINTENANCE_INTERVAL_HOURS)
             .unwrap_or(true);
         if due {
-            std::fs::write(&maintenance_marker, Utc::now().to_rfc3339()).ok();
+            // Claim the slot with a short lease rather than a full interval. The pass is
+            // fire-and-forget in a process that exits with the MCP session, so a run that
+            // gets killed mid-compaction must retry within the hour — stamping the full
+            // interval up front made a killed pass look successful and let fragmentation
+            // compound for another day.
+            let lease =
+                Utc::now() - Duration::hours(MAINTENANCE_INTERVAL_HOURS - MAINTENANCE_RETRY_HOURS);
+            std::fs::write(&maintenance_marker, lease.to_rfc3339()).ok();
             let store = manager.store.clone();
             tokio::spawn(async move {
-                if let Err(e) = store.run_maintenance().await {
-                    tracing::warn!("Startup LanceDB maintenance failed: {}", e);
+                match store.run_maintenance().await {
+                    Ok(()) => {
+                        std::fs::write(&maintenance_marker, Utc::now().to_rfc3339()).ok();
+                    }
+                    Err(e) => tracing::warn!("Startup LanceDB maintenance failed: {}", e),
                 }
             });
         }
