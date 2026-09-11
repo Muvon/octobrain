@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.13.2] - 2026-09-11
+
+### 📋 Release Summary
+
+Updated dependency versions and lockfiles to keep the project’s configuration current and builds reproducible (0831d14e, 191cde5b).
+
+
+### 🔄 Other Changes
+
+2 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.13.1] - 2026-09-04
 
 ### 📋 Release Summary
