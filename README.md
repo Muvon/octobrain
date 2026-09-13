@@ -352,8 +352,8 @@ Override the config location with `OCTOBRAIN_CONFIG_PATH=/path/to/config.toml`.
 ```toml
 [embedding]
 # Local models (no API key, runs on CPU, model auto-downloaded on first use)
-model = "fastembed:nomic-ai/nomic-embed-text-v1.5-quantized"           # Default: 768-dim, 8192-ctx, ~137MB weights
-model = "fastembed:nomic-ai/nomic-embed-text-v1.5"                      # Same model, fp32 (~550MB weights)
+model = "fastembed:Qdrant/all-MiniLM-L6-v2-onnx"                       # Default: 384-dim quantized, ~125MB resident
+model = "fastembed:nomic-ai/nomic-embed-text-v1.5"                      # 768-dim, 8192-ctx, ~550MB weights, highest quality
 model = "fastembed:BAAI/bge-small-en-v1.5"                              # 384-dim, ~62 MTEB, fast + good quality
 model = "fastembed:sentence-transformers/all-MiniLM-L6-v2-quantized"  # Smallest (~22MB), fastest
 model = "fastembed:BAAI/bge-base-en-v1.5"                              # Larger (~440MB), higher quality

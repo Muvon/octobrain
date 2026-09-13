@@ -8,14 +8,14 @@ version = 1
 # Embedding model for memory operations
 # Format: provider:model
 #
-# Default is a LOCAL quantized model (no API key, runs on CPU; ~137MB resident
-# weights vs ~550MB fp32 — same 768-dim vectors, minor accuracy trade-off):
-#   fastembed:nomic-ai/nomic-embed-text-v1.5-quantized  (768-dim, 8192-ctx)
+# Default is a LOCAL quantized model (no API key, runs on CPU, ~125MB resident
+# — 7x lighter than fp32 models; 384-dim, good starter quality/speed):
+#   fastembed:Qdrant/all-MiniLM-L6-v2-onnx  (22MB weights, 384-dim)
 #
 # Other local options (fastembed, no API key):
-#   fastembed:nomic-ai/nomic-embed-text-v1.5            (fp32, ~550MB weights)
+#   fastembed:nomic-ai/nomic-embed-text-v1.5             (768-dim, 8192-ctx, ~550MB — highest quality)
+#   fastembed:nomic-ai/nomic-embed-text-v1.5-quantized   (768-dim, ~137MB weights)
 #   fastembed:BAAI/bge-small-en-v1.5  — 384-dim, ~62 MTEB, fast + good quality
-#   fastembed:sentence-transformers/all-MiniLM-L6-v2-quantized  (22MB, fastest)
 #   fastembed:BAAI/bge-base-en-v1.5  (768-dim, ~440MB)
 #   fastembed:intfloat/multilingual-e5-small  (384-dim, multilingual)
 #
@@ -24,7 +24,7 @@ version = 1
 #   openai:text-embedding-3-small    OPENAI_API_KEY
 #   google:text-embedding-004        GOOGLE_API_KEY
 #   jina:jina-embeddings-v3          JINA_API_KEY
-model = "fastembed:nomic-ai/nomic-embed-text-v1.5-quantized"
+model = "fastembed:Qdrant/all-MiniLM-L6-v2-onnx"
 
 # Batch size for embedding generation (number of texts to process at once)
 # Default: 32
