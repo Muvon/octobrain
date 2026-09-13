@@ -28,7 +28,7 @@ use super::types::{
     MemorySource, MemoryState, MemoryType, RelationshipType,
 };
 use crate::config::Config;
-use crate::embedding::{create_embedding_provider_from_parts, parse_provider_model};
+use crate::embedding::create_embedding_provider;
 
 /// How often (in memorize calls) to run LanceDB maintenance.
 /// 250 is small enough that the unindexed delta never gets large enough to
@@ -128,10 +128,9 @@ impl MemoryManager {
         let sleep_consolidation_marker =
             db_path.join(format!(".sleep_consolidation_{}", scope_safe));
 
-        // Create embedding provider using model from config
-        let model_string = &config.embedding.model;
-        let (provider, model) = parse_provider_model(model_string)?;
-        let embedding_provider = create_embedding_provider_from_parts(&provider, &model).await?;
+        // Create embedding provider using model from config. Local models are
+        // cached per model string, so this shares weights with any other manager.
+        let embedding_provider = create_embedding_provider(config).await?;
 
         let store = MemoryStore::new(
             db_path.to_string_lossy().as_ref(),

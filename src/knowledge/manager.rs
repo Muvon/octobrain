@@ -54,7 +54,7 @@ impl KnowledgeManager {
             search_config: config.search.clone(),
             store,
             chunker,
-            embedding_provider: Arc::from(embedding_provider),
+            embedding_provider,
             embedding_timeout_secs: config.embedding.timeout_secs,
         })
     }
@@ -108,14 +108,6 @@ impl KnowledgeManager {
         top_n: usize,
     ) -> Vec<KnowledgeSearchResult> {
         let cfg = &self.search_config.reranker;
-        let (provider, model) = match cfg.model.split_once(':') {
-            Some(pm) => pm,
-            None => {
-                tracing::warn!("Invalid reranker model '{}'; skipping rerank", cfg.model);
-                results.truncate(top_n);
-                return results;
-            }
-        };
 
         let documents: Vec<String> = results
             .iter()
@@ -127,7 +119,22 @@ impl KnowledgeManager {
             })
             .collect();
 
-        let rerank_fut = octolib::reranker::rerank(query, documents, provider, model, Some(top_n));
+        // Cached provider (crate::reranker) — local reranker weights load once
+        // per process instead of on every search. Invalid model string takes
+        // the same graceful-degradation path as a rerank failure. Truncation
+        // = true matches the previous octolib::reranker::rerank behavior.
+        let reranker = match crate::reranker::create_rerank_provider(cfg.model.as_str()).await {
+            Ok(reranker) => reranker,
+            Err(e) => {
+                tracing::warn!(
+                    "Knowledge reranker failed ({}); falling back to hybrid ranking",
+                    e
+                );
+                results.truncate(top_n);
+                return results;
+            }
+        };
+        let rerank_fut = reranker.rerank(query, documents, Some(top_n), true);
         let outcome = if cfg.timeout_secs == 0 {
             rerank_fut.await
         } else {

@@ -12,18 +12,50 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
+
+use octolib::embedding::types::EmbeddingProviderType;
+
 // Re-export embedding functionality from octolib
 pub use octolib::embedding::{
     parse_provider_model, provider::create_embedding_provider_from_parts,
     provider::EmbeddingProvider, types::InputType,
 };
 
-/// Create embedding provider from config
+/// Local model providers cached per model string: their ONNX weights stay
+/// resident (hundreds of MB), so all managers in the process share one instance.
+static LOCAL_PROVIDER_CACHE: LazyLock<Mutex<HashMap<String, Arc<dyn EmbeddingProvider>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Create embedding provider from config.
+///
+/// In-process model providers (fastembed, huggingface) are cached for the
+/// process lifetime, keyed by the configured model string — the memory and
+/// knowledge managers then share one loaded model instead of one each.
+/// API-backed providers are lightweight and constructed fresh every time.
 pub async fn create_embedding_provider(
     config: &crate::config::Config,
-) -> anyhow::Result<Box<dyn EmbeddingProvider>> {
+) -> anyhow::Result<Arc<dyn EmbeddingProvider>> {
     let (provider, model) = parse_provider_model(&config.embedding.model)?;
-    create_embedding_provider_from_parts(&provider, &model).await
+
+    let is_local = matches!(
+        &provider,
+        EmbeddingProviderType::FastEmbed | EmbeddingProviderType::HuggingFace
+    );
+    if !is_local {
+        let boxed = create_embedding_provider_from_parts(&provider, &model).await?;
+        return Ok(Arc::from(boxed));
+    }
+
+    let key = config.embedding.model.clone();
+    if let Some(cached) = LOCAL_PROVIDER_CACHE.lock().unwrap().get(&key) {
+        return Ok(cached.clone());
+    }
+    let built = Arc::from(create_embedding_provider_from_parts(&provider, &model).await?);
+    // Keep the first instance if two constructions raced; the loser is dropped.
+    let mut cache = LOCAL_PROVIDER_CACHE.lock().unwrap();
+    Ok(cache.entry(key).or_insert(built).clone())
 }
 
 /// Generate embeddings for a single text, with optional timeout from config.

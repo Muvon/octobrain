@@ -76,16 +76,6 @@ impl RerankerIntegration {
             return Ok(results);
         }
 
-        // Parse provider and model from config
-        let (provider, model) = if let Some((p, m)) = self.config.model.split_once(':') {
-            (p, m)
-        } else {
-            return Err(anyhow::anyhow!(
-                "Invalid reranker model format: {}",
-                self.config.model
-            ));
-        };
-
         // Convert memories to documents for reranking
         let documents: Vec<String> = results
             .iter()
@@ -99,8 +89,22 @@ impl RerankerIntegration {
             })
             .collect();
 
-        // Call octolib reranker with optional timeout
-        let rerank_fut = octolib::reranker::rerank(query, documents, provider, model, Some(top_n));
+        // Cached provider (crate::reranker): local rerankers keep ~GB-scale
+        // weights resident and octolib's one-shot rerank() reloads them on
+        // every call — load once, share across searches. Construction failure
+        // degrades exactly like a rerank failure below: the search still works.
+        let reranker = match crate::reranker::create_rerank_provider(&self.config.model).await {
+            Ok(reranker) => reranker,
+            Err(e) => {
+                tracing::warn!("Reranker failed ({}); falling back to hybrid ranking", e);
+                results.truncate(top_n);
+                return Ok(results);
+            }
+        };
+
+        // Rerank with optional timeout (truncation = true matches the previous
+        // octolib::reranker::rerank behavior)
+        let rerank_fut = reranker.rerank(query, documents, Some(top_n), true);
         let rerank_outcome = if self.config.timeout_secs == 0 {
             rerank_fut.await
         } else {
