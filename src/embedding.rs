@@ -17,6 +17,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use octolib::embedding::types::EmbeddingProviderType;
 
+mod shared;
+
 // Re-export embedding functionality from octolib
 pub use octolib::embedding::{
     parse_provider_model, provider::create_embedding_provider_from_parts,
@@ -52,7 +54,18 @@ pub async fn create_embedding_provider(
     if let Some(cached) = LOCAL_PROVIDER_CACHE.lock().unwrap().get(&key) {
         return Ok(cached.clone());
     }
-    let built = Arc::from(create_embedding_provider_from_parts(&provider, &model).await?);
+
+    // Local models: elect one process on this machine to load the weights
+    // and serve inference; the rest attach as clients over loopback (see
+    // `shared`). Only the elected process constructs the real provider.
+    let built: Arc<dyn EmbeddingProvider> = match shared::join(&key, provider.clone(), &model).await
+    {
+        Ok(shared) => Arc::new(shared),
+        Err(e) => {
+            tracing::warn!("shared embedding service unavailable ({e:#}); loading a private model");
+            Arc::from(create_embedding_provider_from_parts(&provider, &model).await?)
+        }
+    };
     // Keep the first instance if two constructions raced; the loser is dropped.
     let mut cache = LOCAL_PROVIDER_CACHE.lock().unwrap();
     Ok(cache.entry(key).or_insert(built).clone())
