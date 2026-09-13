@@ -67,7 +67,7 @@ struct Endpoint {
 /// First line the server sends after a client authenticates: the model facts
 /// a client needs but cannot derive without the weights.
 #[derive(Serialize, Deserialize, Clone)]
-struct Hello {
+pub(super) struct Hello {
     revision: Option<String>,
     dim: usize,
 }
@@ -103,6 +103,7 @@ pub(super) async fn join(
     model: &str,
 ) -> Result<SharedProvider> {
     let dir = crate::storage::get_system_storage_dir()?.join("run");
+    let model = model.to_string();
     let build: BuildInner = Box::new(move || {
         Box::pin(async move { create_embedding_provider_from_parts(&provider, &model).await })
     });
@@ -141,7 +142,7 @@ async fn join_in(dir: &Path, model_key: &str, build: BuildInner) -> Result<Share
                 // We own it: load the weights, then start answering. On load
                 // failure, drop the claim so the next process re-elects
                 // instead of discovering a dead port forever.
-                let inner = match build().await {
+                let inner: Arc<dyn EmbeddingProvider> = match build().await {
                     Ok(p) => Arc::from(p),
                     Err(e) => {
                         remove_if_unchanged(&path, &endpoint);
@@ -168,7 +169,7 @@ async fn join_in(dir: &Path, model_key: &str, build: BuildInner) -> Result<Share
                     token: existing.token.clone(),
                 };
                 match client.connect().await {
-                    Ok(hello) => {
+                    Ok((_reader, hello)) => {
                         tracing::debug!(
                             "embedding service: using '{model_key}' owned by pid {} (no local weights)",
                             existing.pid
@@ -296,7 +297,7 @@ impl EmbeddingProvider for SharedProvider {
 /// per request, so a dead owner surfaces as a connect error instead of a
 /// silently broken pooled socket.
 #[derive(Clone)]
-struct Client {
+pub(super) struct Client {
     addr: SocketAddr,
     token: String,
 }
@@ -415,7 +416,7 @@ fn serve(
             let hello = hello.clone();
             let inner = Arc::clone(&inner);
             tokio::spawn(async move {
-                if let Err(e) = handle(stream, &token, &hello, &inner).await {
+                if let Err(e) = handle(stream, &token, &hello, inner.as_ref()).await {
                     tracing::debug!("embedding service: client dropped: {e}");
                 }
             });

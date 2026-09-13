@@ -71,20 +71,20 @@ pub fn extract_text_from_docx(bytes: &[u8]) -> Result<String> {
             Ok(quick_xml::events::Event::Start(ref e))
             | Ok(quick_xml::events::Event::Empty(ref e)) => {
                 let local = e.local_name();
-                if local.as_ref() == b"t" {
+                if local.as_ref() == "t" {
                     in_text_node = true;
-                } else if local.as_ref() == b"p" && !output.is_empty() {
+                } else if local.as_ref() == "p" && !output.is_empty() {
                     // New paragraph
                     output.push('\n');
-                } else if local.as_ref() == b"br" || local.as_ref() == b"tab" {
+                } else if local.as_ref() == "br" || local.as_ref() == "tab" {
                     output.push(' ');
                 }
             }
-            Ok(quick_xml::events::Event::End(ref e)) if e.local_name().as_ref() == b"t" => {
+            Ok(quick_xml::events::Event::End(ref e)) if e.local_name().as_ref() == "t" => {
                 in_text_node = false;
             }
             Ok(quick_xml::events::Event::Text(ref e)) if in_text_node => {
-                if let Ok(text) = e.decode() {
+                if let Ok(text) = quick_xml::escape::unescape(e) {
                     output.push_str(&text);
                 }
             }
