@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.14.0] - 2026-09-14
+
+### 📋 Release Summary
+
+This release adds support for sharing embedding models across processes (931ba69d). It improves local model handling by updating the default model and caching providers, along with refreshed dependencies for improved maintenance and compatibility (39eac2d7, 6704baaf, 125123e9, 5f4aafb1, 8c5f952b).
+
+
+### ✨ New Features & Enhancements
+
+- **embedding**: share models across processes `931ba69d`
+
+### 🔧 Improvements & Optimizations
+
+- **providers**: cache local model providers `6704baaf`
+
+### 🐛 Bug Fixes & Stability
+
+- **embedding**: switch default model locally `39eac2d7`
+
+### 🔄 Other Changes
+
+3 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.13.2] - 2026-09-11
 
 ### 📋 Release Summary
