@@ -103,9 +103,8 @@ alloc-stdlib = "=0.2.2"
 brotli-decompressor = "=5.0.1"
 
 # Local dep for testing
-# Switched to the local checkout until the FastEmbed -quantized validation fix
-# ships in a released octolib (then flip back to the version dep).
-octolib = { path = "../octolib", default-features = false, features = ["embeddings", "reranker"] }
+octolib = { version = "0.38.0", default-features = false, features = ["embeddings", "reranker"] }
+# octolib = { path = "../octolib", default-features = false, features = ["embeddings", "reranker"] }
 
 # Replace esaxx-rs 0.1.10 (transitive: tokenizers/esaxx_fast → esaxx-rs/cpp).
 # Upstream build.rs hardcodes cc::Build::static_crt(true), forcing /MT on
