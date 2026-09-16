@@ -1,6 +1,6 @@
 # Octobrain benchmark targets. All work happens in Docker — no host install.
 # Usage from this directory (benches/):
-#   cp .env.example .env && edit  # set OPENAI_BASE_URL, OPENAI_API_KEY, models
+#   cp .env.example .env && edit  # set AGENT_BASE_URL, AGENT_API_KEY, models
 #   make build                      # build the bench image once
 #   make longmemeval                # run the full LongMemEval pipeline
 #   make smoke                      # 5-question smoke test against your config

@@ -1,20 +1,27 @@
 # Octobrain — Development Guide
 
-Standalone memory management system for AI context and conversation state. Exposes a CLI (`octobrain`) and an MCP server. Built in Rust (1.95, edition 2021) using LanceDB for vector storage, `rmcp` for MCP protocol, and `octolib` for embedding/reranking. Apache-2.0, by Muvon Un Limited. v0.6.1.
+Standalone memory management system for AI context and conversation state. Exposes a CLI (`octobrain`) and an MCP server. Built in Rust (1.95, edition 2021) using LanceDB for vector storage, `rmcp` for MCP protocol, and `octolib` for embedding/reranking. Apache-2.0, by Muvon Un Limited. v0.14.0.
 
 ## Project Structure
 
 ```
 src/
   main.rs              — CLI entry point, dispatches to commands.rs
-  cli.rs               — Clap structs: Commands, MemoryCommand, KnowledgeCommand
-  commands.rs          — execute(), execute_memory_command(), execute_knowledge_command()
-  config.rs            — Config structs + load() (strict: all fields must exist in TOML)
-  storage.rs           — XDG-compliant storage path resolution
-  embedding.rs         — Embedding provider factory (octolib)
+  cli.rs               — Clap structs: Commands, MemoryCommand, KnowledgeCommand, BoxCommand
+  commands.rs          — execute(), execute_memory_command(), execute_knowledge_command(), execute_box_command()
+  config.rs            — Config structs + load() (strict: every field must exist in TOML); versioned migration via octolib's MigrationPlan
+  storage.rs           — XDG-compliant storage path resolution (shared memory DB, boxes dir, config path)
+  embedding.rs         — Embedding provider factory (octolib) + shared-service election
+  embedding/
+    shared.rs          — Cross-process model sharing: one process loads the weights and serves inference over loopback
+    shared_tests.rs    — Election/attach tests
+  reranker.rs          — Rerank provider factory with a per-process model cache (memory + knowledge share it)
+  sql.rs               — Shared LanceDB SQL literal escaping (used by both stores)
+  arrow_helpers.rs     — Typed Arrow RecordBatch column accessors (string/f32/i32/list/timestamp)
   vector_optimizer.rs  — LanceDB index optimization logic
   constants.rs         — Project-wide constants
   lib.rs               — Public re-exports
+  bin/beir_bench.rs    — BEIR retrieval benchmark binary (feature `bench`)
   memory/
     types.rs           — Memory, MemoryQuery, MemoryRelationship, MemoryConfig, MemoryDecay, etc.
     manager.rs         — MemoryManager: memorize/remember/forget, auto-link, consolidation, sleep
@@ -24,11 +31,12 @@ src/
     git_utils.rs       — Git commit/remote detection
     reranker_integration.rs — Wraps octolib reranker for MemorySearchResult re-ranking
     mod.rs             — Module exports
-    *_tests.rs         — hybrid, decay, auto_link, role, hyde, goal, sleep test files
+    *_tests.rs         — hybrid, decay, auto_link, role, hyde, goal, sleep, fusion test files
   knowledge/
     types.rs           — KnowledgeChunk, KnowledgeSearchResult, IndexResult, etc.
-    manager.rs         — KnowledgeManager: index, search, read, match, store, delete
+    manager.rs         — KnowledgeManager: index, search, read, match, store, delete, boxes
     store.rs           — LanceDB vector storage for knowledge chunks
+    boxes.rs           — Knowledge boxes: subscription registry, git plumbing, scope math, taxonomy walk
     chunker.rs         — Parent/child chunking for web content
     content.rs         — URL/file fetching and content extraction
     formatting.rs      — CLI output formatting
@@ -60,7 +68,10 @@ config-templates/
 | Goal consolidation | `src/memory/manager.rs` → `consolidate_goal()` |
 | Sleep consolidation | `src/memory/manager.rs` → `sleep_consolidate()`, `maybe_sleep_consolidate()` |
 | Stale-ref cleanup | `src/memory/manager.rs` → `cleanup_stale_references()` |
-| Embedding provider | `src/embedding.rs` → `octolib` crate |
+| Embedding provider | `src/embedding.rs` → `octolib` crate; `src/embedding/shared.rs` for cross-process model sharing |
+| Rerank provider | `src/reranker.rs` (cache) + `src/memory/reranker_integration.rs` (result mapping) |
+| Knowledge boxes | `src/knowledge/boxes.rs` (registry/git/scope) → `src/knowledge/manager.rs` → `import_box()` / `sync_boxes()` |
+| Config migration | `src/config.rs` → `plan()` + `config-templates/default.toml` (bump `version` in the same commit as a new step) |
 | Storage paths | `src/storage.rs` |
 | LanceDB index tuning | `src/vector_optimizer.rs` |
 | CLI output formatting | `src/memory/formatting.rs` (memory), `src/knowledge/formatting.rs` (knowledge) |
@@ -71,7 +82,7 @@ config-templates/
 - **Config comes from TOML** — `Config::load()` is strict: every field must exist in the installed `config.toml`. Rust structs have Default impls for construction only; `config-templates/default.toml` is the source of truth for what ships.
 - **`--no-default-features` always** — default features enable `fastembed`/`huggingface` (heavy local models). All dev/CI invocations use `--no-default-features`.
 - **Full Apache license header** — every `.rs` file starts with the full 13-line Apache-2.0 license block (copy from any existing `.rs` file). Copyright year: 2026.
-- **No `unwrap()` / `expect()`** — use `?` and `Result<T>` everywhere except test code.
+- **No `unwrap()` / `expect()`** — use `?` and `Result<T>` everywhere except test code. Accepted exceptions are all proven invariants: `Mutex` lock poisoning on the local provider/reranker caches (`src/embedding.rs`, `src/reranker.rs`), `components.pop()` guarded by a length match (`src/storage.rs`), a `static` JSON schema (`src/mcp/server.rs`), a `Vec` popped after a length filter (`src/embedding/shared.rs`), a query text guaranteed by `validate()` (`src/memory/store.rs`), `serde_json::to_string_pretty` on owned structs (`src/memory/formatting.rs`), and two `KnowledgeStore` sites — the LanceDB URI built from the internally constructed DB path, and a `StringArray` downcast matching `build_schema` (`src/knowledge/store.rs`). New code needs `?` or a documented invariant.
 - **No blocking in async** — no `std::thread::sleep`, no sync I/O in async contexts.
 - **Minimal new deps** — reuse what's in `Cargo.toml` before adding anything.
 
@@ -135,7 +146,7 @@ let q = MemoryQuery {
 
 **Decay:** Ebbinghaus curve — `decay_half_life_days = 90`, floor `min_importance_threshold = 0.05`. Each access boosts importance (`access_boost_factor = 1.2`).
 
-**Auto-maintenance:** background `JoinHandle` fires every `MAINTENANCE_EVERY_N_WRITES = 250` writes — runs `run_maintenance()` (index optimization + compaction). Non-blocking.
+**Auto-maintenance:** two triggers, both non-blocking. A background `JoinHandle` fires every `MAINTENANCE_EVERY_N_WRITES = 250` writes within one long-lived process; a marker-gated startup pass (`MAINTENANCE_INTERVAL_HOURS = 24`, claimed with a 1-hour lease so a killed run retries) covers short-lived MCP sessions that never reach 250 writes. Both run `run_maintenance()` (compaction + version prune + index refresh). `octobrain memory maintenance` runs the same pass synchronously.
 
 ### Goal Consolidation
 ```rust
@@ -170,6 +181,14 @@ async fn my_tool(&self, Parameters(params): Parameters<MyToolParams>) -> Result<
 }
 ```
 
+### Knowledge Boxes
+A box is a git folder of source documents that octobrain re-embeds locally and makes searchable, scoped exactly like memories. Boxes ship source files only — never vectors. Rows carry a `box://<box_id>/<rel>` source URI and are pruned when a file leaves the box.
+
+- **Remote boxes** — subscribed in a registry under the boxes dir; `import_box()` clones and indexes, `sync_boxes()` pulls + smart-reindexes every subscription.
+- **Org auto-probe** — `sync_boxes()` probes the conventional `<host>/<org>/octobrain-box` repo per project scope, with results cached in the registry.
+- **Project-local boxes** — a repo's `.box/` directory (`PROJECT_BOX_DIR`) is discovered from the working tree on every sync, never recorded in the registry.
+- **Visibility** — `visible_scopes()` binds a box to the active scope and its ancestors; global boxes carry an empty scope.
+
 ### Knowledge Chunking
 Parent/child model: large content → parent sections stored as `parent_content` (returned to user), split into child chunks (embedded + matched). Config: `chunk_size = 1200`, `chunk_overlap = 300`.
 
@@ -203,7 +222,7 @@ Parent/child model: large content → parent sections stored as `parent_content`
 
 **Transport modes:**
 - Stdio (default): `octobrain mcp`
-- HTTP: `octobrain mcp --bind=host:port` (streamable HTTP, MCP 2025-03-26)
+- HTTP: `octobrain mcp --bind=host:port` (streamable HTTP, MCP 2026-07-28)
 
 **Session locking:** `project`/`role` injected at `initialize` handshake via experimental capabilities; once `session.locked == true`, per-call overrides are stripped before reaching providers.
 
@@ -215,13 +234,15 @@ Parent/child model: large content → parent sections stored as `parent_content`
 
 - **macOS/Linux**: `~/.local/share/octobrain/` (XDG; respects `$XDG_DATA_HOME`)
 - **Windows**: `%APPDATA%\octobrain\`
-- Project-scoped data lives in subdirs keyed by SHA-256 of Git remote URL
-- Config: `~/.local/share/octobrain/config.toml` (copied from `config-templates/default.toml` on first run)
+- **Shared memory database** — all projects share one LanceDB under the storage dir; rows are scoped by the `scope` column, not by per-project directories. Project isolation comes from the normalized Git remote URL stored in that column.
+- **Knowledge boxes**: subscription registry and cloned box working trees live under `<storage>/boxes/`
+- **Shared embedding service**: endpoint files live under `<storage>/run/`
+- Config: `~/.local/share/octobrain/config.toml` (copied from the embedded `config-templates/default.toml` on first run, then migrated one version at a time)
 
 ### Quality criteria
 - Zero clippy warnings under `--no-default-features`
 - All test files in `src/memory/*_tests.rs` pass
-- No `unwrap()` / `expect()` outside `*_tests.rs`
+- No `unwrap()` / `expect()` outside `*_tests.rs` (see the accepted invariant exceptions under Core Principles)
 - Every new `.rs` file carries the full Apache-2.0 license header (13 lines)
 - `config-templates/default.toml` updated alongside any `src/config.rs` change
 

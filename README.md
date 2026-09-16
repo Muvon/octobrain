@@ -105,12 +105,6 @@ cargo build --release
 cargo build --no-default-features --release
 ```
 
-### Shell Completions
-
-```bash
-make install-completions  # bash, zsh, fish
-```
-
 For API-based embeddings, set the appropriate environment variable:
 - `VOYAGE_API_KEY` for Voyage AI
 - `OPENAI_API_KEY` for OpenAI
@@ -169,6 +163,9 @@ octobrain memory stats
 # Clean up old/low-importance memories
 octobrain memory cleanup
 
+# Compact tables and refresh indices (run when searches slow down)
+octobrain memory maintenance
+
 # ⚠️ Delete ALL memory data
 octobrain memory clear-all --yes
 ```
@@ -178,7 +175,7 @@ octobrain memory clear-all --yes
 Close a goal and fold all its contributing memories into a consolidated summary:
 
 ```bash
-# Consolidate a goal (all Achieves-link sources get archived)
+# Consolidate a goal (Achieves-link sources → Consolidated state, importance dampened)
 octobrain memory consolidate <goal-id> --summary "Final summary"
 
 # Sleep consolidation: auto-cluster recent similar memories
@@ -305,7 +302,7 @@ See [MCP Integration](#mcp-integration) for Claude Desktop setup.
 
 ## Benchmarks
 
-Retrieval quality of octobrain's knowledge system on standard [BEIR](https://github.com/beir-cellar/beir) datasets — **nDCG@10**, fully local, no LLM judge, using the default local embedder `bge-small-en-v1.5` (384-dim, 33M params). Each corpus passage is indexed through octobrain's real retrieval path and scored against the official qrels (metrics reproduce `pytrec_eval`).
+Retrieval quality of octobrain's knowledge system on standard [BEIR](https://github.com/beir-cellar/beir) datasets — **nDCG@10**, fully local, no LLM judge, using the harness's default embedder `bge-small-en-v1.5` (384-dim, 33M params). Each corpus passage is indexed through octobrain's real retrieval path and scored against the official qrels (metrics reproduce `pytrec_eval`).
 
 | Dataset | octobrain vector | octobrain hybrid | BM25¹ | bge-small-en-v1.5² |
 |---|---|---|---|---|
@@ -330,7 +327,7 @@ cd benches && bash scripts/run_retrieval.sh
 
 ## Configuration
 
-Configuration is stored in `~/.local/share/octobrain/config.toml`. All options have sensible defaults.
+Configuration is stored in `~/.local/share/octobrain/config.toml`. The template written on first run defines every option with sensible defaults, but loading is strict — a field you delete by hand causes startup to fail rather than falling back to a default.
 
 Override the config location with `OCTOBRAIN_CONFIG_PATH=/path/to/config.toml`.
 
@@ -338,7 +335,7 @@ Override the config location with `OCTOBRAIN_CONFIG_PATH=/path/to/config.toml`.
 
 | Section | Option | Default | Description |
 |---------|--------|---------|-------------|
-| `[embedding]` | `model` | `fastembed:nomic-ai/nomic-embed-text-v1.5` | Embedding model (provider:model format). Default is a local fastembed model — no API key, runs on CPU. |
+| `[embedding]` | `model` | `fastembed:Qdrant/all-MiniLM-L6-v2-onnx` | Embedding model (provider:model format). Default is a local fastembed model — no API key, runs on CPU. |
 | `[search]` | `similarity_threshold` | `0.3` | Minimum relevance (0.0-1.0) |
 | `[search.hybrid]` | `enabled` | `true` | Enable BM25 + vector fusion |
 | `[search.reranker]` | `enabled` | `true` | Enable cross-encoder reranking |
@@ -346,6 +343,18 @@ Override the config location with `OCTOBRAIN_CONFIG_PATH=/path/to/config.toml`.
 | `[memory]` | `max_memories` | `10000` | Maximum stored memories |
 | `[memory]` | `auto_linking_enabled` | `true` | Auto-connect similar memories |
 | `[knowledge]` | `chunk_size` | `1200` | Characters per chunk |
+| `[embedding]` | `batch_size` | `32` | Texts embedded per batch |
+| `[embedding]` | `timeout_secs` | `30` | Embedding call timeout (0 = no timeout) |
+| `[search]` | `max_results` | `50` | Hard ceiling on results from any search |
+| `[search.reranker]` | `model` | `fastembed:jina-reranker-v2-base-multilingual` | Cross-encoder model |
+| `[search.reranker]` | `top_k_candidates` | `50` | Candidates retrieved before reranking |
+| `[search.hyde]` | `top_k` | `3` | Neighbors averaged for the centroid |
+| `[search.hyde]` | `alpha` | `0.5` | Blend weight on the original query embedding |
+| `[memory]` | `max_search_results` | `50` | Default page size when no limit is given |
+| `[memory]` | `sleep_consolidation_enabled` | `true` | Lazy sleep consolidation on manager init |
+| `[memory]` | `sleep_consolidation_interval_hours` | `24` | Hours between sleep-consolidation passes |
+| `[knowledge]` | `outdating_days` | `15` | Days before indexed content is reindexed on search |
+| `[knowledge]` | `max_results` | `5` | Results returned from knowledge search |
 
 ### Embedding Providers
 

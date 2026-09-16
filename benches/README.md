@@ -40,7 +40,7 @@ to rebuild), and writes `results.jsonl` + per-scenario logs under
 `benches/results/retrieval-<ts>/`. Env knobs: `BEIR_SCENARIOS` (subset of
 `vector,hybrid,hybrid+rerank`), `BEIR_RERANK_DEPTH` (default 50), `RERANK_MODEL`.
 
-Latest numbers (bge-small-en-v1.5, default config) are in the top-level
+Latest numbers (bge-small-en-v1.5, the harness default embedder) are in the top-level
 [README Benchmarks section](../README.md#benchmarks).
 
 ### Findings
@@ -66,7 +66,7 @@ cd benches
 
 # 1. Configure your LLM endpoint.
 cp .env.example .env
-$EDITOR .env                # set OPENAI_BASE_URL, OPENAI_API_KEY, AGENT_MODEL, JUDGE_MODEL
+$EDITOR .env                # set AGENT_BASE_URL, AGENT_API_KEY, AGENT_MODEL, JUDGE_MODEL
 
 # 2. Build the image once (downloads + compiles octobrain in release mode).
 make build
@@ -77,6 +77,11 @@ make smoke
 # 4. Full run.
 make longmemeval
 ```
+
+Other targets: `make tune` (60-question slice spanning all 6 categories, for
+retrieval-knob tuning), `make resume RUN=<results-dir>` (re-score an existing
+`hypothesis.jsonl` without re-running ingest), `make nuke` (full reset — also
+drops datasets and the octobrain DB volume).
 
 Each run writes a timestamped directory under `benches/results/`:
 
@@ -90,28 +95,41 @@ results/longmemeval-2026-05-18T14-23-01Z/
 
 ## Configuration
 
-All knobs live in `.env`:
+All knobs live in `.env` (see `.env.example` for the annotated version):
 
 ```bash
-# OpenAI-compatible endpoint. Examples:
-#   Ollama Cloud:  https://ollama.example.com/v1
-#   Local Ollama:  http://host.docker.internal:11434/v1
-#   OpenAI:        https://api.openai.com/v1
-#   Together:      https://api.together.xyz/v1
-OPENAI_BASE_URL=https://ollama.example.com/v1
-OPENAI_API_KEY=sk-...
+# ─ Chat LLM: agent answers + judge scoring ────────────────────────────────
+# Any OpenAI-compatible endpoint: Ollama Cloud, OpenAI, Together, Groq, etc.
+AGENT_BASE_URL=https://ollama.example.com/v1
+AGENT_API_KEY=sk-...
 
 # Model the agent uses to answer questions from retrieved memory.
-AGENT_MODEL=llama3.3:70b
+AGENT_MODEL=kimi-k2.6
 
 # Model the scorer uses to judge answer correctness.
 # Quality of the judge bottlenecks the whole eval — pick a strong model.
-JUDGE_MODEL=gpt-oss:120b
+JUDGE_MODEL=gpt-4o-mini
 
-# Which LongMemEval variant.
-LONGMEMEVAL_VARIANT=longmemeval_s   # _s, _m, _oracle
+# Judge endpoint and key — both default to OpenAI / the embedding key below.
+# Override only to point the judge at a different OpenAI-compatible endpoint.
+JUDGE_BASE_URL=
+JUDGE_API_KEY=
 
-# Octobrain feature flags during the run.
+# ─ Embedding: matches SOTA paper setups for apples-to-apples comparison ───
+# Mem0, ENGRAM and the leaderboard SOTA holders all use OpenAI's
+# text-embedding-3-small; use the same to compare against published numbers.
+OCTOBRAIN_EMBEDDING_MODEL=openai:text-embedding-3-small
+OCTOBRAIN_EMBEDDING_API_KEY=sk-...
+OCTOBRAIN_EMBEDDING_BASE_URL=   # blank → provider default
+
+# Which LongMemEval variant (filename without .json). Upstream's cleaned
+# release ships three: longmemeval_oracle (no haystack — sanity check),
+# longmemeval_s_cleaned (~115K tokens/instance, cheapest),
+# longmemeval_m_cleaned (~500 sessions, larger).
+LONGMEMEVAL_VARIANT=longmemeval_s_cleaned
+
+# Recorded in meta.json for provenance only. The adapter writes its own
+# octobrain config.toml (HyDE on, reranker off) — that file controls behavior.
 OCTOBRAIN_HYDE_ENABLED=1
 OCTOBRAIN_SLEEP_CONSOLIDATION=1
 
@@ -124,7 +142,7 @@ MAX_QUESTIONS=0
 1. **Build** — `Dockerfile` does a two-stage build: stage 1 compiles
    `octobrain` in release mode (default features: FastEmbed + HuggingFace
    embeddings; no API key needed for embedding). Stage 2 is a slim
-   `python:3.11-slim` with the binary, adapters, and pinned Python deps.
+   `python:3.11-slim-trixie` with the binary, adapters, and pinned Python deps.
 2. **Fetch** — Clones `xiaowu0162/longmemeval` and pulls the dataset
    (idempotent — skipped on re-runs).
 3. **Ingest** — For each instance in the dataset, the adapter spins up
@@ -133,8 +151,8 @@ MAX_QUESTIONS=0
 4. **Answer** — Retrieved memories + question → your configured agent
    model → answer text.
 5. **Score** — Runs upstream's `evaluate_qa.py` with your configured
-   judge model. The OpenAI SDK respects `OPENAI_BASE_URL`, so the same
-   endpoint serves both agent and judge.
+   judge model. The judge hits `JUDGE_BASE_URL` (default: OpenAI) and falls
+   back to `OCTOBRAIN_EMBEDDING_API_KEY` when `JUDGE_API_KEY` is unset.
 6. **Report** — Distilled JSON summary printed at the end + persisted
    alongside the raw artifacts.
 
@@ -171,12 +189,13 @@ The pattern is small:
 
 ## Troubleshooting
 
-- **`octobrain MCP server failed to come up`** — usually a port collision.
-  Change `--bind` in `longmemeval_run.py` or kill the conflicting process.
-- **`OPENAI_BASE_URL must be set`** — you forgot `.env`. `cp .env.example .env`
-  and fill it in.
+- **`AGENT_BASE_URL must be set` / `<MODEL> must be set`** — you forgot `.env`.
+  `cp .env.example .env` and fill it in. The adapter drives octobrain over
+  stdio (no port binding), so a hung run is a crashed child process, not a port
+  collision — check `run.log`.
 - **Judge returns nonsense / 0% scores** — your `JUDGE_MODEL` is too weak.
-  Try a larger model (gpt-oss:120b on Ollama, gpt-4o on OpenAI).
-- **`huggingface-cli` dataset download fails** — manual: download the
-  `longmemeval_s.json` from upstream's release and drop it in
+  Try a larger model (gpt-4o, or a strong model on your endpoint).
+- **Dataset download fails** — the fetch script pulls the three cleaned
+  variants from HuggingFace over `curl`; if it can't reach HF, download
+  `longmemeval_<variant>.json` manually and drop it in
   `/data/bench/longmemeval/data/` (via `docker compose ... shell`).
