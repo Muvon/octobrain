@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.14.1] - 2026-09-18
+
+### 📋 Release Summary
+
+This release improves project guidance, setup instructions, and maintenance documentation for a clearer user experience (00d76317, 6952568d, 444fb8e7). Rust dependencies were refreshed to keep the project current (e56f7a8f).
+
+
+### 📚 Documentation & Examples
+
+- **agents**: consolidate project guidance `00d76317`
+- **project**: clarify setup and maintenance `444fb8e7`
+
+### 🔄 Other Changes
+
+2 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.14.0] - 2026-09-14
 
 ### 📋 Release Summary
