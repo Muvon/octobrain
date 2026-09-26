@@ -19,7 +19,7 @@ use anyhow::Result;
 use rmcp::{
     handler::server::{wrapper::Parameters, ServerHandler},
     model::{
-        Implementation, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
+        CacheScope, Implementation, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
         ServerCapabilities, ServerConfig, Tool,
     },
     schemars::JsonSchema,
@@ -942,6 +942,16 @@ impl McpServer {
 // ServerHandler implementation
 // ============================================================================
 
+/// 2026-07-28 makes `ttlMs` and `cacheScope` required on list results; older
+/// protocol versions don't define them. rmcp's generated `list_tools` sets them,
+/// so the override below must too — a strict 2026-07-28 client (Claude Code's
+/// `server/discover` runtime) rejects the result and loads no tools at all.
+fn supports_cache_hints(context: &RequestContext<RoleServer>) -> bool {
+    context
+        .protocol_version()
+        .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28)
+}
+
 #[tool_handler]
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerConfig {
@@ -972,7 +982,12 @@ impl ServerHandler for McpServer {
         } else {
             tools_full_no_global().clone()
         };
-        Ok(ListToolsResult::with_all_items(tools))
+        let result = ListToolsResult::with_all_items(tools);
+        if !supports_cache_hints(&context) {
+            return Ok(result);
+        }
+        // The schema depends on this client's session capabilities: never shared.
+        Ok(result.with_ttl_ms(0).with_cache_scope(CacheScope::Private))
     }
 
     // The default `initialize` (legacy clients) and `discover` (2026-07-28
