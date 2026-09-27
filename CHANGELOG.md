@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.14.2] - 2026-09-27
+
+### 📋 Release Summary
+
+Modern MCP clients now receive cache hints correctly. MCP handler metadata has been switched to ServerConfig.
+
+### 🔧 Improvements & Optimizations
+
+- **mcp**: switch handler metadata to ServerConfig `aa7c2ff9`
+
+### 🐛 Bug Fixes & Stability
+
+- **mcp**: support cache hints for modern clients `2a369b93`
+
 ## [0.14.1] - 2026-09-18
 
 ### 📋 Release Summary
