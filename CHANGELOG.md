@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.14.3] - 2026-09-27
+
+### 🔧 Improvements & Optimizations
+
+- **dependencies**: update dependency requirements and lockfile `15c98f41`
+
 ## [0.14.2] - 2026-09-27
 
 ### 📋 Release Summary
