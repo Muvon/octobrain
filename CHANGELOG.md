@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.14.5] - 2026-10-06
+
+### 🔧 Improvements & Optimizations
+
+- **dependencies**: update Rust dependencies `1dd8b983`
+
 ## [0.14.4] - 2026-09-30
 
 ### 🔄 Other Changes
