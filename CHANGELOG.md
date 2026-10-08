@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.6] - 2026-10-08
+
+### 🔧 Improvements & Optimizations
+
+- **dependencies**: update locked crate versions `69555d41`
+- **cargo**: enable Metal acceleration by default `79dea71b`
+- **toolchain**: upgrade Rust toolchain to 1.99.0 `372290c2`
+
 ## [0.14.5] - 2026-10-06
 
 ### 🔧 Improvements & Optimizations
