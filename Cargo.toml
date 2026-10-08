@@ -37,9 +37,11 @@ path = "src/bin/beir_bench.rs"
 required-features = ["bench"]
 
 [features]
-default = ["fastembed", "huggingface"]
+default = ["fastembed", "huggingface", "metal"]
 fastembed = ["octolib/fastembed"]
 huggingface = ["octolib/huggingface"]
+# Metal acceleration on macOS; a no-op on other platforms.
+metal = ["octolib/metal"]
 # Compiles the beir_bench binary. No extra deps — uses serde_json + octolib,
 # already pulled in by the library.
 bench = []
