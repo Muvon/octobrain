@@ -715,3 +715,7 @@ mod tests {
         assert!(parse_query_arg(args.get("query")).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "memory_tests.rs"]
+mod scope_tests;

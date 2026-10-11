@@ -1608,3 +1608,7 @@ impl MemoryStats {
         output
     }
 }
+
+#[cfg(test)]
+#[path = "manager_tests.rs"]
+mod tests;

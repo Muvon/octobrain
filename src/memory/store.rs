@@ -263,7 +263,11 @@ impl MemoryStore {
         reranker_integration: Option<RerankerIntegration>,
     ) -> Result<Self> {
         let reranker_integration = std::sync::Mutex::new(reranker_integration);
-        let db = connect(db_path).execute().await?;
+        // Scoped providers share this database and must see each other's global writes.
+        let db = connect(db_path)
+            .read_consistency_interval(std::time::Duration::ZERO)
+            .execute()
+            .await?;
 
         // Get vector dimension from the embedding provider by testing with a short text
         let test_embedding = crate::embedding::generate_embedding(

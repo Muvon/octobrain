@@ -31,6 +31,7 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServiceExt,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
@@ -275,7 +276,7 @@ pub struct SessionState {
     pub session_id: String,
     /// Role is locked (and stripped from schema) when role is present in handshake.
     pub role_locked: bool,
-    /// Scope is locked (and stripped from schema) when git=true OR no local repos.
+    /// Scope is locked for a Git root or a working directory without local repos.
     pub scope_locked: bool,
 }
 
@@ -291,99 +292,127 @@ impl Default for SessionState {
     }
 }
 
+#[derive(Deserialize)]
+struct SessionCapabilities {
+    // Octomind's session protocol names the memory scope `project`.
+    #[serde(rename = "project")]
+    scope: String,
+    role: Option<String>,
+    workdir: Option<String>,
+    session_id: Option<String>,
+    #[serde(default)]
+    git: bool,
+}
+
+type MemoryProviders = HashMap<(Option<String>, Option<String>), MemoryProvider>;
+
 /// MCP Server using rmcp SDK
 #[derive(Clone)]
 pub struct McpServer {
     config: Config,
     working_directory: std::path::PathBuf,
-    memory: Arc<Mutex<Option<MemoryProvider>>>,
+    memory: Arc<Mutex<MemoryProviders>>,
     knowledge: Arc<Mutex<Option<KnowledgeProvider>>>,
-    session: Arc<Mutex<SessionState>>,
+    session: SessionState,
     instructions: String,
-    /// True when octobrain's working directory contains at least one git repo.
-    has_local_projects: bool,
-    /// Whether the session context has been applied from client capabilities.
-    /// Applied once on the first request so a later state change is not
-    /// overwritten; also single-flights the background box sync.
-    session_applied: Arc<AtomicBool>,
+    local_projects: Arc<Mutex<HashMap<std::path::PathBuf, bool>>>,
+    box_sync_started: Arc<AtomicBool>,
 }
 
 impl McpServer {
     pub fn new(config: Config, working_directory: std::path::PathBuf) -> Self {
         let scopes = discover_scopes(&working_directory);
-        let has_local_projects = !scopes.is_empty();
+        let local_projects = HashMap::from([(working_directory.clone(), !scopes.is_empty())]);
         let instructions = build_instructions(&scopes);
         Self {
             config,
             working_directory,
-            memory: Arc::new(Mutex::new(None)),
+            memory: Arc::new(Mutex::new(HashMap::new())),
             knowledge: Arc::new(Mutex::new(None)),
-            session: Arc::new(Mutex::new(SessionState::default())),
+            session: SessionState::default(),
             instructions,
-            has_local_projects,
-            session_applied: Arc::new(AtomicBool::new(false)),
+            local_projects: Arc::new(Mutex::new(local_projects)),
+            box_sync_started: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Apply the octomind session context from client capabilities
-    /// (`experimental.session`) on the first request.
-    ///
-    /// Works for both protocol eras: modern clients (2026-07-28) carry
-    /// capabilities in every request's `_meta`, legacy clients set them during
-    /// the `initialize` handshake — `RequestContext::client_capabilities()`
-    /// resolves both.
-    async fn ensure_session_context(&self, context: &RequestContext<RoleServer>) {
-        if self.session_applied.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
+    /// Request metadata takes precedence over the legacy initialize capabilities.
+    /// Keep the resolved context local: concurrent requests can belong to different octos.
+    async fn ensure_session_context(
+        &self,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<SessionState, McpError> {
+        let mut session = self.session.clone();
         if let Some(capabilities) = context.client_capabilities() {
-            if let Some(experimental) = &capabilities.experimental {
+            if let Some(experimental) = capabilities.experimental {
                 if let Some(session_obj) = experimental.get("session") {
-                    let scope = session_obj
-                        .get("scope")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string);
-                    let role = session_obj
-                        .get("role")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string);
-                    let session_id = session_obj
-                        .get("session_id")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string);
-                    let git = session_obj
-                        .get("git")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-
-                    let mut session = self.session.lock().await;
-                    let should_lock_scope = git || !self.has_local_projects;
-                    session.scope = if should_lock_scope { scope } else { None };
-                    session.role = role;
-                    if let Some(sid) = session_id {
-                        session.session_id = sid;
+                    let received: SessionCapabilities =
+                        serde_json::from_value(serde_json::Value::Object(session_obj.clone()))
+                            .map_err(|e| {
+                                McpError::invalid_params(
+                                    format!("Invalid session context: {}", e),
+                                    None,
+                                )
+                            })?;
+                    if received.scope.trim().is_empty() {
+                        return Err(McpError::invalid_params(
+                            "session.scope: non-empty string required",
+                            None,
+                        ));
                     }
-                    // Always lock (session received) — strips role from schema.
-                    // scope_locked strips scope from schema too, only when meaningful.
+                    if received
+                        .workdir
+                        .as_ref()
+                        .is_some_and(|path| path.trim().is_empty())
+                    {
+                        return Err(McpError::invalid_params(
+                            "session.workdir: non-empty string required",
+                            None,
+                        ));
+                    }
+                    let workdir = received
+                        .workdir
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| self.working_directory.clone());
+                    let has_local_projects = {
+                        let mut cache = self.local_projects.lock().await;
+                        if let Some(has_projects) = cache.get(&workdir) {
+                            *has_projects
+                        } else {
+                            let path = workdir.clone();
+                            let has_projects = tokio::task::spawn_blocking(move || {
+                                !discover_scopes(&path).is_empty()
+                            })
+                            .await
+                            .map_err(|e| {
+                                McpError::internal_error(
+                                    format!("Failed to discover session projects: {}", e),
+                                    None,
+                                )
+                            })?;
+                            cache.insert(workdir, has_projects);
+                            has_projects
+                        }
+                    };
+                    let should_lock_scope = received.git || !has_local_projects;
+                    session.scope = should_lock_scope.then_some(received.scope);
+                    session.role = received.role;
+                    if let Some(session_id) = received.session_id {
+                        session.session_id = session_id;
+                    }
                     session.role_locked = session.role.is_some();
                     session.scope_locked = should_lock_scope;
-
-                    debug!(
-                        "Session locked: scope={:?}, role={:?}",
-                        session.scope, session.role
-                    );
                 }
             }
         }
 
-        // Kick off non-blocking box discovery/sync now that any session scope is
-        // established. Safe without a session too: it locates project .box/ dirs
-        // from the working directory and refreshes subscribed boxes.
-        let server = self.clone();
-        tokio::spawn(async move {
-            server.run_box_sync_background().await;
-        });
+        if !self.box_sync_started.swap(true, Ordering::SeqCst) {
+            let server = self.clone();
+            tokio::spawn(async move {
+                server.run_box_sync_background().await;
+            });
+        }
+        Ok(session)
     }
 
     /// Background, non-blocking box discovery + sync. Logs and swallows errors so a
@@ -402,48 +431,35 @@ impl McpServer {
         }
     }
 
-    /// Get memory provider.
-    /// - Locked (handshake received): cached, scope/role fixed from session state.
-    /// - Unlocked (no handshake): fresh per call, scope/role from caller args.
     async fn get_memory_provider(
         &self,
+        session: &SessionState,
         scope: Option<String>,
         role: Option<String>,
     ) -> Result<MemoryProvider, McpError> {
-        let session = self.session.lock().await.clone();
-
-        if session.role_locked || session.scope_locked {
-            // Double-checked lock: cheap path first
-            {
-                let guard = self.memory.lock().await;
-                if let Some(provider) = guard.as_ref() {
-                    return Ok(provider.clone());
-                }
-            }
-            let mut guard = self.memory.lock().await;
-            if let Some(provider) = guard.as_ref() {
-                return Ok(provider.clone());
-            }
-            let provider = MemoryProvider::new(
-                &self.config,
-                self.working_directory.clone(),
-                session.scope,
-                session.role,
-            )
-            .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Failed to initialize memory: {}", e), None)
-            })?;
-            *guard = Some(provider.clone());
-            Ok(provider)
+        let scope = if session.scope_locked {
+            session.scope.clone()
         } else {
-            // No handshake — honour per-call scope/role from args
+            scope
+        };
+        let role = if session.role_locked {
+            session.role.clone()
+        } else {
+            role
+        };
+        let key = (scope.clone(), role.clone());
+        let mut providers = self.memory.lock().await;
+        if let Some(provider) = providers.get(&key) {
+            return Ok(provider.clone());
+        }
+        let provider =
             MemoryProvider::new(&self.config, self.working_directory.clone(), scope, role)
                 .await
                 .map_err(|e| {
                     McpError::internal_error(format!("Failed to initialize memory: {}", e), None)
-                })
-        }
+                })?;
+        providers.insert(key, provider.clone());
+        Ok(provider)
     }
 
     /// Get or initialize knowledge provider
@@ -484,8 +500,8 @@ impl McpServer {
         // pass takes far longer than the client's disconnect, so without this wait it is
         // killed part-way every session and the table never gets compacted. Capped so a
         // stuck pass can't keep the process alive indefinitely.
-        let provider = memory.lock().await.clone();
-        if let Some(provider) = provider {
+        let providers = memory.lock().await.clone();
+        for provider in providers.values() {
             if tokio::time::timeout(
                 MAINTENANCE_SHUTDOWN_GRACE,
                 provider.drain_pending_maintenance(),
@@ -809,16 +825,12 @@ impl McpServer {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<MemorizeParams>,
     ) -> Result<String, McpError> {
-        self.ensure_session_context(&context).await;
-        // global=true only meaningful when scope is locked; overrides to global scope ("")
-        let session_scope_locked = self.session.lock().await.scope_locked;
-        let effective_scope = if session_scope_locked && params.global == Some(true) {
-            Some(String::new())
-        } else {
-            params.scope.clone()
-        };
+        let mut session = self.ensure_session_context(&context).await?;
+        if session.scope_locked && params.global == Some(true) {
+            session.scope = Some(String::new());
+        }
         let provider = self
-            .get_memory_provider(effective_scope, params.role.clone())
+            .get_memory_provider(&session, params.scope.clone(), params.role.clone())
             .await?;
         let args = serde_json::to_value(&params).map_err(|e| {
             McpError::internal_error(format!("Failed to serialize params: {}", e), None)
@@ -839,9 +851,9 @@ impl McpServer {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<RememberParams>,
     ) -> Result<String, McpError> {
-        self.ensure_session_context(&context).await;
+        let session = self.ensure_session_context(&context).await?;
         let provider = self
-            .get_memory_provider(params.scope.clone(), params.role.clone())
+            .get_memory_provider(&session, params.scope.clone(), params.role.clone())
             .await?;
         let args = serde_json::to_value(&params).map_err(|e| {
             McpError::internal_error(format!("Failed to serialize params: {}", e), None)
@@ -868,9 +880,9 @@ impl McpServer {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<ForgetParams>,
     ) -> Result<String, McpError> {
-        self.ensure_session_context(&context).await;
+        let session = self.ensure_session_context(&context).await?;
         let provider = self
-            .get_memory_provider(params.scope.clone(), params.role.clone())
+            .get_memory_provider(&session, params.scope.clone(), params.role.clone())
             .await?;
         let args = serde_json::to_value(&params).map_err(|e| {
             McpError::internal_error(format!("Failed to serialize params: {}", e), None)
@@ -890,12 +902,10 @@ impl McpServer {
         context: RequestContext<RoleServer>,
         Parameters(params): Parameters<KnowledgeParams>,
     ) -> Result<String, McpError> {
-        self.ensure_session_context(&context).await;
+        let session = self.ensure_session_context(&context).await?;
         let provider = self.get_or_init_knowledge().await?;
-        let session = self.session.lock().await;
         let session_id = session.session_id.clone();
         let active_scope = session.scope.clone();
-        drop(session);
 
         match params.command {
             KnowledgeAction::Search => {
@@ -973,8 +983,7 @@ impl ServerHandler for McpServer {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        self.ensure_session_context(&context).await;
-        let session = self.session.lock().await;
+        let session = self.ensure_session_context(&context).await?;
         let tools = if session.role_locked && session.scope_locked {
             tools_locked().clone() // strip scope + role
         } else if session.role_locked {
@@ -1104,3 +1113,7 @@ mod schema_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "server_tests.rs"]
+mod tests;
