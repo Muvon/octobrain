@@ -292,16 +292,30 @@ impl Default for SessionState {
     }
 }
 
+// Octomind also sends `project`, a hashed id; memory scopes use `derive_scope`'s
+// readable form, so the scope is derived from `workdir` instead.
 #[derive(Deserialize)]
 struct SessionCapabilities {
-    // Octomind's session protocol names the memory scope `project`.
-    #[serde(rename = "project")]
-    scope: String,
     role: Option<String>,
     workdir: Option<String>,
     session_id: Option<String>,
     #[serde(default)]
     git: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct WorkdirScope {
+    scope: String,
+    has_local_projects: bool,
+}
+
+impl WorkdirScope {
+    fn discover(workdir: &std::path::Path) -> Self {
+        Self {
+            scope: crate::storage::derive_scope(workdir),
+            has_local_projects: !discover_scopes(workdir).is_empty(),
+        }
+    }
 }
 
 type MemoryProviders = HashMap<(Option<String>, Option<String>), MemoryProvider>;
@@ -315,14 +329,20 @@ pub struct McpServer {
     knowledge: Arc<Mutex<Option<KnowledgeProvider>>>,
     session: SessionState,
     instructions: String,
-    local_projects: Arc<Mutex<HashMap<std::path::PathBuf, bool>>>,
+    workdir_scopes: Arc<Mutex<HashMap<std::path::PathBuf, WorkdirScope>>>,
     box_sync_started: Arc<AtomicBool>,
 }
 
 impl McpServer {
     pub fn new(config: Config, working_directory: std::path::PathBuf) -> Self {
         let scopes = discover_scopes(&working_directory);
-        let local_projects = HashMap::from([(working_directory.clone(), !scopes.is_empty())]);
+        let workdir_scopes = HashMap::from([(
+            working_directory.clone(),
+            WorkdirScope {
+                scope: crate::storage::derive_scope(&working_directory),
+                has_local_projects: !scopes.is_empty(),
+            },
+        )]);
         let instructions = build_instructions(&scopes);
         Self {
             config,
@@ -331,7 +351,7 @@ impl McpServer {
             knowledge: Arc::new(Mutex::new(None)),
             session: SessionState::default(),
             instructions,
-            local_projects: Arc::new(Mutex::new(local_projects)),
+            workdir_scopes: Arc::new(Mutex::new(workdir_scopes)),
             box_sync_started: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -354,12 +374,6 @@ impl McpServer {
                                     None,
                                 )
                             })?;
-                    if received.scope.trim().is_empty() {
-                        return Err(McpError::invalid_params(
-                            "session.scope: non-empty string required",
-                            None,
-                        ));
-                    }
                     if received
                         .workdir
                         .as_ref()
@@ -374,28 +388,27 @@ impl McpServer {
                         .workdir
                         .map(std::path::PathBuf::from)
                         .unwrap_or_else(|| self.working_directory.clone());
-                    let has_local_projects = {
-                        let mut cache = self.local_projects.lock().await;
-                        if let Some(has_projects) = cache.get(&workdir) {
-                            *has_projects
+                    let workdir_scope = {
+                        let mut cache = self.workdir_scopes.lock().await;
+                        if let Some(workdir_scope) = cache.get(&workdir) {
+                            workdir_scope.clone()
                         } else {
                             let path = workdir.clone();
-                            let has_projects = tokio::task::spawn_blocking(move || {
-                                !discover_scopes(&path).is_empty()
-                            })
-                            .await
-                            .map_err(|e| {
-                                McpError::internal_error(
-                                    format!("Failed to discover session projects: {}", e),
-                                    None,
-                                )
-                            })?;
-                            cache.insert(workdir, has_projects);
-                            has_projects
+                            let workdir_scope =
+                                tokio::task::spawn_blocking(move || WorkdirScope::discover(&path))
+                                    .await
+                                    .map_err(|e| {
+                                        McpError::internal_error(
+                                            format!("Failed to discover session scope: {}", e),
+                                            None,
+                                        )
+                                    })?;
+                            cache.insert(workdir, workdir_scope.clone());
+                            workdir_scope
                         }
                     };
-                    let should_lock_scope = received.git || !has_local_projects;
-                    session.scope = should_lock_scope.then_some(received.scope);
+                    let should_lock_scope = received.git || !workdir_scope.has_local_projects;
+                    session.scope = should_lock_scope.then_some(workdir_scope.scope);
                     session.role = received.role;
                     if let Some(session_id) = received.session_id {
                         session.session_id = session_id;

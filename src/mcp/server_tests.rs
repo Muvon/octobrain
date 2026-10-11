@@ -46,8 +46,16 @@ fn context(
     context
 }
 
-fn session(scope: &str, workdir: &std::path::Path) -> serde_json::Value {
-    json!({"project": scope, "workdir": workdir, "git": false, "role": "cloud", "session_id": scope})
+/// Each named octo works in its own directory under `root`; `project` is octomind's
+/// hashed id and must not decide the memory scope.
+fn session(name: &str, root: &std::path::Path) -> serde_json::Value {
+    let workdir = root.join(name);
+    std::fs::create_dir_all(&workdir).unwrap();
+    json!({"project": "0123456789abcdef", "workdir": workdir, "git": false, "role": "cloud", "session_id": name})
+}
+
+fn scope(name: &str, root: &std::path::Path) -> String {
+    crate::storage::derive_scope(&root.join(name))
 }
 
 #[tokio::test]
@@ -59,21 +67,29 @@ async fn non_git_session_locks_scope_with_local_repositories() {
     assert!(!workdir.join(".git").exists());
     let server = McpServer::new(test_config(), root.path().to_path_buf());
     assert_eq!(
-        server.local_projects.lock().await.get(root.path()),
-        Some(&true)
+        server
+            .workdir_scopes
+            .lock()
+            .await
+            .get(root.path())
+            .map(|cached| cached.has_local_projects),
+        Some(true)
     );
     let (service, _client) = serve_in_memory(&server, None);
     let state = server
         .ensure_session_context(&context(
             service.peer(),
-            session("plain-workspace", &workdir),
+            session("plain-workspace", root.path()),
         ))
         .await
         .unwrap();
     assert!(state.scope_locked);
-    assert_eq!(state.scope.as_deref(), Some("plain-workspace"));
+    assert_eq!(
+        state.scope.as_deref(),
+        Some(scope("plain-workspace", root.path()).as_str())
+    );
     assert_eq!(state.role.as_deref(), Some("cloud"));
-    let mut standalone = session("selected", &workdir);
+    let mut standalone = session("plain-workspace", root.path());
     standalone.as_object_mut().unwrap().remove("workdir");
     let state = server
         .ensure_session_context(&context(service.peer(), standalone))
@@ -92,22 +108,28 @@ async fn non_git_session_locks_scope_with_local_repositories() {
 }
 
 #[tokio::test]
-async fn session_scope_is_required_and_validated() {
+async fn session_workdir_is_validated_and_project_is_not_required() {
     let root = tempfile::tempdir().unwrap();
     let server = McpServer::new(test_config(), root.path().to_path_buf());
     let (service, _client) = serve_in_memory(&server, None);
-    for value in [json!(null), json!(""), json!(42)] {
+    for value in [json!(""), json!(" "), json!(42)] {
         let mut metadata = session("valid", root.path());
-        metadata["project"] = value;
+        metadata["workdir"] = value;
         assert!(server
             .ensure_session_context(&context(service.peer(), metadata))
             .await
             .is_err());
     }
-    assert!(server
-        .ensure_session_context(&context(service.peer(), json!({"workdir": "/home/octo"})))
+    let mut metadata = session("valid", root.path());
+    metadata.as_object_mut().unwrap().remove("project");
+    let state = server
+        .ensure_session_context(&context(service.peer(), metadata))
         .await
-        .is_err());
+        .unwrap();
+    assert_eq!(
+        state.scope.as_deref(),
+        Some(scope("valid", root.path()).as_str())
+    );
 }
 
 #[tokio::test]
@@ -116,13 +138,18 @@ async fn shared_server_scopes_writes_reads_and_forget() {
     let db = root.path().join("memory");
     let server = McpServer::new(test_config(), root.path().to_path_buf());
     let (service, _client) = serve_in_memory(&server, None);
-    for (scope, role) in [
+    for (name, role) in [
         ("", "cloud"),
         ("alpha", "cloud"),
         ("beta", "cloud"),
         ("alpha", "reviewer"),
     ] {
-        let key = (Some(scope.to_string()), Some(role.to_string()));
+        let scope = if name.is_empty() {
+            String::new()
+        } else {
+            scope(name, root.path())
+        };
+        let key = (Some(scope), Some(role.to_string()));
         let provider =
             MemoryProvider::for_scope_test(&db, root.path(), key.0.clone(), key.1.clone()).await;
         server.memory.lock().await.insert(key, provider);
@@ -193,12 +220,17 @@ async fn shared_server_scopes_writes_reads_and_forget() {
         .await
         .unwrap();
     let table = connection.open_table("memories").execute().await.unwrap();
-    for (scope, role, count) in [
+    for (name, role, count) in [
         ("", "cloud", 2),
         ("alpha", "cloud", 2),
         ("beta", "cloud", 1),
         ("alpha", "reviewer", 1),
     ] {
+        let scope = if name.is_empty() {
+            String::new()
+        } else {
+            scope(name, root.path())
+        };
         assert_eq!(
             table
                 .count_rows(Some(format!("scope = '{}' AND role = '{}'", scope, role)))
@@ -296,16 +328,20 @@ async fn request_context_overrides_legacy_handshake() {
     let info = ClientConfig::new(capabilities, Implementation::new("octomind", "old"))
         .with_protocol_version(ProtocolVersion::V_2025_03_26);
     let (service, _client) = serve_in_memory(&server, Some(info));
+    let legacy = crate::storage::derive_scope(root.path());
     let handshake = RequestContext::new(RequestId::Number(1), service.peer().clone());
     let state = server.ensure_session_context(&handshake).await.unwrap();
-    assert_eq!(state.scope.as_deref(), Some("legacy"));
+    assert_eq!(state.scope.as_deref(), Some(legacy.as_str()));
     let state = server
         .ensure_session_context(&context(service.peer(), session("current", root.path())))
         .await
         .unwrap();
-    assert_eq!(state.scope.as_deref(), Some("current"));
+    assert_eq!(
+        state.scope.as_deref(),
+        Some(scope("current", root.path()).as_str())
+    );
     let state = server.ensure_session_context(&handshake).await.unwrap();
-    assert_eq!(state.scope.as_deref(), Some("legacy"));
+    assert_eq!(state.scope.as_deref(), Some(legacy.as_str()));
 }
 
 #[tokio::test]
@@ -316,11 +352,16 @@ async fn multi_repo_session_workdir_stays_unlocked_and_discovery_is_cached() {
     std::fs::create_dir_all(workdir.join("two/.git")).unwrap();
     let server = McpServer::new(test_config(), root.path().to_path_buf());
     assert_eq!(
-        server.local_projects.lock().await.get(root.path()),
-        Some(&false)
+        server
+            .workdir_scopes
+            .lock()
+            .await
+            .get(root.path())
+            .map(|cached| cached.has_local_projects),
+        Some(false)
     );
     let (service, _client) = serve_in_memory(&server, None);
-    let metadata = session("parent", &workdir);
+    let metadata = session("projects", root.path());
     let state = server
         .ensure_session_context(&context(service.peer(), metadata.clone()))
         .await
@@ -329,8 +370,13 @@ async fn multi_repo_session_workdir_stays_unlocked_and_discovery_is_cached() {
     assert_eq!(state.scope, None);
     assert_eq!(state.role.as_deref(), Some("cloud"));
     assert_eq!(
-        server.local_projects.lock().await.get(&workdir),
-        Some(&true)
+        server
+            .workdir_scopes
+            .lock()
+            .await
+            .get(&workdir)
+            .map(|cached| cached.has_local_projects),
+        Some(true)
     );
     std::fs::remove_dir(workdir.join("one/.git")).unwrap();
     std::fs::remove_dir(workdir.join("two/.git")).unwrap();
@@ -346,13 +392,19 @@ async fn multi_repo_session_workdir_stays_unlocked_and_discovery_is_cached() {
         .await
         .unwrap();
     assert!(state.scope_locked);
-    assert_eq!(state.scope.as_deref(), Some("parent"));
-    let mut no_workdir = session("server-root", &workdir);
+    assert_eq!(
+        state.scope.as_deref(),
+        Some(scope("projects", root.path()).as_str())
+    );
+    let mut no_workdir = session("projects", root.path());
     no_workdir.as_object_mut().unwrap().remove("workdir");
     let state = server
         .ensure_session_context(&context(service.peer(), no_workdir))
         .await
         .unwrap();
     assert!(state.scope_locked);
-    assert_eq!(state.scope.as_deref(), Some("server-root"));
+    assert_eq!(
+        state.scope.as_deref(),
+        Some(crate::storage::derive_scope(root.path()).as_str())
+    );
 }
