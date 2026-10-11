@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.14.7] - 2026-10-11
+
+### 📋 Release Summary
+
+Scoped session memory contexts are now supported, with scopes resolved per session and derived from work directories.
+
+### ✨ New Features & Enhancements
+
+- **mcp**: support scoped session memory contexts `e05c5028`
+
+### 🔧 Improvements & Optimizations
+
+- **dependencies**: refresh locked dependency versions `2436d3ff`
+
+### 🐛 Bug Fixes & Stability
+
+- **mcp**: resolve MCP scopes per session `4fe4bf24`
+- **mcp**: derive session scopes from work directories `ca75ff7c`
+
 ## [0.14.6] - 2026-10-08
 
 ### 🔧 Improvements & Optimizations
