@@ -206,7 +206,7 @@ fn discover_scopes(root: &std::path::Path) -> Vec<String> {
 
     let mut check = |path: &std::path::Path| {
         if path.join(".git").exists() {
-            found.push(crate::storage::derive_scope(path));
+            found.push(octolib::utils::path_to_scope(path));
         }
     };
 
@@ -231,7 +231,7 @@ fn discover_projects(root: &std::path::Path) -> Vec<(std::path::PathBuf, String)
 
     let mut check = |path: &std::path::Path| {
         if path.join(".git").exists() {
-            found.push((path.to_path_buf(), crate::storage::derive_scope(path)));
+            found.push((path.to_path_buf(), octolib::utils::path_to_scope(path)));
         }
     };
 
@@ -278,6 +278,12 @@ pub struct SessionState {
     pub role_locked: bool,
     /// Scope is locked for a Git root or a working directory without local repos.
     pub scope_locked: bool,
+    /// Unlocked session (its workdir holds repos): the scope used when a call names
+    /// none — the workdir's own. `None` without session context.
+    pub default_scope: Option<String>,
+    /// Unlocked session: the repos discovered under its workdir, the other scopes a
+    /// call may name.
+    pub scope_choices: Vec<String>,
 }
 
 impl Default for SessionState {
@@ -288,12 +294,60 @@ impl Default for SessionState {
             session_id: uuid::Uuid::new_v4().to_string(),
             role_locked: false,
             scope_locked: false,
+            default_scope: None,
+            scope_choices: Vec::new(),
         }
     }
 }
 
-// Octomind also sends `project`, a hashed id; memory scopes use `derive_scope`'s
-// readable form, so the scope is derived from `workdir` instead.
+impl SessionState {
+    /// Scopes an unlocked session may name: its own, the repos under its workdir,
+    /// and the global scope `""`.
+    fn scope_options(&self) -> Vec<String> {
+        let mut options: Vec<String> = self.default_scope.iter().cloned().collect();
+        for scope in &self.scope_choices {
+            if !options.contains(scope) {
+                options.push(scope.clone());
+            }
+        }
+        options.push(String::new());
+        options
+    }
+
+    /// The scope a memory call runs in. A session never runs unscoped (every
+    /// project's memories): an omitted scope is its own, and a named one must be
+    /// one of its options. Without session context the caller's scope is used as is.
+    fn resolve_scope(&self, scope: Option<String>) -> Result<Option<String>, McpError> {
+        if self.scope_locked {
+            return Ok(self.scope.clone());
+        }
+        let Some(default_scope) = &self.default_scope else {
+            return Ok(scope);
+        };
+        let Some(scope) = scope else {
+            return Ok(Some(default_scope.clone()));
+        };
+        let options = self.scope_options();
+        if options.contains(&scope) {
+            return Ok(Some(scope));
+        }
+        Err(McpError::invalid_params(
+            format!(
+                "scope '{}' is not available in this session; use one of: {}",
+                scope,
+                options
+                    .iter()
+                    .map(|option| format!("'{}'", option))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            None,
+        ))
+    }
+}
+
+// Octomind also sends `project` (`octolib::utils::path_to_id`); memory scopes are the
+// readable `path_to_scope` of the same directory, so they are derived from `workdir`.
 #[derive(Deserialize)]
 struct SessionCapabilities {
     role: Option<String>,
@@ -306,14 +360,15 @@ struct SessionCapabilities {
 #[derive(Clone, Debug, PartialEq)]
 struct WorkdirScope {
     scope: String,
-    has_local_projects: bool,
+    /// Scopes of the repos at or directly under the workdir.
+    projects: Vec<String>,
 }
 
 impl WorkdirScope {
     fn discover(workdir: &std::path::Path) -> Self {
         Self {
-            scope: crate::storage::derive_scope(workdir),
-            has_local_projects: !discover_scopes(workdir).is_empty(),
+            scope: octolib::utils::path_to_scope(workdir),
+            projects: discover_scopes(workdir),
         }
     }
 }
@@ -339,8 +394,8 @@ impl McpServer {
         let workdir_scopes = HashMap::from([(
             working_directory.clone(),
             WorkdirScope {
-                scope: crate::storage::derive_scope(&working_directory),
-                has_local_projects: !scopes.is_empty(),
+                scope: octolib::utils::path_to_scope(&working_directory),
+                projects: scopes.clone(),
             },
         )]);
         let instructions = build_instructions(&scopes);
@@ -374,18 +429,11 @@ impl McpServer {
                                     None,
                                 )
                             })?;
-                    if received
-                        .workdir
-                        .as_ref()
-                        .is_some_and(|path| path.trim().is_empty())
-                    {
-                        return Err(McpError::invalid_params(
-                            "session.workdir: non-empty string required",
-                            None,
-                        ));
-                    }
+                    // Octomind 0.57.1 and older send `"workdir": ""` when the session has no
+                    // anchor; like an absent workdir, that means this server's own directory.
                     let workdir = received
                         .workdir
+                        .filter(|path| !path.trim().is_empty())
                         .map(std::path::PathBuf::from)
                         .unwrap_or_else(|| self.working_directory.clone());
                     let workdir_scope = {
@@ -407,8 +455,12 @@ impl McpServer {
                             workdir_scope
                         }
                     };
-                    let should_lock_scope = received.git || !workdir_scope.has_local_projects;
-                    session.scope = should_lock_scope.then_some(workdir_scope.scope);
+                    let should_lock_scope = received.git || workdir_scope.projects.is_empty();
+                    session.scope = should_lock_scope.then(|| workdir_scope.scope.clone());
+                    if !should_lock_scope {
+                        session.default_scope = Some(workdir_scope.scope);
+                        session.scope_choices = workdir_scope.projects;
+                    }
                     session.role = received.role;
                     if let Some(session_id) = received.session_id {
                         session.session_id = session_id;
@@ -450,11 +502,7 @@ impl McpServer {
         scope: Option<String>,
         role: Option<String>,
     ) -> Result<MemoryProvider, McpError> {
-        let scope = if session.scope_locked {
-            session.scope.clone()
-        } else {
-            scope
-        };
+        let scope = session.resolve_scope(scope)?;
         let role = if session.role_locked {
             session.role.clone()
         } else {
@@ -975,6 +1023,35 @@ fn supports_cache_hints(context: &RequestContext<RoleServer>) -> bool {
         .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28)
 }
 
+/// Name an unlocked session's scope options in the `scope` parameter, so the model
+/// picks among the repos under its workdir instead of guessing.
+fn with_scope_options(tools: Vec<Tool>, session: &SessionState) -> Vec<Tool> {
+    let Some(default_scope) = &session.default_scope else {
+        return tools;
+    };
+    let options = serde_json::json!(session.scope_options());
+    let description = serde_json::json!(format!(
+        "Project scope. Omit for this session's project ('{}'); '' is the global scope shared by all projects.",
+        default_scope
+    ));
+    tools
+        .into_iter()
+        .map(|mut tool| {
+            let mut schema = tool.input_schema.as_ref().clone();
+            if let Some(scope) = schema
+                .get_mut("properties")
+                .and_then(|properties| properties.get_mut("scope"))
+                .and_then(|scope| scope.as_object_mut())
+            {
+                scope.insert("enum".to_string(), options.clone());
+                scope.insert("description".to_string(), description.clone());
+            }
+            tool.input_schema = Arc::new(schema);
+            tool
+        })
+        .collect()
+}
+
 #[tool_handler]
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerConfig {
@@ -1004,7 +1081,7 @@ impl ServerHandler for McpServer {
         } else {
             tools_full_no_global().clone()
         };
-        let result = ListToolsResult::with_all_items(tools);
+        let result = ListToolsResult::with_all_items(with_scope_options(tools, &session));
         if !supports_cache_hints(&context) {
             return Ok(result);
         }

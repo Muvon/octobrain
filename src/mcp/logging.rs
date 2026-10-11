@@ -93,7 +93,7 @@ pub fn init_mcp_logging(base_dir: PathBuf, debug_mode: bool) -> Result<(), anyho
 fn select_log_dir(base_dir: &Path) -> Result<PathBuf, anyhow::Error> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
-    let scope = crate::storage::derive_scope(base_dir);
+    let scope = octolib::utils::path_to_scope(base_dir);
     // Sanitize scope for use as a directory component (replace '/' with '_')
     let scope_safe = scope.replace('/', "_");
 

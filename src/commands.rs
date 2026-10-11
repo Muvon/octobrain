@@ -737,7 +737,7 @@ async fn execute_knowledge_command(
         }
         KnowledgeCommand::Search { query, source } => {
             // Scope CLI search to the current project (its boxes + org + global + hot).
-            let active = crate::storage::derive_scope(&std::env::current_dir()?);
+            let active = octolib::utils::path_to_scope(&std::env::current_dir()?);
             let results = knowledge_manager
                 .search(&query, source.as_deref(), None, Some(&active))
                 .await?;
@@ -795,7 +795,7 @@ async fn execute_knowledge_command(
             Ok(())
         }
         KnowledgeCommand::Match { pattern, source } => {
-            let active = crate::storage::derive_scope(&std::env::current_dir()?);
+            let active = octolib::utils::path_to_scope(&std::env::current_dir()?);
             let results = knowledge_manager
                 .match_content(&pattern, source.as_deref(), None, Some(&active))
                 .await?;
@@ -825,7 +825,7 @@ async fn execute_box_command(
         }
         BoxCommand::Sync => {
             let cwd = std::env::current_dir()?;
-            let scope = crate::storage::derive_scope(&cwd);
+            let scope = octolib::utils::path_to_scope(&cwd);
             println!("Syncing boxes...");
             knowledge_manager.sync_boxes(&[(cwd, scope)]).await?;
             println!("✓ Boxes synced");

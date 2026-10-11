@@ -183,7 +183,7 @@ pub fn org_box_id(org: &str) -> String {
 
 /// Stable box id from a clone URL — reuses the same normalization as scope derivation.
 pub fn box_id_from_url(url: &str) -> String {
-    crate::storage::normalize_git_url(url)
+    octolib::utils::normalize_git_url(url)
 }
 
 /// Filesystem-safe slug for a box id (clone directory name).

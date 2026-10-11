@@ -55,7 +55,7 @@ fn session(name: &str, root: &std::path::Path) -> serde_json::Value {
 }
 
 fn scope(name: &str, root: &std::path::Path) -> String {
-    crate::storage::derive_scope(&root.join(name))
+    octolib::utils::path_to_scope(&root.join(name))
 }
 
 #[tokio::test]
@@ -72,7 +72,7 @@ async fn non_git_session_locks_scope_with_local_repositories() {
             .lock()
             .await
             .get(root.path())
-            .map(|cached| cached.has_local_projects),
+            .map(|cached| !cached.projects.is_empty()),
         Some(true)
     );
     let (service, _client) = serve_in_memory(&server, None);
@@ -108,18 +108,28 @@ async fn non_git_session_locks_scope_with_local_repositories() {
 }
 
 #[tokio::test]
-async fn session_workdir_is_validated_and_project_is_not_required() {
+async fn older_octomind_session_metadata_is_accepted() {
     let root = tempfile::tempdir().unwrap();
     let server = McpServer::new(test_config(), root.path().to_path_buf());
     let (service, _client) = serve_in_memory(&server, None);
-    for value in [json!(""), json!(" "), json!(42)] {
-        let mut metadata = session("valid", root.path());
-        metadata["workdir"] = value;
-        assert!(server
-            .ensure_session_context(&context(service.peer(), metadata))
-            .await
-            .is_err());
-    }
+    let mut metadata = session("valid", root.path());
+    metadata["workdir"] = json!(42);
+    assert!(server
+        .ensure_session_context(&context(service.peer(), metadata))
+        .await
+        .is_err());
+    // Octomind 0.57.1 and older: no anchor, so empty `project` and `workdir`.
+    let mut metadata = session("valid", root.path());
+    metadata["project"] = json!("");
+    metadata["workdir"] = json!("");
+    let state = server
+        .ensure_session_context(&context(service.peer(), metadata))
+        .await
+        .unwrap();
+    assert_eq!(
+        state.scope.as_deref(),
+        Some(octolib::utils::path_to_scope(root.path()).as_str())
+    );
     let mut metadata = session("valid", root.path());
     metadata.as_object_mut().unwrap().remove("project");
     let state = server
@@ -328,7 +338,7 @@ async fn request_context_overrides_legacy_handshake() {
     let info = ClientConfig::new(capabilities, Implementation::new("octomind", "old"))
         .with_protocol_version(ProtocolVersion::V_2025_03_26);
     let (service, _client) = serve_in_memory(&server, Some(info));
-    let legacy = crate::storage::derive_scope(root.path());
+    let legacy = octolib::utils::path_to_scope(root.path());
     let handshake = RequestContext::new(RequestId::Number(1), service.peer().clone());
     let state = server.ensure_session_context(&handshake).await.unwrap();
     assert_eq!(state.scope.as_deref(), Some(legacy.as_str()));
@@ -357,7 +367,7 @@ async fn multi_repo_session_workdir_stays_unlocked_and_discovery_is_cached() {
             .lock()
             .await
             .get(root.path())
-            .map(|cached| cached.has_local_projects),
+            .map(|cached| !cached.projects.is_empty()),
         Some(false)
     );
     let (service, _client) = serve_in_memory(&server, None);
@@ -375,8 +385,39 @@ async fn multi_repo_session_workdir_stays_unlocked_and_discovery_is_cached() {
             .lock()
             .await
             .get(&workdir)
-            .map(|cached| cached.has_local_projects),
+            .map(|cached| !cached.projects.is_empty()),
         Some(true)
+    );
+    // The session picks among its own repos and never runs unscoped.
+    let own = scope("projects", root.path());
+    let one = octolib::utils::path_to_scope(&workdir.join("one"));
+    assert_eq!(state.default_scope.as_deref(), Some(own.as_str()));
+    assert!(state.scope_choices.contains(&one));
+    assert_eq!(state.resolve_scope(None).unwrap(), Some(own.clone()));
+    assert_eq!(
+        state.resolve_scope(Some(one.clone())).unwrap(),
+        Some(one.clone())
+    );
+    assert_eq!(
+        state.resolve_scope(Some(String::new())).unwrap(),
+        Some(String::new())
+    );
+    let error = state
+        .resolve_scope(Some("github.com/other/repo".to_string()))
+        .unwrap_err();
+    assert!(error.message.contains(&one), "{}", error.message);
+    let tools = server
+        .list_tools(None, context(service.peer(), metadata.clone()))
+        .await
+        .unwrap();
+    let remember = tools
+        .tools
+        .iter()
+        .find(|tool| tool.name == "remember")
+        .unwrap();
+    assert_eq!(
+        remember.input_schema["properties"]["scope"]["enum"],
+        json!(state.scope_options())
     );
     std::fs::remove_dir(workdir.join("one/.git")).unwrap();
     std::fs::remove_dir(workdir.join("two/.git")).unwrap();
@@ -405,6 +446,6 @@ async fn multi_repo_session_workdir_stays_unlocked_and_discovery_is_cached() {
     assert!(state.scope_locked);
     assert_eq!(
         state.scope.as_deref(),
-        Some(crate::storage::derive_scope(root.path()).as_str())
+        Some(octolib::utils::path_to_scope(root.path()).as_str())
     );
 }
