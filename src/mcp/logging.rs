@@ -23,119 +23,110 @@ static MCP_LOG_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// Initialize logging for MCP server with file rotation
 /// All logs go to files only - NO console output to maintain MCP protocol compliance
 pub fn init_mcp_logging(base_dir: PathBuf, debug_mode: bool) -> Result<(), anyhow::Error> {
-    let log_dir = select_log_dir(&base_dir)?;
+	let log_dir = select_log_dir(&base_dir)?;
 
-    // Store log directory for potential future use
-    MCP_LOG_DIR
-        .set(log_dir.clone())
-        .map_err(|_| anyhow::anyhow!("Failed to set log directory"))?;
+	// Store log directory for potential future use
+	MCP_LOG_DIR
+		.set(log_dir.clone())
+		.map_err(|_| anyhow::anyhow!("Failed to set log directory"))?;
 
-    // Cross-platform way to create a "latest" indicator
-    let latest_file = log_dir.parent().unwrap_or(&log_dir).join("latest_log.txt");
-    // Silently ignore errors creating latest log indicator to maintain MCP protocol compliance
-    let _ = std::fs::write(&latest_file, log_dir.to_string_lossy().as_bytes());
+	// Cross-platform way to create a "latest" indicator
+	let latest_file = log_dir.parent().unwrap_or(&log_dir).join("latest_log.txt");
+	// Silently ignore errors creating latest log indicator to maintain MCP protocol compliance
+	let _ = std::fs::write(&latest_file, log_dir.to_string_lossy().as_bytes());
 
-    // Set up environment filter with sensible defaults
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        if debug_mode {
-            // In debug mode, show debug level for our crate, but info for others
-            EnvFilter::new("info,octobrain=debug")
-        } else {
-            // In production mode, only show info and above
-            EnvFilter::new("info,octobrain::mcp::logging=info")
-        }
-    });
+	// Set up environment filter with sensible defaults
+	let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+		if debug_mode {
+			// In debug mode, show debug level for our crate, but info for others
+			EnvFilter::new("info,octobrain=debug")
+		} else {
+			// In production mode, only show info and above
+			EnvFilter::new("info,octobrain::mcp::logging=info")
+		}
+	});
 
-    // Create rotating file appender
-    let file_appender = match RollingFileAppender::builder()
-        .rotation(Rotation::DAILY)
-        .filename_prefix("mcp_server")
-        .filename_suffix("log")
-        .build(&log_dir)
-    {
-        Ok(appender) => appender,
-        Err(_e) => {
-            // If logging cannot be initialized, fall back to a no-op subscriber
-            let registry = Registry::default().with(env_filter);
-            let _ = registry.try_init();
-            return Ok(());
-        }
-    };
+	// Create rotating file appender
+	let file_appender = match RollingFileAppender::builder()
+		.rotation(Rotation::DAILY)
+		.filename_prefix("mcp_server")
+		.filename_suffix("log")
+		.build(&log_dir)
+	{
+		Ok(appender) => appender,
+		Err(_e) => {
+			// If logging cannot be initialized, fall back to a no-op subscriber
+			let registry = Registry::default().with(env_filter);
+			let _ = registry.try_init();
+			return Ok(());
+		}
+	};
 
-    // File layer with JSON formatting for structured logs
-    let file_layer = Layer::new()
-        .with_writer(file_appender)
-        .with_ansi(false)
-        .with_target(true)
-        .with_file(true)
-        .with_line_number(true)
-        .with_thread_ids(true)
-        .with_thread_names(true)
-        .json();
+	// File layer with JSON formatting for structured logs
+	let file_layer = Layer::new()
+		.with_writer(file_appender)
+		.with_ansi(false)
+		.with_target(true)
+		.with_file(true)
+		.with_line_number(true)
+		.with_thread_ids(true)
+		.with_thread_names(true)
+		.json();
 
-    // MCP protocol requires clean stdout/stderr - no console output allowed
-    // All logging must go to files only to maintain protocol compliance
+	// MCP protocol requires clean stdout/stderr - no console output allowed
+	// All logging must go to files only to maintain protocol compliance
 
-    // Create registry with file layer only (no console output)
-    let registry = Registry::default().with(file_layer).with(env_filter);
-    let _ = registry.try_init();
+	// Create registry with file layer only (no console output)
+	let registry = Registry::default().with(file_layer).with(env_filter);
+	let _ = registry.try_init();
 
-    info!(
-        scope_path = %base_dir.display(),
-        log_directory = %log_dir.display(),
-        debug_mode = debug_mode,
-        "MCP Server logging initialized"
-    );
+	info!(
+		scope_path = %base_dir.display(),
+		log_directory = %log_dir.display(),
+		debug_mode = debug_mode,
+		"MCP Server logging initialized"
+	);
 
-    Ok(())
+	Ok(())
 }
 
 fn select_log_dir(base_dir: &Path) -> Result<PathBuf, anyhow::Error> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
+	let mut candidates: Vec<PathBuf> = Vec::new();
 
-    let scope = octolib::utils::path_to_scope(base_dir);
-    // Sanitize scope for use as a directory component (replace '/' with '_')
-    let scope_safe = scope.replace('/', "_");
+	let scope = octolib::utils::path_to_scope(base_dir);
+	// Sanitize scope for use as a directory component (replace '/' with '_')
+	let scope_safe = scope.replace('/', "_");
 
-    if let Ok(system_dir) = crate::storage::get_system_storage_dir() {
-        candidates.push(system_dir.join(&scope_safe).join("logs"));
-    }
+	if let Ok(system_dir) = crate::storage::get_system_storage_dir() {
+		candidates.push(system_dir.join(&scope_safe).join("logs"));
+	}
 
-    candidates.push(base_dir.join(".octobrain").join("logs"));
+	candidates.push(base_dir.join(".octobrain").join("logs"));
 
-    candidates.push(
-        std::env::temp_dir()
-            .join("octobrain")
-            .join(&scope_safe)
-            .join("logs"),
-    );
+	candidates.push(std::env::temp_dir().join("octobrain").join(&scope_safe).join("logs"));
 
-    for candidate in candidates {
-        if try_prepare_log_dir(&candidate).is_ok() {
-            return Ok(candidate);
-        }
-    }
+	for candidate in candidates {
+		if try_prepare_log_dir(&candidate).is_ok() {
+			return Ok(candidate);
+		}
+	}
 
-    Err(anyhow::anyhow!("No writable log directory available"))
+	Err(anyhow::anyhow!("No writable log directory available"))
 }
 
 fn try_prepare_log_dir(dir: &PathBuf) -> Result<(), anyhow::Error> {
-    std::fs::create_dir_all(dir)?;
-    let test_file = dir.join(".mcp_log_write_test");
-    if let Ok(mut handle) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&test_file)
-    {
-        use std::io::Write;
-        let _ = handle.write_all(b"");
-    }
-    let _ = std::fs::remove_file(test_file);
-    Ok(())
+	std::fs::create_dir_all(dir)?;
+	let test_file = dir.join(".mcp_log_write_test");
+	if let Ok(mut handle) = std::fs::OpenOptions::new().create(true).append(true).open(&test_file) {
+		use std::io::Write;
+		let _ = handle.write_all(b"");
+	}
+	let _ = std::fs::remove_file(test_file);
+	Ok(())
 }
 
 /// Get the current log directory
 #[allow(dead_code)]
 pub fn get_log_directory() -> Option<PathBuf> {
-    MCP_LOG_DIR.get().cloned()
+	MCP_LOG_DIR.get().cloned()
 }

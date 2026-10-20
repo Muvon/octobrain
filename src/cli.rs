@@ -19,441 +19,441 @@ use clap::{ArgAction, Parser, Subcommand};
 #[command(version, author = "Muvon Un Limited <opensource@muvon.io>")]
 #[command(about = "Standalone memory management system for AI context and conversation state", long_about = None)]
 pub struct Cli {
-    #[command(subcommand)]
-    pub command: Commands,
+	#[command(subcommand)]
+	pub command: Commands,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Memory management for storing and retrieving information
-    Memory {
-        /// Scope memories to a specific scope string (default: auto-detected from Git remote)
-        #[arg(long, global = true)]
-        scope: Option<String>,
+	/// Memory management for storing and retrieving information
+	Memory {
+		/// Scope memories to a specific scope string (default: auto-detected from Git remote)
+		#[arg(long, global = true)]
+		scope: Option<String>,
 
-        /// Filter memories by role (e.g. "developer", "reviewer"). No filter = all memories.
-        #[arg(long, global = true)]
-        role: Option<String>,
+		/// Filter memories by role (e.g. "developer", "reviewer"). No filter = all memories.
+		#[arg(long, global = true)]
+		role: Option<String>,
 
-        #[command(subcommand)]
-        command: MemoryCommand,
-    },
-    /// Knowledge base management for web content indexing and search
-    Knowledge {
-        #[command(subcommand)]
-        command: KnowledgeCommand,
-    },
-    /// Knowledge box management — git-backed, scoped knowledge bundles
-    Box {
-        #[command(subcommand)]
-        command: BoxCommand,
-    },
-    /// Start MCP server (Model Context Protocol) exposing memory tools
-    Mcp {
-        /// Bind to HTTP server on host:port instead of using stdin/stdout (e.g., "0.0.0.0:12345")
-        #[arg(long, value_name = "HOST:PORT")]
-        bind: Option<String>,
-    },
+		#[command(subcommand)]
+		command: MemoryCommand,
+	},
+	/// Knowledge base management for web content indexing and search
+	Knowledge {
+		#[command(subcommand)]
+		command: KnowledgeCommand,
+	},
+	/// Knowledge box management — git-backed, scoped knowledge bundles
+	Box {
+		#[command(subcommand)]
+		command: BoxCommand,
+	},
+	/// Start MCP server (Model Context Protocol) exposing memory tools
+	Mcp {
+		/// Bind to HTTP server on host:port instead of using stdin/stdout (e.g., "0.0.0.0:12345")
+		#[arg(long, value_name = "HOST:PORT")]
+		bind: Option<String>,
+	},
 }
 
 #[derive(Subcommand, Debug)]
 pub enum MemoryCommand {
-    /// Store important information, insights, or context in memory
-    Memorize {
-        /// Short, descriptive title for the memory (5-200 characters)
-        #[arg(short, long)]
-        title: String,
+	/// Store important information, insights, or context in memory
+	Memorize {
+		/// Short, descriptive title for the memory (5-200 characters)
+		#[arg(short, long)]
+		title: String,
 
-        /// Detailed content to remember
-        #[arg(short, long)]
-        content: String,
+		/// Detailed content to remember
+		#[arg(short, long)]
+		content: String,
 
-        /// Category of memory for better organization
-        #[arg(short = 'm', long, default_value = "code")]
-        memory_type: String,
+		/// Category of memory for better organization
+		#[arg(short = 'm', long, default_value = "code")]
+		memory_type: String,
 
-        /// Importance score from 0.0 to 1.0 (higher = more important)
-        #[arg(short, long)]
-        importance: Option<f32>,
+		/// Importance score from 0.0 to 1.0 (higher = more important)
+		#[arg(short, long)]
+		importance: Option<f32>,
 
-        /// Tags for categorization (comma-separated)
-        #[arg(long)]
-        tags: Option<String>,
+		/// Tags for categorization (comma-separated)
+		#[arg(long)]
+		tags: Option<String>,
 
-        /// Related file paths (comma-separated)
-        #[arg(long)]
-        files: Option<String>,
-    },
+		/// Related file paths (comma-separated)
+		#[arg(long)]
+		files: Option<String>,
+	},
 
-    /// Search and retrieve stored memories using semantic search
-    Remember {
-        /// What you want to remember or search for (multiple queries for comprehensive search)
-        queries: Vec<String>,
-        /// Filter by memory types (comma-separated)
-        #[arg(short = 'm', long)]
-        memory_types: Option<String>,
-        /// Filter by tags (comma-separated)
-        #[arg(long)]
-        tags: Option<String>,
-        /// Filter by related files (comma-separated)
-        #[arg(long)]
-        files: Option<String>,
-        /// Maximum number of memories to return
-        #[arg(short, long, default_value = "10")]
-        limit: usize,
-        /// Minimum relevance score (0.0-1.0)
-        #[arg(long)]
-        min_relevance: Option<f32>,
-        /// Output format: text, json, or compact
-        #[arg(short, long, default_value = "text")]
-        format: String,
-        /// Enable reranking for improved search accuracy
-        #[arg(long, action = ArgAction::SetTrue)]
-        enable_reranker: bool,
-        /// Disable reranking for memory search
-        #[arg(long, action = ArgAction::SetTrue, conflicts_with = "enable_reranker")]
-        disable_reranker: bool,
-        /// Reranker model (fully qualified, e.g., voyage:rerank-2.5)
-        #[arg(long, value_name = "MODEL")]
-        reranker_model: Option<String>,
-    },
+	/// Search and retrieve stored memories using semantic search
+	Remember {
+		/// What you want to remember or search for (multiple queries for comprehensive search)
+		queries: Vec<String>,
+		/// Filter by memory types (comma-separated)
+		#[arg(short = 'm', long)]
+		memory_types: Option<String>,
+		/// Filter by tags (comma-separated)
+		#[arg(long)]
+		tags: Option<String>,
+		/// Filter by related files (comma-separated)
+		#[arg(long)]
+		files: Option<String>,
+		/// Maximum number of memories to return
+		#[arg(short, long, default_value = "10")]
+		limit: usize,
+		/// Minimum relevance score (0.0-1.0)
+		#[arg(long)]
+		min_relevance: Option<f32>,
+		/// Output format: text, json, or compact
+		#[arg(short, long, default_value = "text")]
+		format: String,
+		/// Enable reranking for improved search accuracy
+		#[arg(long, action = ArgAction::SetTrue)]
+		enable_reranker: bool,
+		/// Disable reranking for memory search
+		#[arg(long, action = ArgAction::SetTrue, conflicts_with = "enable_reranker")]
+		disable_reranker: bool,
+		/// Reranker model (fully qualified, e.g., voyage:rerank-2.5)
+		#[arg(long, value_name = "MODEL")]
+		reranker_model: Option<String>,
+	},
 
-    /// Permanently remove specific memories
-    Forget {
-        /// Specific memory ID to forget (get from remember results)
-        #[arg(short, long)]
-        memory_id: Option<String>,
+	/// Permanently remove specific memories
+	Forget {
+		/// Specific memory ID to forget (get from remember results)
+		#[arg(short, long)]
+		memory_id: Option<String>,
 
-        /// Query to find memories to forget (alternative to memory_id)
-        #[arg(short, long)]
-        query: Option<String>,
+		/// Query to find memories to forget (alternative to memory_id)
+		#[arg(short, long)]
+		query: Option<String>,
 
-        /// Filter by memory types when using query (comma-separated)
-        #[arg(short = 'm', long)]
-        memory_types: Option<String>,
+		/// Filter by memory types when using query (comma-separated)
+		#[arg(short = 'm', long)]
+		memory_types: Option<String>,
 
-        /// Filter by tags when using query (comma-separated)
-        #[arg(long)]
-        tags: Option<String>,
+		/// Filter by tags when using query (comma-separated)
+		#[arg(long)]
+		tags: Option<String>,
 
-        /// Confirm deletion without prompting
-        #[arg(short = 'y', long)]
-        yes: bool,
-    },
+		/// Confirm deletion without prompting
+		#[arg(short = 'y', long)]
+		yes: bool,
+	},
 
-    /// Update an existing memory
-    Update {
-        /// Memory ID to update
-        memory_id: String,
+	/// Update an existing memory
+	Update {
+		/// Memory ID to update
+		memory_id: String,
 
-        /// New title (optional)
-        #[arg(short, long)]
-        title: Option<String>,
+		/// New title (optional)
+		#[arg(short, long)]
+		title: Option<String>,
 
-        /// New content (optional)
-        #[arg(short, long)]
-        content: Option<String>,
+		/// New content (optional)
+		#[arg(short, long)]
+		content: Option<String>,
 
-        /// New importance score (optional)
-        #[arg(short, long)]
-        importance: Option<f32>,
+		/// New importance score (optional)
+		#[arg(short, long)]
+		importance: Option<f32>,
 
-        /// Add tags (comma-separated)
-        #[arg(long)]
-        add_tags: Option<String>,
+		/// Add tags (comma-separated)
+		#[arg(long)]
+		add_tags: Option<String>,
 
-        /// Remove tags (comma-separated)
-        #[arg(long)]
-        remove_tags: Option<String>,
+		/// Remove tags (comma-separated)
+		#[arg(long)]
+		remove_tags: Option<String>,
 
-        /// Add related files (comma-separated)
-        #[arg(long)]
-        add_files: Option<String>,
+		/// Add related files (comma-separated)
+		#[arg(long)]
+		add_files: Option<String>,
 
-        /// Remove related files (comma-separated)
-        #[arg(long)]
-        remove_files: Option<String>,
-    },
+		/// Remove related files (comma-separated)
+		#[arg(long)]
+		remove_files: Option<String>,
+	},
 
-    /// Get memory by ID
-    Get {
-        /// Memory ID to retrieve
-        memory_id: String,
+	/// Get memory by ID
+	Get {
+		/// Memory ID to retrieve
+		memory_id: String,
 
-        /// Output format: text, json, or compact
-        #[arg(short, long, default_value = "text")]
-        format: String,
-    },
+		/// Output format: text, json, or compact
+		#[arg(short, long, default_value = "text")]
+		format: String,
+	},
 
-    /// List recent memories
-    Recent {
-        /// Maximum number of memories to show
-        #[arg(short, long, default_value = "20")]
-        limit: usize,
+	/// List recent memories
+	Recent {
+		/// Maximum number of memories to show
+		#[arg(short, long, default_value = "20")]
+		limit: usize,
 
-        /// Filter by memory type
-        #[arg(short = 'm', long)]
-        memory_type: Option<String>,
+		/// Filter by memory type
+		#[arg(short = 'm', long)]
+		memory_type: Option<String>,
 
-        /// Output format: text, json, or compact
-        #[arg(short, long, default_value = "compact")]
-        format: String,
-    },
+		/// Output format: text, json, or compact
+		#[arg(short, long, default_value = "compact")]
+		format: String,
+	},
 
-    /// Get memories by type
-    ByType {
-        /// Memory type to filter by
-        memory_type: String,
+	/// Get memories by type
+	ByType {
+		/// Memory type to filter by
+		memory_type: String,
 
-        /// Maximum number of memories to show
-        #[arg(short, long, default_value = "20")]
-        limit: usize,
+		/// Maximum number of memories to show
+		#[arg(short, long, default_value = "20")]
+		limit: usize,
 
-        /// Output format: text, json, or compact
-        #[arg(short, long, default_value = "compact")]
-        format: String,
-    },
+		/// Output format: text, json, or compact
+		#[arg(short, long, default_value = "compact")]
+		format: String,
+	},
 
-    /// Get memories related to files
-    ForFiles {
-        /// File paths to search for (comma-separated)
-        files: String,
+	/// Get memories related to files
+	ForFiles {
+		/// File paths to search for (comma-separated)
+		files: String,
 
-        /// Output format: text, json, or compact
-        #[arg(short, long, default_value = "text")]
-        format: String,
-    },
+		/// Output format: text, json, or compact
+		#[arg(short, long, default_value = "text")]
+		format: String,
+	},
 
-    /// Get memories by tags
-    ByTags {
-        /// Tags to search for (comma-separated)
-        tags: String,
+	/// Get memories by tags
+	ByTags {
+		/// Tags to search for (comma-separated)
+		tags: String,
 
-        /// Output format: text, json, or compact
-        #[arg(short, long, default_value = "text")]
-        format: String,
-    },
+		/// Output format: text, json, or compact
+		#[arg(short, long, default_value = "text")]
+		format: String,
+	},
 
-    /// Get memories for current Git commit
-    CurrentCommit {
-        /// Output format: text, json, or compact
-        #[arg(short, long, default_value = "text")]
-        format: String,
-    },
+	/// Get memories for current Git commit
+	CurrentCommit {
+		/// Output format: text, json, or compact
+		#[arg(short, long, default_value = "text")]
+		format: String,
+	},
 
-    /// Show memory statistics
-    Stats,
+	/// Show memory statistics
+	Stats,
 
-    /// Compact the memory tables and refresh indices. Blocks until finished — run this
-    /// when searches have slowed down; an MCP session is too short-lived to complete a
-    /// compaction of a badly fragmented table.
-    Maintenance,
+	/// Compact the memory tables and refresh indices. Blocks until finished — run this
+	/// when searches have slowed down; an MCP session is too short-lived to complete a
+	/// compaction of a badly fragmented table.
+	Maintenance,
 
-    /// Clean up old memories
-    Cleanup {
-        /// Confirm cleanup without prompting
-        #[arg(short = 'y', long)]
-        yes: bool,
-    },
+	/// Clean up old memories
+	Cleanup {
+		/// Confirm cleanup without prompting
+		#[arg(short = 'y', long)]
+		yes: bool,
+	},
 
-    /// Clear ALL memory data (DANGEROUS: deletes everything)
-    ClearAll {
-        /// Confirm deletion without prompting
-        #[arg(short = 'y', long)]
-        yes: bool,
-    },
+	/// Clear ALL memory data (DANGEROUS: deletes everything)
+	ClearAll {
+		/// Confirm deletion without prompting
+		#[arg(short = 'y', long)]
+		yes: bool,
+	},
 
-    /// Create a relationship between two memories
-    Relate {
-        /// Source memory ID
-        source_id: String,
+	/// Create a relationship between two memories
+	Relate {
+		/// Source memory ID
+		source_id: String,
 
-        /// Target memory ID
-        target_id: String,
+		/// Target memory ID
+		target_id: String,
 
-        /// Relationship type
-        #[arg(short = 't', long, default_value = "related_to")]
-        relationship_type: String,
+		/// Relationship type
+		#[arg(short = 't', long, default_value = "related_to")]
+		relationship_type: String,
 
-        /// Relationship strength (0.0-1.0)
-        #[arg(short, long, default_value = "0.5")]
-        strength: f32,
+		/// Relationship strength (0.0-1.0)
+		#[arg(short, long, default_value = "0.5")]
+		strength: f32,
 
-        /// Description of relationship
-        #[arg(short, long)]
-        description: String,
-    },
+		/// Description of relationship
+		#[arg(short, long)]
+		description: String,
+	},
 
-    /// Get relationships for a memory
-    Relationships {
-        /// Memory ID to get relationships for
-        memory_id: String,
+	/// Get relationships for a memory
+	Relationships {
+		/// Memory ID to get relationships for
+		memory_id: String,
 
-        /// Output format: text, json, or compact
-        #[arg(short, long, default_value = "text")]
-        format: String,
-    },
+		/// Output format: text, json, or compact
+		#[arg(short, long, default_value = "text")]
+		format: String,
+	},
 
-    /// Get related memories through relationships
-    Related {
-        /// Memory ID to find related memories for
-        memory_id: String,
+	/// Get related memories through relationships
+	Related {
+		/// Memory ID to find related memories for
+		memory_id: String,
 
-        /// Output format: text, json, or compact
-        #[arg(short, long, default_value = "text")]
-        format: String,
-    },
+		/// Output format: text, json, or compact
+		#[arg(short, long, default_value = "text")]
+		format: String,
+	},
 
-    /// Manually trigger auto-linking for a memory
-    AutoLink {
-        /// Memory ID to auto-link
-        memory_id: String,
-    },
+	/// Manually trigger auto-linking for a memory
+	AutoLink {
+		/// Memory ID to auto-link
+		memory_id: String,
+	},
 
-    /// Get memory graph with linked context
-    Graph {
-        /// Root memory ID
-        memory_id: String,
+	/// Get memory graph with linked context
+	Graph {
+		/// Root memory ID
+		memory_id: String,
 
-        /// Depth of graph traversal (1-3 recommended)
-        #[arg(short, long, default_value = "2")]
-        depth: usize,
+		/// Depth of graph traversal (1-3 recommended)
+		#[arg(short, long, default_value = "2")]
+		depth: usize,
 
-        /// Output format: text, json, or compact
-        #[arg(short, long, default_value = "text")]
-        format: String,
-    },
+		/// Output format: text, json, or compact
+		#[arg(short, long, default_value = "text")]
+		format: String,
+	},
 
-    /// Close a Goal memory by consolidating all source memories that Achieve it
-    /// into a new summarized parent. Sources transition to Consolidated state and
-    /// have their importance dampened, but remain queryable for audit.
-    Consolidate {
-        /// ID of the Goal memory to close (memory_type must be Goal)
-        goal_id: String,
+	/// Close a Goal memory by consolidating all source memories that Achieve it
+	/// into a new summarized parent. Sources transition to Consolidated state and
+	/// have their importance dampened, but remain queryable for audit.
+	Consolidate {
+		/// ID of the Goal memory to close (memory_type must be Goal)
+		goal_id: String,
 
-        /// Optional explicit summary. If omitted, a deterministic synthesis of
-        /// source memory titles is generated.
-        #[arg(short, long)]
-        summary: Option<String>,
-    },
+		/// Optional explicit summary. If omitted, a deterministic synthesis of
+		/// source memory titles is generated.
+		#[arg(short, long)]
+		summary: Option<String>,
+	},
 
-    /// Sleep consolidation: scan recent Working-state memories, cluster the
-    /// semantically similar ones, and consolidate each cluster via the same
-    /// goal-anchored pipeline (one synthetic Goal per cluster).
-    SleepConsolidate {
-        /// Cosine similarity threshold for considering two memories part of the same cluster
-        #[arg(short, long, default_value = "0.85")]
-        threshold: f32,
+	/// Sleep consolidation: scan recent Working-state memories, cluster the
+	/// semantically similar ones, and consolidate each cluster via the same
+	/// goal-anchored pipeline (one synthetic Goal per cluster).
+	SleepConsolidate {
+		/// Cosine similarity threshold for considering two memories part of the same cluster
+		#[arg(short, long, default_value = "0.85")]
+		threshold: f32,
 
-        /// Minimum number of memories required to consolidate a cluster
-        #[arg(short, long, default_value = "3")]
-        min_size: usize,
+		/// Minimum number of memories required to consolidate a cluster
+		#[arg(short, long, default_value = "3")]
+		min_size: usize,
 
-        /// Only consider Working memories created in the last N days
-        #[arg(short = 'a', long, default_value = "7")]
-        max_age_days: u32,
-    },
+		/// Only consider Working memories created in the last N days
+		#[arg(short = 'a', long, default_value = "7")]
+		max_age_days: u32,
+	},
 }
 
 #[derive(Subcommand, Debug)]
 pub enum BoxCommand {
-    /// Import (clone) a remote git box and index it as scoped knowledge
-    Import {
-        /// Git URL of the box repository
-        url: String,
+	/// Import (clone) a remote git box and index it as scoped knowledge
+	Import {
+		/// Git URL of the box repository
+		url: String,
 
-        /// Bind to a specific scope (default: org level derived from the repo)
-        #[arg(long)]
-        scope: Option<String>,
+		/// Bind to a specific scope (default: org level derived from the repo)
+		#[arg(long)]
+		scope: Option<String>,
 
-        /// Index at the global scope (visible in every project)
-        #[arg(long)]
-        global: bool,
-    },
+		/// Index at the global scope (visible in every project)
+		#[arg(long)]
+		global: bool,
+	},
 
-    /// Pull and smart-reindex all subscribed boxes plus the local project .box/
-    Sync,
+	/// Pull and smart-reindex all subscribed boxes plus the local project .box/
+	Sync,
 
-    /// List subscribed remote boxes
-    List,
+	/// List subscribed remote boxes
+	List,
 
-    /// Remove a box by its id (host/org/repo) — drops its rows and clone
-    Remove {
-        /// Box id to remove (as shown by `box list`)
-        box_id: String,
-    },
+	/// Remove a box by its id (host/org/repo) — drops its rows and clone
+	Remove {
+		/// Box id to remove (as shown by `box list`)
+		box_id: String,
+	},
 }
 
 #[derive(Subcommand, Debug)]
 pub enum KnowledgeCommand {
-    /// Index a URL or local file into knowledge base
-    Index {
-        /// URL or local file path to index (.txt, .md, .pdf, .docx, .html)
-        source: String,
-    },
+	/// Index a URL or local file into knowledge base
+	Index {
+		/// URL or local file path to index (.txt, .md, .pdf, .docx, .html)
+		source: String,
+	},
 
-    /// Search knowledge base semantically
-    Search {
-        /// Search query
-        query: String,
+	/// Search knowledge base semantically
+	Search {
+		/// Search query
+		query: String,
 
-        /// Filter by specific source URL or file path (auto-indexes if needed)
-        #[arg(long)]
-        source: Option<String>,
-    },
+		/// Filter by specific source URL or file path (auto-indexes if needed)
+		#[arg(long)]
+		source: Option<String>,
+	},
 
-    /// Store raw text content under a key (session-scoped in MCP, persistent in CLI)
-    Store {
-        /// Unique identifier key for the content
-        key: String,
+	/// Store raw text content under a key (session-scoped in MCP, persistent in CLI)
+	Store {
+		/// Unique identifier key for the content
+		key: String,
 
-        /// Raw text content to store and index
-        content: String,
+		/// Raw text content to store and index
+		content: String,
 
-        /// Session ID to scope this stored content to (auto-generated if omitted)
-        #[arg(long)]
-        session_id: Option<String>,
-    },
+		/// Session ID to scope this stored content to (auto-generated if omitted)
+		#[arg(long)]
+		session_id: Option<String>,
+	},
 
-    /// Delete indexed source and all its chunks
-    Delete {
-        /// Source URL or file path to delete
-        source: String,
-    },
+	/// Delete indexed source and all its chunks
+	Delete {
+		/// Source URL or file path to delete
+		source: String,
+	},
 
-    /// Delete stored content by key
-    DeleteStored {
-        /// Key of the stored content to delete
-        key: String,
+	/// Delete stored content by key
+	DeleteStored {
+		/// Key of the stored content to delete
+		key: String,
 
-        /// Session ID that the stored content belongs to
-        #[arg(long)]
-        session_id: Option<String>,
-    },
+		/// Session ID that the stored content belongs to
+		#[arg(long)]
+		session_id: Option<String>,
+	},
 
-    /// Show knowledge base statistics
-    Stats,
+	/// Show knowledge base statistics
+	Stats,
 
-    /// List indexed sources with metadata
-    List {
-        /// Maximum number of sources to list
-        #[arg(long, default_value = "20")]
-        limit: usize,
-    },
+	/// List indexed sources with metadata
+	List {
+		/// Maximum number of sources to list
+		#[arg(long, default_value = "20")]
+		limit: usize,
+	},
 
-    /// Read and display full content of a URL or local file
-    Read {
-        /// URL or local file path to read (.html, .txt, .md, .pdf, .docx)
-        source: String,
-    },
+	/// Read and display full content of a URL or local file
+	Read {
+		/// URL or local file path to read (.html, .txt, .md, .pdf, .docx)
+		source: String,
+	},
 
-    /// Search indexed content by regex pattern (like grep)
-    Match {
-        /// Regex pattern to search for (e.g., "error_code" or "timeout|retry")
-        pattern: String,
+	/// Search indexed content by regex pattern (like grep)
+	Match {
+		/// Regex pattern to search for (e.g., "error_code" or "timeout|retry")
+		pattern: String,
 
-        /// Filter by specific source URL or file path
-        #[arg(long)]
-        source: Option<String>,
-    },
+		/// Filter by specific source URL or file path
+		#[arg(long)]
+		source: Option<String>,
+	},
 }

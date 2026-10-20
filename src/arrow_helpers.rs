@@ -24,65 +24,60 @@
 //! unexpected type.
 
 use anyhow::{anyhow, Result};
-use arrow_array::{
-    Array, Float32Array, Int32Array, ListArray, RecordBatch, StringArray, TimestampMillisecondArray,
-};
+use arrow_array::{Array, Float32Array, Int32Array, ListArray, RecordBatch, StringArray, TimestampMillisecondArray};
 
 /// Required UTF-8 string column.
 pub fn string_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
-    required(batch, name)
+	required(batch, name)
 }
 
 /// Required 32-bit float column.
 pub fn f32_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Float32Array> {
-    required(batch, name)
+	required(batch, name)
 }
 
 /// Required 32-bit integer column.
 pub fn i32_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int32Array> {
-    required(batch, name)
+	required(batch, name)
 }
 
 /// Required list column.
 pub fn list_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a ListArray> {
-    required(batch, name)
+	required(batch, name)
 }
 
 /// Required millisecond-timestamp column.
-pub fn timestamp_ms_column<'a>(
-    batch: &'a RecordBatch,
-    name: &str,
-) -> Result<&'a TimestampMillisecondArray> {
-    required(batch, name)
+pub fn timestamp_ms_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a TimestampMillisecondArray> {
+	required(batch, name)
 }
 
 /// Optional UTF-8 string column — `None` when the column is absent or mistyped.
 /// Used for columns that may not exist on legacy tables mid-migration.
 pub fn string_column_opt<'a>(batch: &'a RecordBatch, name: &str) -> Option<&'a StringArray> {
-    optional(batch, name)
+	optional(batch, name)
 }
 
 /// Optional 32-bit integer column.
 pub fn i32_column_opt<'a>(batch: &'a RecordBatch, name: &str) -> Option<&'a Int32Array> {
-    optional(batch, name)
+	optional(batch, name)
 }
 
 /// Optional 32-bit float column.
 pub fn f32_column_opt<'a>(batch: &'a RecordBatch, name: &str) -> Option<&'a Float32Array> {
-    optional(batch, name)
+	optional(batch, name)
 }
 
 /// Generic required-column accessor backing the typed wrappers above.
 fn required<'a, A: Array + 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a A> {
-    batch
-        .column_by_name(name)
-        .ok_or_else(|| anyhow!("column '{}' not found in record batch", name))?
-        .as_any()
-        .downcast_ref::<A>()
-        .ok_or_else(|| anyhow!("column '{}' has an unexpected Arrow type", name))
+	batch
+		.column_by_name(name)
+		.ok_or_else(|| anyhow!("column '{}' not found in record batch", name))?
+		.as_any()
+		.downcast_ref::<A>()
+		.ok_or_else(|| anyhow!("column '{}' has an unexpected Arrow type", name))
 }
 
 /// Generic optional-column accessor backing the typed `*_opt` wrappers above.
 fn optional<'a, A: Array + 'static>(batch: &'a RecordBatch, name: &str) -> Option<&'a A> {
-    batch.column_by_name(name)?.as_any().downcast_ref::<A>()
+	batch.column_by_name(name)?.as_any().downcast_ref::<A>()
 }

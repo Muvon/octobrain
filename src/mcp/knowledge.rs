@@ -29,245 +29,224 @@ const KNOWLEDGE_PREVIEW_CHARS: usize = 1500;
 /// Knowledge tools provider
 #[derive(Clone)]
 pub struct KnowledgeProvider {
-    knowledge_manager: Arc<Mutex<KnowledgeManager>>,
-    max_results: usize,
+	knowledge_manager: Arc<Mutex<KnowledgeManager>>,
+	max_results: usize,
 }
 
 impl KnowledgeProvider {
-    pub async fn new(config: &Config) -> Result<Self, McpError> {
-        let manager = KnowledgeManager::new(config).await.map_err(|e| {
-            McpError::internal_error(
-                format!("Failed to initialize knowledge manager: {}", e),
-                "knowledge_init",
-            )
-        })?;
+	pub async fn new(config: &Config) -> Result<Self, McpError> {
+		let manager = KnowledgeManager::new(config).await.map_err(|e| {
+			McpError::internal_error(
+				format!("Failed to initialize knowledge manager: {}", e),
+				"knowledge_init",
+			)
+		})?;
 
-        Ok(Self {
-            knowledge_manager: Arc::new(Mutex::new(manager)),
-            max_results: config.knowledge.max_results,
-        })
-    }
+		Ok(Self {
+			knowledge_manager: Arc::new(Mutex::new(manager)),
+			max_results: config.knowledge.max_results,
+		})
+	}
 
-    /// Execute search command
-    pub async fn execute_search(
-        &self,
-        query: Option<&str>,
-        source: Option<&str>,
-        session_id: &str,
-        active_scope: Option<&str>,
-    ) -> Result<String, McpError> {
-        let query = query.ok_or_else(|| {
-            McpError::invalid_params(
-                "Missing required parameter: query (required for search command)",
-                "knowledge",
-            )
-        })?;
+	/// Execute search command
+	pub async fn execute_search(
+		&self,
+		query: Option<&str>,
+		source: Option<&str>,
+		session_id: &str,
+		active_scope: Option<&str>,
+	) -> Result<String, McpError> {
+		let query = query.ok_or_else(|| {
+			McpError::invalid_params(
+				"Missing required parameter: query (required for search command)",
+				"knowledge",
+			)
+		})?;
 
-        let manager = self.knowledge_manager.lock().await;
-        let results = manager
-            .search(query, source, Some(session_id), active_scope)
-            .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Knowledge search failed: {}", e), "knowledge")
-            })?;
+		let manager = self.knowledge_manager.lock().await;
+		let results = manager
+			.search(query, source, Some(session_id), active_scope)
+			.await
+			.map_err(|e| McpError::internal_error(format!("Knowledge search failed: {}", e), "knowledge"))?;
 
-        if results.is_empty() {
-            return Ok("No results found".to_string());
-        }
+		if results.is_empty() {
+			return Ok("No results found".to_string());
+		}
 
-        let mut output = String::new();
-        for result in results.iter().take(self.max_results) {
-            output.push_str(&"=".repeat(50));
-            output.push('\n');
-            output.push_str(&result.chunk.source_title);
-            output.push('\n');
-            output.push_str(&result.chunk.source);
-            output.push('\n');
+		let mut output = String::new();
+		for result in results.iter().take(self.max_results) {
+			output.push_str(&"=".repeat(50));
+			output.push('\n');
+			output.push_str(&result.chunk.source_title);
+			output.push('\n');
+			output.push_str(&result.chunk.source);
+			output.push('\n');
 
-            if result.session_scoped {
-                output.push_str("[SESSION] ");
-            }
+			if result.session_scoped {
+				output.push_str("[SESSION] ");
+			}
 
-            if !result.chunk.section_path.is_empty() {
-                output.push_str(&result.chunk.section_path.join(" > "));
-                output.push('\n');
-            }
+			if !result.chunk.section_path.is_empty() {
+				output.push_str(&result.chunk.section_path.join(" > "));
+				output.push('\n');
+			}
 
-            // Return the full parent SECTION (what the chunker stored as parent_content
-            // for exactly this purpose), not the small embedded child. Showing the
-            // 300-char child slice defeated the parent/child design for the agent —
-            // the primary consumer — leaving it a fragment instead of the section.
-            // Parent is already capped at 4*chunk_size at write time, so a generous
-            // display cap is safe.
-            let body = result
-                .chunk
-                .parent_content
-                .as_deref()
-                .unwrap_or(&result.chunk.content);
-            let content_preview = if body.chars().count() > KNOWLEDGE_PREVIEW_CHARS {
-                format!(
-                    "{}...",
-                    body.chars()
-                        .take(KNOWLEDGE_PREVIEW_CHARS)
-                        .collect::<String>()
-                )
-            } else {
-                body.to_string()
-            };
-            output.push_str(&content_preview);
-            output.push('\n');
+			// Return the full parent SECTION (what the chunker stored as parent_content
+			// for exactly this purpose), not the small embedded child. Showing the
+			// 300-char child slice defeated the parent/child design for the agent —
+			// the primary consumer — leaving it a fragment instead of the section.
+			// Parent is already capped at 4*chunk_size at write time, so a generous
+			// display cap is safe.
+			let body = result.chunk.parent_content.as_deref().unwrap_or(&result.chunk.content);
+			let content_preview = if body.chars().count() > KNOWLEDGE_PREVIEW_CHARS {
+				format!("{}...", body.chars().take(KNOWLEDGE_PREVIEW_CHARS).collect::<String>())
+			} else {
+				body.to_string()
+			};
+			output.push_str(&content_preview);
+			output.push('\n');
 
-            let score_pct = (result.relevance_score * 100.0) as u32;
-            output.push_str(&format!("Relevance: {}%\n\n", score_pct));
-        }
+			let score_pct = (result.relevance_score * 100.0) as u32;
+			output.push_str(&format!("Relevance: {}%\n\n", score_pct));
+		}
 
-        Ok(output)
-    }
+		Ok(output)
+	}
 
-    /// Execute store command
-    pub async fn execute_store(
-        &self,
-        key: Option<&str>,
-        content: Option<&str>,
-        session_id: &str,
-    ) -> Result<String, McpError> {
-        let key = key.ok_or_else(|| {
-            McpError::invalid_params(
-                "Missing required parameter: key (required for store command)",
-                "knowledge",
-            )
-        })?;
-        let content = content.ok_or_else(|| {
-            McpError::invalid_params(
-                "Missing required parameter: content (required for store command)",
-                "knowledge",
-            )
-        })?;
+	/// Execute store command
+	pub async fn execute_store(
+		&self,
+		key: Option<&str>,
+		content: Option<&str>,
+		session_id: &str,
+	) -> Result<String, McpError> {
+		let key = key.ok_or_else(|| {
+			McpError::invalid_params(
+				"Missing required parameter: key (required for store command)",
+				"knowledge",
+			)
+		})?;
+		let content = content.ok_or_else(|| {
+			McpError::invalid_params(
+				"Missing required parameter: content (required for store command)",
+				"knowledge",
+			)
+		})?;
 
-        let manager = self.knowledge_manager.lock().await;
-        let result = manager
-            .store_content(key, content, session_id)
-            .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Knowledge store failed: {}", e), "knowledge")
-            })?;
+		let manager = self.knowledge_manager.lock().await;
+		let result = manager
+			.store_content(key, content, session_id)
+			.await
+			.map_err(|e| McpError::internal_error(format!("Knowledge store failed: {}", e), "knowledge"))?;
 
-        Ok(format!(
-            "Stored '{}' as {} ({} chunks indexed)",
-            key, result.source, result.chunks_created
-        ))
-    }
+		Ok(format!(
+			"Stored '{}' as {} ({} chunks indexed)",
+			key, result.source, result.chunks_created
+		))
+	}
 
-    /// Execute delete command
-    pub async fn execute_delete(
-        &self,
-        key: Option<&str>,
-        session_id: &str,
-    ) -> Result<String, McpError> {
-        let key = key.ok_or_else(|| {
-            McpError::invalid_params(
-                "Missing required parameter: key (required for delete command)",
-                "knowledge",
-            )
-        })?;
+	/// Execute delete command
+	pub async fn execute_delete(&self, key: Option<&str>, session_id: &str) -> Result<String, McpError> {
+		let key = key.ok_or_else(|| {
+			McpError::invalid_params(
+				"Missing required parameter: key (required for delete command)",
+				"knowledge",
+			)
+		})?;
 
-        let manager = self.knowledge_manager.lock().await;
-        manager.delete_content(key, session_id).await.map_err(|e| {
-            McpError::internal_error(format!("Knowledge delete failed: {}", e), "knowledge")
-        })?;
+		let manager = self.knowledge_manager.lock().await;
+		manager
+			.delete_content(key, session_id)
+			.await
+			.map_err(|e| McpError::internal_error(format!("Knowledge delete failed: {}", e), "knowledge"))?;
 
-        Ok(format!("Deleted stored knowledge '{}'", key))
-    }
+		Ok(format!("Deleted stored knowledge '{}'", key))
+	}
 
-    /// Execute read command — fetch and return full text content of a source
-    pub async fn execute_read(&self, source: Option<&str>) -> Result<String, McpError> {
-        let source = source.ok_or_else(|| {
-            McpError::invalid_params(
-                "Missing required parameter: source (required for read command)",
-                "knowledge",
-            )
-        })?;
+	/// Execute read command — fetch and return full text content of a source
+	pub async fn execute_read(&self, source: Option<&str>) -> Result<String, McpError> {
+		let source = source.ok_or_else(|| {
+			McpError::invalid_params(
+				"Missing required parameter: source (required for read command)",
+				"knowledge",
+			)
+		})?;
 
-        let manager = self.knowledge_manager.lock().await;
-        let result = manager.read(source).await.map_err(|e| {
-            McpError::internal_error(format!("Knowledge read failed: {}", e), "knowledge")
-        })?;
+		let manager = self.knowledge_manager.lock().await;
+		let result = manager
+			.read(source)
+			.await
+			.map_err(|e| McpError::internal_error(format!("Knowledge read failed: {}", e), "knowledge"))?;
 
-        let mut output = String::new();
-        output.push_str(&result.title);
-        output.push('\n');
-        output.push_str(&result.source);
-        output.push('\n');
-        output.push_str(&format!("Type: {}", result.content_type));
-        output.push('\n');
-        output.push_str(&"=".repeat(50));
-        output.push('\n');
-        output.push_str(&result.content);
+		let mut output = String::new();
+		output.push_str(&result.title);
+		output.push('\n');
+		output.push_str(&result.source);
+		output.push('\n');
+		output.push_str(&format!("Type: {}", result.content_type));
+		output.push('\n');
+		output.push_str(&"=".repeat(50));
+		output.push('\n');
+		output.push_str(&result.content);
 
-        Ok(output)
-    }
+		Ok(output)
+	}
 
-    /// Execute match command — search indexed content by regex pattern
-    pub async fn execute_match(
-        &self,
-        pattern: Option<&str>,
-        source: Option<&str>,
-        session_id: &str,
-        active_scope: Option<&str>,
-    ) -> Result<String, McpError> {
-        let pattern = pattern.ok_or_else(|| {
-            McpError::invalid_params(
-                "Missing required parameter: pattern (required for match command)",
-                "knowledge",
-            )
-        })?;
+	/// Execute match command — search indexed content by regex pattern
+	pub async fn execute_match(
+		&self,
+		pattern: Option<&str>,
+		source: Option<&str>,
+		session_id: &str,
+		active_scope: Option<&str>,
+	) -> Result<String, McpError> {
+		let pattern = pattern.ok_or_else(|| {
+			McpError::invalid_params(
+				"Missing required parameter: pattern (required for match command)",
+				"knowledge",
+			)
+		})?;
 
-        // Validate regex up-front so a bad pattern returns invalid_params
-        // (user error) rather than internal_error from the manager.
-        regex::Regex::new(pattern).map_err(|e| {
-            McpError::invalid_params(format!("Invalid regex pattern: {}", e), "knowledge")
-        })?;
+		// Validate regex up-front so a bad pattern returns invalid_params
+		// (user error) rather than internal_error from the manager.
+		regex::Regex::new(pattern)
+			.map_err(|e| McpError::invalid_params(format!("Invalid regex pattern: {}", e), "knowledge"))?;
 
-        let manager = self.knowledge_manager.lock().await;
-        let results = manager
-            .match_content(pattern, source, Some(session_id), active_scope)
-            .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Knowledge match failed: {}", e), "knowledge")
-            })?;
+		let manager = self.knowledge_manager.lock().await;
+		let results = manager
+			.match_content(pattern, source, Some(session_id), active_scope)
+			.await
+			.map_err(|e| McpError::internal_error(format!("Knowledge match failed: {}", e), "knowledge"))?;
 
-        if results.is_empty() {
-            return Ok("No matches found".to_string());
-        }
+		if results.is_empty() {
+			return Ok("No matches found".to_string());
+		}
 
-        let mut output = String::new();
-        for result in &results {
-            output.push_str(&"=".repeat(50));
-            output.push('\n');
-            output.push_str(&result.source_title);
-            output.push('\n');
-            output.push_str(&result.source);
-            output.push('\n');
-            output.push_str(&result.matched_line);
-            if !result.captures.is_empty() {
-                output.push_str(&format!(" [captures: {}]", result.captures.join(", ")));
-            }
-            output.push('\n');
-        }
+		let mut output = String::new();
+		for result in &results {
+			output.push_str(&"=".repeat(50));
+			output.push('\n');
+			output.push_str(&result.source_title);
+			output.push('\n');
+			output.push_str(&result.source);
+			output.push('\n');
+			output.push_str(&result.matched_line);
+			if !result.captures.is_empty() {
+				output.push_str(&format!(" [captures: {}]", result.captures.join(", ")));
+			}
+			output.push('\n');
+		}
 
-        Ok(output)
-    }
+		Ok(output)
+	}
 
-    /// Discover/refresh knowledge boxes (project `.box/`, org auto-probe, subscribed
-    /// remotes). Intended to be driven from a background task on the MCP server.
-    pub async fn sync_boxes(
-        &self,
-        projects: &[(std::path::PathBuf, String)],
-    ) -> Result<(), McpError> {
-        let manager = self.knowledge_manager.lock().await;
-        manager
-            .sync_boxes(projects)
-            .await
-            .map_err(|e| McpError::internal_error(format!("Box sync failed: {}", e), "knowledge"))
-    }
+	/// Discover/refresh knowledge boxes (project `.box/`, org auto-probe, subscribed
+	/// remotes). Intended to be driven from a background task on the MCP server.
+	pub async fn sync_boxes(&self, projects: &[(std::path::PathBuf, String)]) -> Result<(), McpError> {
+		let manager = self.knowledge_manager.lock().await;
+		manager
+			.sync_boxes(projects)
+			.await
+			.map_err(|e| McpError::internal_error(format!("Box sync failed: {}", e), "knowledge"))
+	}
 }

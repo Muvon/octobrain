@@ -49,100 +49,95 @@ use anyhow::Result;
 /// Reranker integration wrapper
 #[derive(Clone)]
 pub struct RerankerIntegration {
-    pub config: RerankerConfig,
+	pub config: RerankerConfig,
 }
 
 impl RerankerIntegration {
-    pub fn new(config: RerankerConfig) -> Self {
-        Self { config }
-    }
+	pub fn new(config: RerankerConfig) -> Self {
+		Self { config }
+	}
 
-    /// Rerank memory search results using octolib.
-    ///
-    /// `top_n` is the number of results the CALLER asked for — it is what we
-    /// request from the reranker and the size we cap the output at. Previously
-    /// this used the fixed `config.final_top_k`, which silently overrode the
-    /// caller's `limit` (a `limit=5` request returned up to 10; a `limit=20`
-    /// request returned only 10). On any reranker failure we degrade gracefully
-    /// to the already-good pre-rerank ranking (truncated to `top_n`) instead of
-    /// failing the whole search.
-    pub async fn rerank_memories(
-        &self,
-        query: &str,
-        mut results: Vec<MemorySearchResult>,
-        top_n: usize,
-    ) -> Result<Vec<MemorySearchResult>> {
-        if !self.config.enabled || results.is_empty() {
-            return Ok(results);
-        }
+	/// Rerank memory search results using octolib.
+	///
+	/// `top_n` is the number of results the CALLER asked for — it is what we
+	/// request from the reranker and the size we cap the output at. Previously
+	/// this used the fixed `config.final_top_k`, which silently overrode the
+	/// caller's `limit` (a `limit=5` request returned up to 10; a `limit=20`
+	/// request returned only 10). On any reranker failure we degrade gracefully
+	/// to the already-good pre-rerank ranking (truncated to `top_n`) instead of
+	/// failing the whole search.
+	pub async fn rerank_memories(
+		&self,
+		query: &str,
+		mut results: Vec<MemorySearchResult>,
+		top_n: usize,
+	) -> Result<Vec<MemorySearchResult>> {
+		if !self.config.enabled || results.is_empty() {
+			return Ok(results);
+		}
 
-        // Convert memories to documents for reranking
-        let documents: Vec<String> = results
-            .iter()
-            .map(|r| {
-                format!(
-                    "{}\n{}\nTags: {}",
-                    r.memory.title,
-                    r.memory.content,
-                    r.memory.metadata.tags.join(", ")
-                )
-            })
-            .collect();
+		// Convert memories to documents for reranking
+		let documents: Vec<String> = results
+			.iter()
+			.map(|r| {
+				format!(
+					"{}\n{}\nTags: {}",
+					r.memory.title,
+					r.memory.content,
+					r.memory.metadata.tags.join(", ")
+				)
+			})
+			.collect();
 
-        // Cached provider (crate::reranker): local rerankers keep ~GB-scale
-        // weights resident and octolib's one-shot rerank() reloads them on
-        // every call — load once, share across searches. Construction failure
-        // degrades exactly like a rerank failure below: the search still works.
-        let reranker = match crate::reranker::create_rerank_provider(&self.config.model).await {
-            Ok(reranker) => reranker,
-            Err(e) => {
-                tracing::warn!("Reranker failed ({}); falling back to hybrid ranking", e);
-                results.truncate(top_n);
-                return Ok(results);
-            }
-        };
+		// Cached provider (crate::reranker): local rerankers keep ~GB-scale
+		// weights resident and octolib's one-shot rerank() reloads them on
+		// every call — load once, share across searches. Construction failure
+		// degrades exactly like a rerank failure below: the search still works.
+		let reranker = match crate::reranker::create_rerank_provider(&self.config.model).await {
+			Ok(reranker) => reranker,
+			Err(e) => {
+				tracing::warn!("Reranker failed ({}); falling back to hybrid ranking", e);
+				results.truncate(top_n);
+				return Ok(results);
+			}
+		};
 
-        // Rerank with optional timeout (truncation = true matches the previous
-        // octolib::reranker::rerank behavior)
-        let rerank_fut = reranker.rerank(query, documents, Some(top_n), true);
-        let rerank_outcome = if self.config.timeout_secs == 0 {
-            rerank_fut.await
-        } else {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(self.config.timeout_secs),
-                rerank_fut,
-            )
-            .await
-            {
-                Ok(inner) => inner,
-                Err(_) => Err(anyhow::anyhow!(
-                    "Reranker timed out after {}s",
-                    self.config.timeout_secs
-                )),
-            }
-        };
+		// Rerank with optional timeout (truncation = true matches the previous
+		// octolib::reranker::rerank behavior)
+		let rerank_fut = reranker.rerank(query, documents, Some(top_n), true);
+		let rerank_outcome = if self.config.timeout_secs == 0 {
+			rerank_fut.await
+		} else {
+			match tokio::time::timeout(std::time::Duration::from_secs(self.config.timeout_secs), rerank_fut).await {
+				Ok(inner) => inner,
+				Err(_) => Err(anyhow::anyhow!(
+					"Reranker timed out after {}s",
+					self.config.timeout_secs
+				)),
+			}
+		};
 
-        // Graceful degradation: a reranker outage/timeout must not fail the whole
-        // search — fall back to the pre-rerank hybrid ranking, capped to top_n.
-        let rerank_response = match rerank_outcome {
-            Ok(resp) => resp,
-            Err(e) => {
-                tracing::warn!("Reranker failed ({}); falling back to hybrid ranking", e);
-                results.truncate(top_n);
-                return Ok(results);
-            }
-        };
+		// Graceful degradation: a reranker outage/timeout must not fail the whole
+		// search — fall back to the pre-rerank hybrid ranking, capped to top_n.
+		let rerank_response = match rerank_outcome {
+			Ok(resp) => resp,
+			Err(e) => {
+				tracing::warn!("Reranker failed ({}); falling back to hybrid ranking", e);
+				results.truncate(top_n);
+				return Ok(results);
+			}
+		};
 
-        // Map reranked results back to MemorySearchResult
-        let mut reranked_results = Vec::new();
-        for rerank_result in rerank_response.results {
-            if let Some(original) = results.get_mut(rerank_result.index) {
-                // Update relevance score with reranker score (convert f64 to f32)
-                original.relevance_score = rerank_result.relevance_score as f32;
-                reranked_results.push(original.clone());
-            }
-        }
+		// Map reranked results back to MemorySearchResult
+		let mut reranked_results = Vec::new();
+		for rerank_result in rerank_response.results {
+			if let Some(original) = results.get_mut(rerank_result.index) {
+				// Update relevance score with reranker score (convert f64 to f32)
+				original.relevance_score = rerank_result.relevance_score as f32;
+				reranked_results.push(original.clone());
+			}
+		}
 
-        Ok(reranked_results)
-    }
+		Ok(reranked_results)
+	}
 }

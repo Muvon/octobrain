@@ -2,24 +2,23 @@
 //
 use anyhow::{Context, Result};
 use arrow_array::{
-    Array, FixedSizeListArray, Float32Array, Int32Array, RecordBatch, StringArray,
-    TimestampMillisecondArray,
+	Array, FixedSizeListArray, Float32Array, Int32Array, RecordBatch, StringArray, TimestampMillisecondArray,
 };
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use lance_index::scalar::FullTextSearchQuery;
 use lancedb::{
-    connect,
-    index::Index,
-    query::{ExecutableQuery, QueryBase, QueryExecutionOptions},
-    table::{NewColumnTransform, OptimizeAction},
-    Connection, DistanceType, Table,
+	connect,
+	index::Index,
+	query::{ExecutableQuery, QueryBase, QueryExecutionOptions},
+	table::{NewColumnTransform, OptimizeAction},
+	Connection, DistanceType, Table,
 };
 use std::sync::Arc;
 
 use crate::arrow_helpers::{
-    f32_column_opt, i32_column, list_column, string_column, string_column_opt, timestamp_ms_column,
+	f32_column_opt, i32_column, list_column, string_column, string_column_opt, timestamp_ms_column,
 };
 use crate::knowledge::types::{KnowledgeChunk, KnowledgeSearchResult, KnowledgeStats};
 use crate::sql::escape_sql_literal;
@@ -34,1095 +33,1009 @@ const RRF_K: f32 = 60.0;
 /// Build a `scope IN ('a','b',...)` predicate for the visible scope set.
 /// Returns `None` when `scopes` is `None` (unscoped/admin → no filter) or empty.
 fn scope_in_clause(scopes: Option<&[String]>) -> Option<String> {
-    let scopes = scopes?;
-    if scopes.is_empty() {
-        return None;
-    }
-    let list = scopes
-        .iter()
-        .map(|s| format!("'{}'", escape_sql_literal(s)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!("scope IN ({})", list))
+	let scopes = scopes?;
+	if scopes.is_empty() {
+		return None;
+	}
+	let list = scopes
+		.iter()
+		.map(|s| format!("'{}'", escape_sql_literal(s)))
+		.collect::<Vec<_>>()
+		.join(", ");
+	Some(format!("scope IN ({})", list))
 }
 
 pub struct KnowledgeStore {
-    table: Table,
-    schema: Arc<Schema>,
-    vector_dim: usize,
+	table: Table,
+	schema: Arc<Schema>,
+	vector_dim: usize,
 }
 
 impl KnowledgeStore {
-    pub async fn new(vector_dim: usize) -> Result<Self> {
-        let db_path = crate::storage::get_system_storage_dir()?.join("knowledge");
-        Self::open_at(&db_path, vector_dim).await
-    }
-
-    /// Open (or create) a knowledge store at an explicit directory. Used by the
-    /// retrieval benchmark to run against an isolated LanceDB without touching
-    /// the user's real knowledge database.
-    pub async fn open_at(db_path: &std::path::Path, vector_dim: usize) -> Result<Self> {
-        std::fs::create_dir_all(db_path)?;
-
-        let db = connect(db_path.to_str().unwrap()).execute().await?;
-        let schema = Self::build_schema(vector_dim);
-
-        Self::initialize_table(&db, &schema).await?;
-
-        // Cache the table handle — opened once, reused for the lifetime of this store
-        let table = db.open_table("knowledge_chunks").execute().await?;
-
-        // Non-destructive migration: add the `scope` column to pre-existing tables
-        // that were created before knowledge gained scopes. Existing hot-knowledge
-        // rows default to global ("") so behavior is unchanged.
-        Self::migrate_scope_column(&table).await?;
-
-        Ok(Self {
-            table,
-            schema,
-            vector_dim,
-        })
-    }
-
-    /// Add the `scope` column to a pre-existing `knowledge_chunks` table created
-    /// before box knowledge. Defaults all legacy rows to global ("").
-    async fn migrate_scope_column(table: &Table) -> Result<()> {
-        let existing = table.schema().await?;
-        if existing.field_with_name("scope").is_ok() {
-            return Ok(());
-        }
-        tracing::info!("Migrating knowledge_chunks: adding 'scope' column (default '')");
-        table
-            .add_columns(
-                NewColumnTransform::SqlExpressions(vec![("scope".to_string(), "''".to_string())]),
-                None,
-            )
-            .await
-            .context("Failed to add scope column to existing knowledge_chunks table")?;
-        Ok(())
-    }
-
-    fn build_schema(vector_dim: usize) -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("source", DataType::Utf8, false),
-            Field::new("source_title", DataType::Utf8, false),
-            Field::new("session_id", DataType::Utf8, true),
-            Field::new("chunk_index", DataType::Int32, false),
-            Field::new("content", DataType::Utf8, false),
-            Field::new("parent_content", DataType::Utf8, false),
-            Field::new(
-                "section_path",
-                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-                true,
-            ),
-            Field::new("char_start", DataType::Int32, false),
-            Field::new("char_end", DataType::Int32, false),
-            Field::new("content_hash", DataType::Utf8, false),
-            Field::new(
-                "indexed_at",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new(
-                "last_checked",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new(
-                "embedding",
-                DataType::FixedSizeList(
-                    Arc::new(Field::new("item", DataType::Float32, true)),
-                    vector_dim as i32,
-                ),
-                false,
-            ),
-            // `scope` is last so a fresh table and a migrated table (add_columns
-            // appends) share an identical column order. Non-null with a "" default on
-            // migration — mirrors how the memory store adds its migrated columns. Box
-            // rows carry their bound scope; hot knowledge is global ("").
-            Field::new("scope", DataType::Utf8, false),
-        ]))
-    }
-
-    async fn initialize_table(db: &Connection, schema: &Arc<Schema>) -> Result<()> {
-        let table_names = db.table_names().execute().await?;
-
-        // Drop table if schema is outdated (missing columns)
-        if table_names.contains(&"knowledge_chunks".to_string()) {
-            let table = db.open_table("knowledge_chunks").execute().await?;
-            let existing_schema = table.schema().await?;
-            // `scope` is handled non-destructively by migrate_scope_column (add_columns),
-            // so a table merely missing `scope` must NOT trigger a destructive recreate.
-            let needs_recreate = schema
-                .fields()
-                .iter()
-                .filter(|f| f.name() != "scope")
-                .any(|f| existing_schema.field_with_name(f.name()).is_err());
-            if needs_recreate {
-                tracing::info!("knowledge_chunks schema outdated, dropping and recreating");
-                db.drop_table("knowledge_chunks", &[]).await?;
-            } else {
-                return Ok(());
-            }
-        }
-
-        // Create table with empty batch (schema-only creation)
-        use arrow::record_batch::RecordBatchIterator;
-        use std::iter::once;
-        let empty_batch = RecordBatch::new_empty(schema.clone());
-        let batch_reader = RecordBatchIterator::new(once(Ok(empty_batch)), schema.clone());
-        db.create_table("knowledge_chunks", batch_reader)
-            .execute()
-            .await?;
-
-        // Create FTS index on content column for hybrid search (BM25 + Vector)
-        let table = db.open_table("knowledge_chunks").execute().await?;
-        table
-            .create_index(&["content"], Index::FTS(Default::default()))
-            .execute()
-            .await
-            .context("Failed to create FTS index on content column")?;
-
-        // Bitmap index on scope for fast pushdown of the `scope IN (...)` visibility filter.
-        table
-            .create_index(&["scope"], Index::Bitmap(Default::default()))
-            .execute()
-            .await
-            .context("Failed to create Bitmap index on knowledge_chunks.scope")?;
-
-        tracing::info!("Created FTS + scope indexes on knowledge_chunks for hybrid scoped search");
-
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn store_chunks(
-        &self,
-        source: &str,
-        source_title: &str,
-        scope: &str,
-        content_hash: &str,
-        chunks: &[KnowledgeChunk],
-        embeddings: &[Vec<f32>],
-        session_id: Option<&str>,
-    ) -> Result<()> {
-        // Delete existing chunks: session-scoped deletes only within session,
-        // persistent deletes all chunks for source (full reindex)
-        if let Some(sid) = session_id {
-            self.delete_by_source_and_session(source, sid).await?;
-        } else {
-            self.delete_source(source).await?;
-        }
-
-        if chunks.is_empty() {
-            return Ok(());
-        }
-
-        let now = Utc::now();
-        let now_millis = now.timestamp_millis();
-
-        // Build arrays
-        let ids: Vec<&str> = chunks.iter().map(|c| c.id.as_str()).collect();
-        let sources: Vec<&str> = chunks.iter().map(|_| source).collect();
-        let source_titles: Vec<&str> = chunks.iter().map(|_| source_title).collect();
-        let session_ids: Vec<Option<&str>> = chunks.iter().map(|_| session_id).collect();
-        let chunk_indices: Vec<i32> = chunks.iter().map(|c| c.chunk_index).collect();
-        let contents: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
-        let parent_contents: Vec<&str> = chunks
-            .iter()
-            .map(|c| c.parent_content.as_deref().unwrap_or(""))
-            .collect();
-        let char_starts: Vec<i32> = chunks.iter().map(|c| c.char_start as i32).collect();
-        let char_ends: Vec<i32> = chunks.iter().map(|c| c.char_end as i32).collect();
-        let content_hashes: Vec<&str> = chunks.iter().map(|_| content_hash).collect();
-        let indexed_ats: Vec<i64> = chunks.iter().map(|_| now_millis).collect();
-        let last_checkeds: Vec<i64> = chunks.iter().map(|_| now_millis).collect();
-        let scopes: Vec<&str> = chunks.iter().map(|_| scope).collect();
-
-        // Build section_path list array
-        let mut section_path_builder =
-            arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
-        for chunk in chunks {
-            for section in &chunk.section_path {
-                section_path_builder.values().append_value(section);
-            }
-            section_path_builder.append(true);
-        }
-        let section_path_array = section_path_builder.finish();
-
-        // Build embedding array
-        let embedding_values: Vec<f32> =
-            embeddings.iter().flat_map(|e| e.iter().copied()).collect();
-        let embedding_array = FixedSizeListArray::try_new(
-            Arc::new(Field::new("item", DataType::Float32, true)),
-            self.vector_dim as i32,
-            Arc::new(Float32Array::from(embedding_values)),
-            None,
-        )?;
-
-        let batch = RecordBatch::try_new(
-            self.schema.clone(),
-            vec![
-                Arc::new(StringArray::from(ids)),
-                Arc::new(StringArray::from(sources)),
-                Arc::new(StringArray::from(source_titles)),
-                Arc::new(StringArray::from(session_ids)),
-                Arc::new(Int32Array::from(chunk_indices)),
-                Arc::new(StringArray::from(contents)),
-                Arc::new(StringArray::from(parent_contents)),
-                Arc::new(section_path_array),
-                Arc::new(Int32Array::from(char_starts)),
-                Arc::new(Int32Array::from(char_ends)),
-                Arc::new(StringArray::from(content_hashes)),
-                Arc::new(TimestampMillisecondArray::from(indexed_ats)),
-                Arc::new(TimestampMillisecondArray::from(last_checkeds)),
-                Arc::new(embedding_array),
-                Arc::new(StringArray::from(scopes)),
-            ],
-        )?;
-
-        use arrow::record_batch::RecordBatchIterator;
-        use std::iter::once;
-        let batch_reader = RecordBatchIterator::new(once(Ok(batch)), self.schema.clone());
-        self.table.add(batch_reader).execute().await?;
-
-        Ok(())
-    }
-
-    /// Compact fragments, prune old versions, and update FTS/scalar indexes so
-    /// new chunks are searchable without brute-force fallback on the unindexed
-    /// portion. Callers run this once per indexing operation — NOT per document
-    /// — so a box sweep over N changed files pays one compaction, not N.
-    pub async fn optimize(&self) {
-        self.table.optimize(OptimizeAction::All).await.ok();
-    }
-
-    /// Bulk-ingest one row per passage `(id, title, text, embedding)`. Unlike
-    /// `store_chunks`, this doesn't delete existing rows by source — rows are
-    /// added in batches and the index is rebuilt once at the end, so ingesting
-    /// N passages is a single pass. Each passage becomes a standalone
-    /// chunk (chunk_index 0, no parent, global scope). Used only by the retrieval
-    /// benchmark, so it's gated behind the `bench` feature (no dead code in
-    /// normal builds).
-    #[cfg(feature = "bench")]
-    pub async fn bulk_store(
-        &self,
-        ids: &[String],
-        titles: &[String],
-        texts: &[String],
-        embeddings: &[Vec<f32>],
-    ) -> Result<()> {
-        assert_eq!(ids.len(), titles.len(), "ids/titles length mismatch");
-        assert_eq!(ids.len(), texts.len(), "ids/texts length mismatch");
-        assert_eq!(
-            ids.len(),
-            embeddings.len(),
-            "ids/embeddings length mismatch"
-        );
-        if ids.is_empty() {
-            return Ok(());
-        }
-
-        let now_millis = Utc::now().timestamp_millis();
-        const BATCH: usize = 2048;
-
-        for start in (0..ids.len()).step_by(BATCH) {
-            let end = (start + BATCH).min(ids.len());
-            let n = end - start;
-            let str_col = |s: &[String]| {
-                StringArray::from(s[start..end].iter().map(|x| x.as_str()).collect::<Vec<_>>())
-            };
-
-            // Empty section_path list per row.
-            let mut section_path_builder =
-                arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
-            for _ in 0..n {
-                section_path_builder.append(true);
-            }
-
-            let embedding_values: Vec<f32> = embeddings[start..end]
-                .iter()
-                .flat_map(|e| e.iter().copied())
-                .collect();
-            let embedding_array = FixedSizeListArray::try_new(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                self.vector_dim as i32,
-                Arc::new(Float32Array::from(embedding_values)),
-                None,
-            )?;
-
-            let batch = RecordBatch::try_new(
-                self.schema.clone(),
-                vec![
-                    Arc::new(str_col(ids)),                                     // id
-                    Arc::new(str_col(ids)),                                     // source
-                    Arc::new(str_col(titles)),                                  // source_title
-                    Arc::new(StringArray::from(vec![None as Option<&str>; n])), // session_id
-                    Arc::new(Int32Array::from(vec![0i32; n])),                  // chunk_index
-                    Arc::new(str_col(texts)),                                   // content
-                    Arc::new(StringArray::from(vec![""; n])),                   // parent_content
-                    Arc::new(section_path_builder.finish()),                    // section_path
-                    Arc::new(Int32Array::from(vec![0i32; n])),                  // char_start
-                    Arc::new(Int32Array::from(
-                        texts[start..end]
-                            .iter()
-                            .map(|t| t.len() as i32)
-                            .collect::<Vec<_>>(),
-                    )), // char_end
-                    Arc::new(str_col(ids)),                                     // content_hash
-                    Arc::new(TimestampMillisecondArray::from(vec![now_millis; n])), // indexed_at
-                    Arc::new(TimestampMillisecondArray::from(vec![now_millis; n])), // last_checked
-                    Arc::new(embedding_array),                                  // embedding
-                    Arc::new(StringArray::from(vec![""; n])),                   // scope
-                ],
-            )?;
-
-            use arrow::record_batch::RecordBatchIterator;
-            use std::iter::once;
-            let batch_reader = RecordBatchIterator::new(once(Ok(batch)), self.schema.clone());
-            self.table.add(batch_reader).execute().await?;
-        }
-
-        // Single index rebuild for the whole ingest.
-        self.table.optimize(OptimizeAction::All).await.ok();
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn search(
-        &self,
-        query_embedding: &[f32],
-        query_text: &str,
-        source: Option<&str>,
-        limit: usize,
-        use_hybrid: bool,
-        session_id: Option<&str>,
-        scopes: Option<&[String]>,
-    ) -> Result<Vec<KnowledgeSearchResult>> {
-        let mut query = self
-            .table
-            .vector_search(query_embedding)?
-            .distance_type(DistanceType::Cosine)
-            .limit(limit);
-
-        // Add full-text search for hybrid mode
-        if use_hybrid {
-            let fts_query = FullTextSearchQuery::new(query_text.to_string());
-            query = query.full_text_search(fts_query);
-        }
-
-        // Build filter conditions
-        let mut filters = Vec::new();
-
-        if let Some(s) = source {
-            filters.push(format!("source = '{}'", escape_sql_literal(s)));
-        }
-
-        // Session scoping: return persistent (NULL session_id) + current session's data
-        if let Some(sid) = session_id {
-            filters.push(format!(
-                "(session_id IS NULL OR session_id = '{}')",
-                escape_sql_literal(sid)
-            ));
-        }
-
-        // Scope visibility: hot knowledge ("") + bound boxes for the active scope and
-        // its ancestors. None = unscoped/admin (no filter, all scopes).
-        if let Some(filter) = scope_in_clause(scopes) {
-            filters.push(filter);
-        }
-
-        if !filters.is_empty() {
-            query = query.only_if(filters.join(" AND "));
-        }
-
-        // Execute hybrid search if enabled, otherwise regular vector search
-        let mut results = if use_hybrid {
-            query
-                .execute_hybrid(QueryExecutionOptions::default())
-                .await?
-        } else {
-            query.execute().await?
-        };
-
-        let mut search_results = Vec::new();
-
-        while let Some(batch) = results.try_next().await? {
-            if batch.num_rows() == 0 {
-                continue;
-            }
-
-            let ids = string_column(&batch, "id")?;
-            let sources = string_column(&batch, "source")?;
-            let source_titles = string_column(&batch, "source_title")?;
-            let session_ids = string_column_opt(&batch, "session_id");
-            let chunk_indices = i32_column(&batch, "chunk_index")?;
-            let contents = string_column(&batch, "content")?;
-            let parent_contents = string_column(&batch, "parent_content")?;
-            let section_paths = list_column(&batch, "section_path")?;
-            let char_starts = i32_column(&batch, "char_start")?;
-            let char_ends = i32_column(&batch, "char_end")?;
-            // Extract score column - hybrid search uses _relevance_score, vector search uses _distance
-            // LanceDB hybrid search with RRF reranking returns _relevance_score (raw RRF scores)
-            // RRF formula: score = sum of 1/(rank + k) for each ranking (vector + FTS)
-            // Max possible score is 2/k (if rank 0 in both)
-            // Regular vector search returns _distance (0-2 for cosine, lower is better)
-            let relevance_scores: Vec<f32> = if use_hybrid {
-                // Hybrid search: normalize RRF scores to 0-1 range.
-                // Normalize by 1/k (a perfect rank-0 hit in a SINGLE list), not 2/k:
-                // a chunk only the dense leg finds (no lexical overlap) otherwise caps
-                // at 0.5 and loses to mediocre both-list hits. Excess clamps to 1.0.
-                let max_rrf_score = 1.0 / RRF_K;
-                f32_column_opt(&batch, "_relevance_score")
-                    .map(|arr| {
-                        (0..arr.len())
-                            .map(|i| (arr.value(i) / max_rrf_score).min(1.0))
-                            .collect::<Vec<f32>>()
-                    })
-                    .unwrap_or_else(|| vec![0.5; batch.num_rows()])
-            } else {
-                // Vector search: convert _distance to relevance (1.0 - distance for cosine)
-                f32_column_opt(&batch, "_distance")
-                    .map(|arr| {
-                        (0..arr.len())
-                            .map(|i| 1.0 - arr.value(i))
-                            .collect::<Vec<f32>>()
-                    })
-                    .unwrap_or_else(|| vec![0.5; batch.num_rows()])
-            };
-
-            for (i, &relevance_score) in relevance_scores.iter().enumerate() {
-                let section_path_array = section_paths.value(i);
-                let section_path_strings = section_path_array
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap();
-                let section_path: Vec<String> = (0..section_path_strings.len())
-                    .map(|j| section_path_strings.value(j).to_string())
-                    .collect();
-
-                let is_session_scoped = session_ids
-                    .map(|arr| !arr.is_null(i) && !arr.value(i).is_empty())
-                    .unwrap_or(false);
-
-                let chunk = KnowledgeChunk {
-                    id: ids.value(i).to_string(),
-                    source: sources.value(i).to_string(),
-                    source_title: source_titles.value(i).to_string(),
-                    chunk_index: chunk_indices.value(i),
-                    content: contents.value(i).to_string(),
-                    parent_content: {
-                        let p = parent_contents.value(i);
-                        if p.is_empty() {
-                            None
-                        } else {
-                            Some(p.to_string())
-                        }
-                    },
-                    section_path,
-                    char_start: char_starts.value(i) as usize,
-                    char_end: char_ends.value(i) as usize,
-                };
-
-                search_results.push(KnowledgeSearchResult {
-                    chunk,
-                    relevance_score,
-                    session_scoped: is_session_scoped,
-                });
-            }
-        }
-
-        Ok(search_results)
-    }
-
-    pub async fn get_source_metadata(
-        &self,
-        source: &str,
-    ) -> Result<Option<(String, DateTime<Utc>)>> {
-        let query = self
-            .table
-            .query()
-            .only_if(format!("source = '{}'", escape_sql_literal(source)))
-            .limit(1);
-
-        let results = query.execute().await?;
-        let batches: Vec<RecordBatch> = results.try_collect().await?;
-
-        if batches.is_empty() || batches[0].num_rows() == 0 {
-            return Ok(None);
-        }
-
-        let batch = &batches[0];
-        let content_hashes = string_column(batch, "content_hash")?;
-        let last_checkeds = timestamp_ms_column(batch, "last_checked")?;
-
-        let content_hash = content_hashes.value(0).to_string();
-        let last_checked_millis = last_checkeds.value(0);
-        let last_checked =
-            DateTime::from_timestamp_millis(last_checked_millis).context("Invalid timestamp")?;
-
-        Ok(Some((content_hash, last_checked)))
-    }
-
-    pub async fn delete_source(&self, source: &str) -> Result<()> {
-        self.table
-            .delete(&format!("source = '{}'", escape_sql_literal(source)))
-            .await?;
-        Ok(())
-    }
-
-    /// Delete every row whose `source` starts with `prefix` — used to drop a whole
-    /// box (`box://<box_id>/`) on remove or full re-import.
-    pub async fn delete_by_source_prefix(&self, prefix: &str) -> Result<()> {
-        self.table
-            .delete(&format!("source LIKE '{}%'", escape_sql_literal(prefix)))
-            .await?;
-        Ok(())
-    }
-
-    /// List distinct `source` URIs whose value starts with `prefix` (e.g. all files
-    /// currently indexed for a box) — used to prune sources removed from a box.
-    pub async fn list_sources_with_prefix(&self, prefix: &str) -> Result<Vec<String>> {
-        let mut stream = self
-            .table
-            .query()
-            .only_if(format!("source LIKE '{}%'", escape_sql_literal(prefix)))
-            .execute()
-            .await?;
-        let mut set = std::collections::HashSet::new();
-        while let Some(batch) = stream.try_next().await? {
-            if batch.num_rows() == 0 {
-                continue;
-            }
-            let sources = string_column(&batch, "source")?;
-            for i in 0..batch.num_rows() {
-                set.insert(sources.value(i).to_string());
-            }
-        }
-        Ok(set.into_iter().collect())
-    }
-
-    pub async fn get_stats(&self) -> Result<KnowledgeStats> {
-        let count = self.table.count_rows(None).await?;
-
-        if count == 0 {
-            return Ok(KnowledgeStats {
-                total_sources: 0,
-                total_chunks: 0,
-                oldest_indexed: None,
-                newest_indexed: None,
-            });
-        }
-        // Get all data to compute stats
-        let results = self.table.query().execute().await?;
-        let batches: Vec<RecordBatch> = results.try_collect().await?;
-
-        let mut unique_urls = std::collections::HashSet::new();
-        let mut oldest: Option<DateTime<Utc>> = None;
-        let mut newest: Option<DateTime<Utc>> = None;
-
-        for batch in batches {
-            let sources_col = string_column(&batch, "source")?;
-            let indexed_ats = timestamp_ms_column(&batch, "indexed_at")?;
-
-            for i in 0..batch.num_rows() {
-                unique_urls.insert(sources_col.value(i).to_string());
-
-                let indexed_millis = indexed_ats.value(i);
-                if let Some(indexed) = DateTime::from_timestamp_millis(indexed_millis) {
-                    if oldest.is_none_or(|old| indexed < old) {
-                        oldest = Some(indexed);
-                    }
-                    if newest.is_none_or(|new| indexed > new) {
-                        newest = Some(indexed);
-                    }
-                }
-            }
-        }
-
-        Ok(KnowledgeStats {
-            total_sources: unique_urls.len(),
-            total_chunks: count,
-            oldest_indexed: oldest,
-            newest_indexed: newest,
-        })
-    }
-
-    pub async fn list_sources(
-        &self,
-        limit: Option<usize>,
-    ) -> Result<Vec<(String, String, usize, DateTime<Utc>)>> {
-        let results = self.table.query().execute().await?;
-        let batches: Vec<RecordBatch> = results.try_collect().await?;
-
-        let mut sources: std::collections::HashMap<String, (String, usize, DateTime<Utc>)> =
-            std::collections::HashMap::new();
-
-        for batch in batches {
-            let sources_col = string_column(&batch, "source")?;
-            let source_titles = string_column(&batch, "source_title")?;
-            let last_checkeds = timestamp_ms_column(&batch, "last_checked")?;
-
-            for i in 0..batch.num_rows() {
-                let url = sources_col.value(i).to_string();
-                let title = source_titles.value(i).to_string();
-                let last_checked_millis = last_checkeds.value(i);
-                let last_checked = DateTime::from_timestamp_millis(last_checked_millis)
-                    .context("Invalid timestamp")?;
-
-                sources
-                    .entry(url.clone())
-                    .and_modify(|(_, count, existing_last_checked)| {
-                        *count += 1;
-                        if last_checked > *existing_last_checked {
-                            *existing_last_checked = last_checked;
-                        }
-                    })
-                    .or_insert((title, 1, last_checked));
-            }
-        }
-
-        let mut result: Vec<(String, String, usize, DateTime<Utc>)> = sources
-            .into_iter()
-            .map(|(url, (title, count, last_checked))| (url, title, count, last_checked))
-            .collect();
-
-        // Sort by last_checked descending
-        result.sort_by_key(|b| std::cmp::Reverse(b.3));
-
-        if let Some(limit) = limit {
-            result.truncate(limit);
-        }
-
-        Ok(result)
-    }
-
-    /// Check if a source exists for a given session
-    pub async fn has_source_in_session(&self, source: &str, session_id: &str) -> Result<bool> {
-        let query = self
-            .table
-            .query()
-            .only_if(format!(
-                "source = '{}' AND session_id = '{}'",
-                escape_sql_literal(source),
-                escape_sql_literal(session_id)
-            ))
-            .limit(1);
-
-        let results = query.execute().await?;
-        let batches: Vec<RecordBatch> = results.try_collect().await?;
-        Ok(!batches.is_empty() && batches[0].num_rows() > 0)
-    }
-
-    /// Delete stored content by source and session
-    pub async fn delete_by_source_and_session(&self, source: &str, session_id: &str) -> Result<()> {
-        self.table
-            .delete(&format!(
-                "source = '{}' AND session_id = '{}'",
-                escape_sql_literal(source),
-                escape_sql_literal(session_id)
-            ))
-            .await?;
-        Ok(())
-    }
-
-    /// Clean up expired session-scoped chunks (crash recovery)
-    pub async fn cleanup_expired_sessions(&self, ttl_hours: u64) -> Result<()> {
-        let cutoff = Utc::now() - Duration::hours(ttl_hours as i64);
-        let cutoff_millis = cutoff.timestamp_millis();
-        self.table
-            .delete(&format!(
-                "session_id IS NOT NULL AND indexed_at < {}",
-                cutoff_millis
-            ))
-            .await?;
-        Ok(())
-    }
-
-    /// Search indexed chunks by regex pattern, returning matching lines.
-    /// Optionally filter by source and/or session.
-    pub async fn match_content(
-        &self,
-        pattern: &regex::Regex,
-        source: Option<&str>,
-        session_id: Option<&str>,
-        scopes: Option<&[String]>,
-    ) -> Result<Vec<crate::knowledge::types::MatchResult>> {
-        let mut filters = Vec::new();
-
-        if let Some(s) = source {
-            filters.push(format!("source = '{}'", escape_sql_literal(s)));
-        }
-
-        if let Some(sid) = session_id {
-            filters.push(format!(
-                "(session_id IS NULL OR session_id = '{}')",
-                escape_sql_literal(sid)
-            ));
-        }
-
-        if let Some(filter) = scope_in_clause(scopes) {
-            filters.push(filter);
-        }
-
-        let mut query = self.table.query();
-        if !filters.is_empty() {
-            query = query.only_if(filters.join(" AND "));
-        }
-
-        // Stream batches: peak memory bounded by a single RecordBatch, not the
-        // whole table. Each batch is processed and dropped before the next is
-        // pulled, so memory stays flat regardless of chunk count.
-        let mut stream = query.execute().await?;
-        let mut matches = Vec::new();
-
-        while let Some(batch) = stream.try_next().await? {
-            if batch.num_rows() == 0 {
-                continue;
-            }
-
-            let sources = string_column(&batch, "source")?;
-            let source_titles = string_column(&batch, "source_title")?;
-            let contents = string_column(&batch, "content")?;
-
-            for i in 0..batch.num_rows() {
-                let source = sources.value(i).to_string();
-                let source_title = source_titles.value(i).to_string();
-                let content = contents.value(i);
-
-                for (line_num, line) in content.lines().enumerate() {
-                    if pattern.is_match(line) {
-                        let captures: Vec<String> = pattern
-                            .captures_iter(line)
-                            .flat_map(|c| {
-                                (1..c.len())
-                                    .filter_map(|g| c.get(g).map(|m| m.as_str().to_string()))
-                                    .collect::<Vec<_>>()
-                            })
-                            .collect();
-
-                        matches.push(crate::knowledge::types::MatchResult {
-                            source: source.clone(),
-                            source_title: source_title.clone(),
-                            line_number: line_num + 1,
-                            matched_line: line.to_string(),
-                            captures,
-                        });
-                    }
-                }
-            }
-        }
-
-        Ok(matches)
-    }
+	pub async fn new(vector_dim: usize) -> Result<Self> {
+		let db_path = crate::storage::get_system_storage_dir()?.join("knowledge");
+		Self::open_at(&db_path, vector_dim).await
+	}
+
+	/// Open (or create) a knowledge store at an explicit directory. Used by the
+	/// retrieval benchmark to run against an isolated LanceDB without touching
+	/// the user's real knowledge database.
+	pub async fn open_at(db_path: &std::path::Path, vector_dim: usize) -> Result<Self> {
+		std::fs::create_dir_all(db_path)?;
+
+		let db = connect(db_path.to_str().unwrap()).execute().await?;
+		let schema = Self::build_schema(vector_dim);
+
+		Self::initialize_table(&db, &schema).await?;
+
+		// Cache the table handle — opened once, reused for the lifetime of this store
+		let table = db.open_table("knowledge_chunks").execute().await?;
+
+		// Non-destructive migration: add the `scope` column to pre-existing tables
+		// that were created before knowledge gained scopes. Existing hot-knowledge
+		// rows default to global ("") so behavior is unchanged.
+		Self::migrate_scope_column(&table).await?;
+
+		Ok(Self {
+			table,
+			schema,
+			vector_dim,
+		})
+	}
+
+	/// Add the `scope` column to a pre-existing `knowledge_chunks` table created
+	/// before box knowledge. Defaults all legacy rows to global ("").
+	async fn migrate_scope_column(table: &Table) -> Result<()> {
+		let existing = table.schema().await?;
+		if existing.field_with_name("scope").is_ok() {
+			return Ok(());
+		}
+		tracing::info!("Migrating knowledge_chunks: adding 'scope' column (default '')");
+		table
+			.add_columns(
+				NewColumnTransform::SqlExpressions(vec![("scope".to_string(), "''".to_string())]),
+				None,
+			)
+			.await
+			.context("Failed to add scope column to existing knowledge_chunks table")?;
+		Ok(())
+	}
+
+	fn build_schema(vector_dim: usize) -> Arc<Schema> {
+		Arc::new(Schema::new(vec![
+			Field::new("id", DataType::Utf8, false),
+			Field::new("source", DataType::Utf8, false),
+			Field::new("source_title", DataType::Utf8, false),
+			Field::new("session_id", DataType::Utf8, true),
+			Field::new("chunk_index", DataType::Int32, false),
+			Field::new("content", DataType::Utf8, false),
+			Field::new("parent_content", DataType::Utf8, false),
+			Field::new(
+				"section_path",
+				DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+				true,
+			),
+			Field::new("char_start", DataType::Int32, false),
+			Field::new("char_end", DataType::Int32, false),
+			Field::new("content_hash", DataType::Utf8, false),
+			Field::new("indexed_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+			Field::new("last_checked", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+			Field::new(
+				"embedding",
+				DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), vector_dim as i32),
+				false,
+			),
+			// `scope` is last so a fresh table and a migrated table (add_columns
+			// appends) share an identical column order. Non-null with a "" default on
+			// migration — mirrors how the memory store adds its migrated columns. Box
+			// rows carry their bound scope; hot knowledge is global ("").
+			Field::new("scope", DataType::Utf8, false),
+		]))
+	}
+
+	async fn initialize_table(db: &Connection, schema: &Arc<Schema>) -> Result<()> {
+		let table_names = db.table_names().execute().await?;
+
+		// Drop table if schema is outdated (missing columns)
+		if table_names.contains(&"knowledge_chunks".to_string()) {
+			let table = db.open_table("knowledge_chunks").execute().await?;
+			let existing_schema = table.schema().await?;
+			// `scope` is handled non-destructively by migrate_scope_column (add_columns),
+			// so a table merely missing `scope` must NOT trigger a destructive recreate.
+			let needs_recreate = schema
+				.fields()
+				.iter()
+				.filter(|f| f.name() != "scope")
+				.any(|f| existing_schema.field_with_name(f.name()).is_err());
+			if needs_recreate {
+				tracing::info!("knowledge_chunks schema outdated, dropping and recreating");
+				db.drop_table("knowledge_chunks", &[]).await?;
+			} else {
+				return Ok(());
+			}
+		}
+
+		// Create table with empty batch (schema-only creation)
+		use arrow::record_batch::RecordBatchIterator;
+		use std::iter::once;
+		let empty_batch = RecordBatch::new_empty(schema.clone());
+		let batch_reader = RecordBatchIterator::new(once(Ok(empty_batch)), schema.clone());
+		db.create_table("knowledge_chunks", batch_reader).execute().await?;
+
+		// Create FTS index on content column for hybrid search (BM25 + Vector)
+		let table = db.open_table("knowledge_chunks").execute().await?;
+		table
+			.create_index(&["content"], Index::FTS(Default::default()))
+			.execute()
+			.await
+			.context("Failed to create FTS index on content column")?;
+
+		// Bitmap index on scope for fast pushdown of the `scope IN (...)` visibility filter.
+		table
+			.create_index(&["scope"], Index::Bitmap(Default::default()))
+			.execute()
+			.await
+			.context("Failed to create Bitmap index on knowledge_chunks.scope")?;
+
+		tracing::info!("Created FTS + scope indexes on knowledge_chunks for hybrid scoped search");
+
+		Ok(())
+	}
+
+	#[allow(clippy::too_many_arguments)]
+	pub async fn store_chunks(
+		&self,
+		source: &str,
+		source_title: &str,
+		scope: &str,
+		content_hash: &str,
+		chunks: &[KnowledgeChunk],
+		embeddings: &[Vec<f32>],
+		session_id: Option<&str>,
+	) -> Result<()> {
+		// Delete existing chunks: session-scoped deletes only within session,
+		// persistent deletes all chunks for source (full reindex)
+		if let Some(sid) = session_id {
+			self.delete_by_source_and_session(source, sid).await?;
+		} else {
+			self.delete_source(source).await?;
+		}
+
+		if chunks.is_empty() {
+			return Ok(());
+		}
+
+		let now = Utc::now();
+		let now_millis = now.timestamp_millis();
+
+		// Build arrays
+		let ids: Vec<&str> = chunks.iter().map(|c| c.id.as_str()).collect();
+		let sources: Vec<&str> = chunks.iter().map(|_| source).collect();
+		let source_titles: Vec<&str> = chunks.iter().map(|_| source_title).collect();
+		let session_ids: Vec<Option<&str>> = chunks.iter().map(|_| session_id).collect();
+		let chunk_indices: Vec<i32> = chunks.iter().map(|c| c.chunk_index).collect();
+		let contents: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
+		let parent_contents: Vec<&str> = chunks
+			.iter()
+			.map(|c| c.parent_content.as_deref().unwrap_or(""))
+			.collect();
+		let char_starts: Vec<i32> = chunks.iter().map(|c| c.char_start as i32).collect();
+		let char_ends: Vec<i32> = chunks.iter().map(|c| c.char_end as i32).collect();
+		let content_hashes: Vec<&str> = chunks.iter().map(|_| content_hash).collect();
+		let indexed_ats: Vec<i64> = chunks.iter().map(|_| now_millis).collect();
+		let last_checkeds: Vec<i64> = chunks.iter().map(|_| now_millis).collect();
+		let scopes: Vec<&str> = chunks.iter().map(|_| scope).collect();
+
+		// Build section_path list array
+		let mut section_path_builder =
+			arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+		for chunk in chunks {
+			for section in &chunk.section_path {
+				section_path_builder.values().append_value(section);
+			}
+			section_path_builder.append(true);
+		}
+		let section_path_array = section_path_builder.finish();
+
+		// Build embedding array
+		let embedding_values: Vec<f32> = embeddings.iter().flat_map(|e| e.iter().copied()).collect();
+		let embedding_array = FixedSizeListArray::try_new(
+			Arc::new(Field::new("item", DataType::Float32, true)),
+			self.vector_dim as i32,
+			Arc::new(Float32Array::from(embedding_values)),
+			None,
+		)?;
+
+		let batch = RecordBatch::try_new(
+			self.schema.clone(),
+			vec![
+				Arc::new(StringArray::from(ids)),
+				Arc::new(StringArray::from(sources)),
+				Arc::new(StringArray::from(source_titles)),
+				Arc::new(StringArray::from(session_ids)),
+				Arc::new(Int32Array::from(chunk_indices)),
+				Arc::new(StringArray::from(contents)),
+				Arc::new(StringArray::from(parent_contents)),
+				Arc::new(section_path_array),
+				Arc::new(Int32Array::from(char_starts)),
+				Arc::new(Int32Array::from(char_ends)),
+				Arc::new(StringArray::from(content_hashes)),
+				Arc::new(TimestampMillisecondArray::from(indexed_ats)),
+				Arc::new(TimestampMillisecondArray::from(last_checkeds)),
+				Arc::new(embedding_array),
+				Arc::new(StringArray::from(scopes)),
+			],
+		)?;
+
+		use arrow::record_batch::RecordBatchIterator;
+		use std::iter::once;
+		let batch_reader = RecordBatchIterator::new(once(Ok(batch)), self.schema.clone());
+		self.table.add(batch_reader).execute().await?;
+
+		Ok(())
+	}
+
+	/// Compact fragments, prune old versions, and update FTS/scalar indexes so
+	/// new chunks are searchable without brute-force fallback on the unindexed
+	/// portion. Callers run this once per indexing operation — NOT per document
+	/// — so a box sweep over N changed files pays one compaction, not N.
+	pub async fn optimize(&self) {
+		self.table.optimize(OptimizeAction::All).await.ok();
+	}
+
+	/// Bulk-ingest one row per passage `(id, title, text, embedding)`. Unlike
+	/// `store_chunks`, this doesn't delete existing rows by source — rows are
+	/// added in batches and the index is rebuilt once at the end, so ingesting
+	/// N passages is a single pass. Each passage becomes a standalone
+	/// chunk (chunk_index 0, no parent, global scope). Used only by the retrieval
+	/// benchmark, so it's gated behind the `bench` feature (no dead code in
+	/// normal builds).
+	#[cfg(feature = "bench")]
+	pub async fn bulk_store(
+		&self,
+		ids: &[String],
+		titles: &[String],
+		texts: &[String],
+		embeddings: &[Vec<f32>],
+	) -> Result<()> {
+		assert_eq!(ids.len(), titles.len(), "ids/titles length mismatch");
+		assert_eq!(ids.len(), texts.len(), "ids/texts length mismatch");
+		assert_eq!(ids.len(), embeddings.len(), "ids/embeddings length mismatch");
+		if ids.is_empty() {
+			return Ok(());
+		}
+
+		let now_millis = Utc::now().timestamp_millis();
+		const BATCH: usize = 2048;
+
+		for start in (0..ids.len()).step_by(BATCH) {
+			let end = (start + BATCH).min(ids.len());
+			let n = end - start;
+			let str_col =
+				|s: &[String]| StringArray::from(s[start..end].iter().map(|x| x.as_str()).collect::<Vec<_>>());
+
+			// Empty section_path list per row.
+			let mut section_path_builder =
+				arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+			for _ in 0..n {
+				section_path_builder.append(true);
+			}
+
+			let embedding_values: Vec<f32> = embeddings[start..end].iter().flat_map(|e| e.iter().copied()).collect();
+			let embedding_array = FixedSizeListArray::try_new(
+				Arc::new(Field::new("item", DataType::Float32, true)),
+				self.vector_dim as i32,
+				Arc::new(Float32Array::from(embedding_values)),
+				None,
+			)?;
+
+			let batch = RecordBatch::try_new(
+				self.schema.clone(),
+				vec![
+					Arc::new(str_col(ids)),                                     // id
+					Arc::new(str_col(ids)),                                     // source
+					Arc::new(str_col(titles)),                                  // source_title
+					Arc::new(StringArray::from(vec![None as Option<&str>; n])), // session_id
+					Arc::new(Int32Array::from(vec![0i32; n])),                  // chunk_index
+					Arc::new(str_col(texts)),                                   // content
+					Arc::new(StringArray::from(vec![""; n])),                   // parent_content
+					Arc::new(section_path_builder.finish()),                    // section_path
+					Arc::new(Int32Array::from(vec![0i32; n])),                  // char_start
+					Arc::new(Int32Array::from(
+						texts[start..end].iter().map(|t| t.len() as i32).collect::<Vec<_>>(),
+					)), // char_end
+					Arc::new(str_col(ids)),                                     // content_hash
+					Arc::new(TimestampMillisecondArray::from(vec![now_millis; n])), // indexed_at
+					Arc::new(TimestampMillisecondArray::from(vec![now_millis; n])), // last_checked
+					Arc::new(embedding_array),                                  // embedding
+					Arc::new(StringArray::from(vec![""; n])),                   // scope
+				],
+			)?;
+
+			use arrow::record_batch::RecordBatchIterator;
+			use std::iter::once;
+			let batch_reader = RecordBatchIterator::new(once(Ok(batch)), self.schema.clone());
+			self.table.add(batch_reader).execute().await?;
+		}
+
+		// Single index rebuild for the whole ingest.
+		self.table.optimize(OptimizeAction::All).await.ok();
+		Ok(())
+	}
+
+	#[allow(clippy::too_many_arguments)]
+	pub async fn search(
+		&self,
+		query_embedding: &[f32],
+		query_text: &str,
+		source: Option<&str>,
+		limit: usize,
+		use_hybrid: bool,
+		session_id: Option<&str>,
+		scopes: Option<&[String]>,
+	) -> Result<Vec<KnowledgeSearchResult>> {
+		let mut query = self
+			.table
+			.vector_search(query_embedding)?
+			.distance_type(DistanceType::Cosine)
+			.limit(limit);
+
+		// Add full-text search for hybrid mode
+		if use_hybrid {
+			let fts_query = FullTextSearchQuery::new(query_text.to_string());
+			query = query.full_text_search(fts_query);
+		}
+
+		// Build filter conditions
+		let mut filters = Vec::new();
+
+		if let Some(s) = source {
+			filters.push(format!("source = '{}'", escape_sql_literal(s)));
+		}
+
+		// Session scoping: return persistent (NULL session_id) + current session's data
+		if let Some(sid) = session_id {
+			filters.push(format!(
+				"(session_id IS NULL OR session_id = '{}')",
+				escape_sql_literal(sid)
+			));
+		}
+
+		// Scope visibility: hot knowledge ("") + bound boxes for the active scope and
+		// its ancestors. None = unscoped/admin (no filter, all scopes).
+		if let Some(filter) = scope_in_clause(scopes) {
+			filters.push(filter);
+		}
+
+		if !filters.is_empty() {
+			query = query.only_if(filters.join(" AND "));
+		}
+
+		// Execute hybrid search if enabled, otherwise regular vector search
+		let mut results = if use_hybrid {
+			query.execute_hybrid(QueryExecutionOptions::default()).await?
+		} else {
+			query.execute().await?
+		};
+
+		let mut search_results = Vec::new();
+
+		while let Some(batch) = results.try_next().await? {
+			if batch.num_rows() == 0 {
+				continue;
+			}
+
+			let ids = string_column(&batch, "id")?;
+			let sources = string_column(&batch, "source")?;
+			let source_titles = string_column(&batch, "source_title")?;
+			let session_ids = string_column_opt(&batch, "session_id");
+			let chunk_indices = i32_column(&batch, "chunk_index")?;
+			let contents = string_column(&batch, "content")?;
+			let parent_contents = string_column(&batch, "parent_content")?;
+			let section_paths = list_column(&batch, "section_path")?;
+			let char_starts = i32_column(&batch, "char_start")?;
+			let char_ends = i32_column(&batch, "char_end")?;
+			// Extract score column - hybrid search uses _relevance_score, vector search uses _distance
+			// LanceDB hybrid search with RRF reranking returns _relevance_score (raw RRF scores)
+			// RRF formula: score = sum of 1/(rank + k) for each ranking (vector + FTS)
+			// Max possible score is 2/k (if rank 0 in both)
+			// Regular vector search returns _distance (0-2 for cosine, lower is better)
+			let relevance_scores: Vec<f32> = if use_hybrid {
+				// Hybrid search: normalize RRF scores to 0-1 range.
+				// Normalize by 1/k (a perfect rank-0 hit in a SINGLE list), not 2/k:
+				// a chunk only the dense leg finds (no lexical overlap) otherwise caps
+				// at 0.5 and loses to mediocre both-list hits. Excess clamps to 1.0.
+				let max_rrf_score = 1.0 / RRF_K;
+				f32_column_opt(&batch, "_relevance_score")
+					.map(|arr| {
+						(0..arr.len())
+							.map(|i| (arr.value(i) / max_rrf_score).min(1.0))
+							.collect::<Vec<f32>>()
+					})
+					.unwrap_or_else(|| vec![0.5; batch.num_rows()])
+			} else {
+				// Vector search: convert _distance to relevance (1.0 - distance for cosine)
+				f32_column_opt(&batch, "_distance")
+					.map(|arr| (0..arr.len()).map(|i| 1.0 - arr.value(i)).collect::<Vec<f32>>())
+					.unwrap_or_else(|| vec![0.5; batch.num_rows()])
+			};
+
+			for (i, &relevance_score) in relevance_scores.iter().enumerate() {
+				let section_path_array = section_paths.value(i);
+				let section_path_strings = section_path_array.as_any().downcast_ref::<StringArray>().unwrap();
+				let section_path: Vec<String> = (0..section_path_strings.len())
+					.map(|j| section_path_strings.value(j).to_string())
+					.collect();
+
+				let is_session_scoped = session_ids
+					.map(|arr| !arr.is_null(i) && !arr.value(i).is_empty())
+					.unwrap_or(false);
+
+				let chunk = KnowledgeChunk {
+					id: ids.value(i).to_string(),
+					source: sources.value(i).to_string(),
+					source_title: source_titles.value(i).to_string(),
+					chunk_index: chunk_indices.value(i),
+					content: contents.value(i).to_string(),
+					parent_content: {
+						let p = parent_contents.value(i);
+						if p.is_empty() {
+							None
+						} else {
+							Some(p.to_string())
+						}
+					},
+					section_path,
+					char_start: char_starts.value(i) as usize,
+					char_end: char_ends.value(i) as usize,
+				};
+
+				search_results.push(KnowledgeSearchResult {
+					chunk,
+					relevance_score,
+					session_scoped: is_session_scoped,
+				});
+			}
+		}
+
+		Ok(search_results)
+	}
+
+	pub async fn get_source_metadata(&self, source: &str) -> Result<Option<(String, DateTime<Utc>)>> {
+		let query = self
+			.table
+			.query()
+			.only_if(format!("source = '{}'", escape_sql_literal(source)))
+			.limit(1);
+
+		let results = query.execute().await?;
+		let batches: Vec<RecordBatch> = results.try_collect().await?;
+
+		if batches.is_empty() || batches[0].num_rows() == 0 {
+			return Ok(None);
+		}
+
+		let batch = &batches[0];
+		let content_hashes = string_column(batch, "content_hash")?;
+		let last_checkeds = timestamp_ms_column(batch, "last_checked")?;
+
+		let content_hash = content_hashes.value(0).to_string();
+		let last_checked_millis = last_checkeds.value(0);
+		let last_checked = DateTime::from_timestamp_millis(last_checked_millis).context("Invalid timestamp")?;
+
+		Ok(Some((content_hash, last_checked)))
+	}
+
+	pub async fn delete_source(&self, source: &str) -> Result<()> {
+		self.table
+			.delete(&format!("source = '{}'", escape_sql_literal(source)))
+			.await?;
+		Ok(())
+	}
+
+	/// Delete every row whose `source` starts with `prefix` — used to drop a whole
+	/// box (`box://<box_id>/`) on remove or full re-import.
+	pub async fn delete_by_source_prefix(&self, prefix: &str) -> Result<()> {
+		self.table
+			.delete(&format!("source LIKE '{}%'", escape_sql_literal(prefix)))
+			.await?;
+		Ok(())
+	}
+
+	/// List distinct `source` URIs whose value starts with `prefix` (e.g. all files
+	/// currently indexed for a box) — used to prune sources removed from a box.
+	pub async fn list_sources_with_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+		let mut stream = self
+			.table
+			.query()
+			.only_if(format!("source LIKE '{}%'", escape_sql_literal(prefix)))
+			.execute()
+			.await?;
+		let mut set = std::collections::HashSet::new();
+		while let Some(batch) = stream.try_next().await? {
+			if batch.num_rows() == 0 {
+				continue;
+			}
+			let sources = string_column(&batch, "source")?;
+			for i in 0..batch.num_rows() {
+				set.insert(sources.value(i).to_string());
+			}
+		}
+		Ok(set.into_iter().collect())
+	}
+
+	pub async fn get_stats(&self) -> Result<KnowledgeStats> {
+		let count = self.table.count_rows(None).await?;
+
+		if count == 0 {
+			return Ok(KnowledgeStats {
+				total_sources: 0,
+				total_chunks: 0,
+				oldest_indexed: None,
+				newest_indexed: None,
+			});
+		}
+		// Get all data to compute stats
+		let results = self.table.query().execute().await?;
+		let batches: Vec<RecordBatch> = results.try_collect().await?;
+
+		let mut unique_urls = std::collections::HashSet::new();
+		let mut oldest: Option<DateTime<Utc>> = None;
+		let mut newest: Option<DateTime<Utc>> = None;
+
+		for batch in batches {
+			let sources_col = string_column(&batch, "source")?;
+			let indexed_ats = timestamp_ms_column(&batch, "indexed_at")?;
+
+			for i in 0..batch.num_rows() {
+				unique_urls.insert(sources_col.value(i).to_string());
+
+				let indexed_millis = indexed_ats.value(i);
+				if let Some(indexed) = DateTime::from_timestamp_millis(indexed_millis) {
+					if oldest.is_none_or(|old| indexed < old) {
+						oldest = Some(indexed);
+					}
+					if newest.is_none_or(|new| indexed > new) {
+						newest = Some(indexed);
+					}
+				}
+			}
+		}
+
+		Ok(KnowledgeStats {
+			total_sources: unique_urls.len(),
+			total_chunks: count,
+			oldest_indexed: oldest,
+			newest_indexed: newest,
+		})
+	}
+
+	pub async fn list_sources(&self, limit: Option<usize>) -> Result<Vec<(String, String, usize, DateTime<Utc>)>> {
+		let results = self.table.query().execute().await?;
+		let batches: Vec<RecordBatch> = results.try_collect().await?;
+
+		let mut sources: std::collections::HashMap<String, (String, usize, DateTime<Utc>)> =
+			std::collections::HashMap::new();
+
+		for batch in batches {
+			let sources_col = string_column(&batch, "source")?;
+			let source_titles = string_column(&batch, "source_title")?;
+			let last_checkeds = timestamp_ms_column(&batch, "last_checked")?;
+
+			for i in 0..batch.num_rows() {
+				let url = sources_col.value(i).to_string();
+				let title = source_titles.value(i).to_string();
+				let last_checked_millis = last_checkeds.value(i);
+				let last_checked = DateTime::from_timestamp_millis(last_checked_millis).context("Invalid timestamp")?;
+
+				sources
+					.entry(url.clone())
+					.and_modify(|(_, count, existing_last_checked)| {
+						*count += 1;
+						if last_checked > *existing_last_checked {
+							*existing_last_checked = last_checked;
+						}
+					})
+					.or_insert((title, 1, last_checked));
+			}
+		}
+
+		let mut result: Vec<(String, String, usize, DateTime<Utc>)> = sources
+			.into_iter()
+			.map(|(url, (title, count, last_checked))| (url, title, count, last_checked))
+			.collect();
+
+		// Sort by last_checked descending
+		result.sort_by_key(|b| std::cmp::Reverse(b.3));
+
+		if let Some(limit) = limit {
+			result.truncate(limit);
+		}
+
+		Ok(result)
+	}
+
+	/// Check if a source exists for a given session
+	pub async fn has_source_in_session(&self, source: &str, session_id: &str) -> Result<bool> {
+		let query = self
+			.table
+			.query()
+			.only_if(format!(
+				"source = '{}' AND session_id = '{}'",
+				escape_sql_literal(source),
+				escape_sql_literal(session_id)
+			))
+			.limit(1);
+
+		let results = query.execute().await?;
+		let batches: Vec<RecordBatch> = results.try_collect().await?;
+		Ok(!batches.is_empty() && batches[0].num_rows() > 0)
+	}
+
+	/// Delete stored content by source and session
+	pub async fn delete_by_source_and_session(&self, source: &str, session_id: &str) -> Result<()> {
+		self.table
+			.delete(&format!(
+				"source = '{}' AND session_id = '{}'",
+				escape_sql_literal(source),
+				escape_sql_literal(session_id)
+			))
+			.await?;
+		Ok(())
+	}
+
+	/// Clean up expired session-scoped chunks (crash recovery)
+	pub async fn cleanup_expired_sessions(&self, ttl_hours: u64) -> Result<()> {
+		let cutoff = Utc::now() - Duration::hours(ttl_hours as i64);
+		let cutoff_millis = cutoff.timestamp_millis();
+		self.table
+			.delete(&format!("session_id IS NOT NULL AND indexed_at < {}", cutoff_millis))
+			.await?;
+		Ok(())
+	}
+
+	/// Search indexed chunks by regex pattern, returning matching lines.
+	/// Optionally filter by source and/or session.
+	pub async fn match_content(
+		&self,
+		pattern: &regex::Regex,
+		source: Option<&str>,
+		session_id: Option<&str>,
+		scopes: Option<&[String]>,
+	) -> Result<Vec<crate::knowledge::types::MatchResult>> {
+		let mut filters = Vec::new();
+
+		if let Some(s) = source {
+			filters.push(format!("source = '{}'", escape_sql_literal(s)));
+		}
+
+		if let Some(sid) = session_id {
+			filters.push(format!(
+				"(session_id IS NULL OR session_id = '{}')",
+				escape_sql_literal(sid)
+			));
+		}
+
+		if let Some(filter) = scope_in_clause(scopes) {
+			filters.push(filter);
+		}
+
+		let mut query = self.table.query();
+		if !filters.is_empty() {
+			query = query.only_if(filters.join(" AND "));
+		}
+
+		// Stream batches: peak memory bounded by a single RecordBatch, not the
+		// whole table. Each batch is processed and dropped before the next is
+		// pulled, so memory stays flat regardless of chunk count.
+		let mut stream = query.execute().await?;
+		let mut matches = Vec::new();
+
+		while let Some(batch) = stream.try_next().await? {
+			if batch.num_rows() == 0 {
+				continue;
+			}
+
+			let sources = string_column(&batch, "source")?;
+			let source_titles = string_column(&batch, "source_title")?;
+			let contents = string_column(&batch, "content")?;
+
+			for i in 0..batch.num_rows() {
+				let source = sources.value(i).to_string();
+				let source_title = source_titles.value(i).to_string();
+				let content = contents.value(i);
+
+				for (line_num, line) in content.lines().enumerate() {
+					if pattern.is_match(line) {
+						let captures: Vec<String> = pattern
+							.captures_iter(line)
+							.flat_map(|c| {
+								(1..c.len())
+									.filter_map(|g| c.get(g).map(|m| m.as_str().to_string()))
+									.collect::<Vec<_>>()
+							})
+							.collect();
+
+						matches.push(crate::knowledge::types::MatchResult {
+							source: source.clone(),
+							source_title: source_title.clone(),
+							line_number: line_num + 1,
+							matched_line: line.to_string(),
+							captures,
+						});
+					}
+				}
+			}
+		}
+
+		Ok(matches)
+	}
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+	use super::*;
 
-    /// Helper to create a store with a unique temp directory
-    async fn test_store(vector_dim: usize) -> KnowledgeStore {
-        let db_path = std::env::temp_dir().join(format!("octobrain_test_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&db_path).unwrap();
+	/// Helper to create a store with a unique temp directory
+	async fn test_store(vector_dim: usize) -> KnowledgeStore {
+		let db_path = std::env::temp_dir().join(format!("octobrain_test_{}", uuid::Uuid::new_v4()));
+		std::fs::create_dir_all(&db_path).unwrap();
 
-        let db = connect(db_path.to_str().unwrap()).execute().await.unwrap();
-        let schema = KnowledgeStore::build_schema(vector_dim);
-        KnowledgeStore::initialize_table(&db, &schema)
-            .await
-            .unwrap();
-        let table = db.open_table("knowledge_chunks").execute().await.unwrap();
+		let db = connect(db_path.to_str().unwrap()).execute().await.unwrap();
+		let schema = KnowledgeStore::build_schema(vector_dim);
+		KnowledgeStore::initialize_table(&db, &schema).await.unwrap();
+		let table = db.open_table("knowledge_chunks").execute().await.unwrap();
 
-        KnowledgeStore {
-            table,
-            schema,
-            vector_dim,
-        }
-    }
+		KnowledgeStore {
+			table,
+			schema,
+			vector_dim,
+		}
+	}
 
-    fn make_chunk(id: &str, source: &str, content: &str) -> KnowledgeChunk {
-        KnowledgeChunk {
-            id: id.to_string(),
-            source: source.to_string(),
-            source_title: "Test".to_string(),
-            chunk_index: 0,
-            content: content.to_string(),
-            parent_content: None,
-            section_path: vec![],
-            char_start: 0,
-            char_end: content.len(),
-        }
-    }
+	fn make_chunk(id: &str, source: &str, content: &str) -> KnowledgeChunk {
+		KnowledgeChunk {
+			id: id.to_string(),
+			source: source.to_string(),
+			source_title: "Test".to_string(),
+			chunk_index: 0,
+			content: content.to_string(),
+			parent_content: None,
+			section_path: vec![],
+			char_start: 0,
+			char_end: content.len(),
+		}
+	}
 
-    fn dummy_embedding(dim: usize) -> Vec<f32> {
-        vec![0.1; dim]
-    }
+	fn dummy_embedding(dim: usize) -> Vec<f32> {
+		vec![0.1; dim]
+	}
 
-    #[tokio::test]
-    async fn test_store_and_search_persistent() {
-        let dim = 4;
-        let store = test_store(dim).await;
-        let chunk = make_chunk("c1", "https://example.com", "hello world test content");
-        let embedding = dummy_embedding(dim);
+	#[tokio::test]
+	async fn test_store_and_search_persistent() {
+		let dim = 4;
+		let store = test_store(dim).await;
+		let chunk = make_chunk("c1", "https://example.com", "hello world test content");
+		let embedding = dummy_embedding(dim);
 
-        store
-            .store_chunks(
-                "https://example.com",
-                "Example",
-                "",
-                "hash1",
-                &[chunk],
-                std::slice::from_ref(&embedding),
-                None,
-            )
-            .await
-            .unwrap();
+		store
+			.store_chunks(
+				"https://example.com",
+				"Example",
+				"",
+				"hash1",
+				&[chunk],
+				std::slice::from_ref(&embedding),
+				None,
+			)
+			.await
+			.unwrap();
 
-        // Search without session filter — should find persistent content
-        let results = store
-            .search(&embedding, "hello", None, 10, false, None, None)
-            .await
-            .unwrap();
+		// Search without session filter — should find persistent content
+		let results = store
+			.search(&embedding, "hello", None, 10, false, None, None)
+			.await
+			.unwrap();
 
-        assert_eq!(results.len(), 1);
-        assert!(!results[0].session_scoped);
-        assert_eq!(results[0].chunk.source, "https://example.com");
-    }
+		assert_eq!(results.len(), 1);
+		assert!(!results[0].session_scoped);
+		assert_eq!(results[0].chunk.source, "https://example.com");
+	}
 
-    #[tokio::test]
-    async fn test_store_and_search_session_scoped() {
-        let dim = 4;
-        let store = test_store(dim).await;
-        let chunk = make_chunk("c1", "stored://my_key", "session specific content");
-        let embedding = dummy_embedding(dim);
+	#[tokio::test]
+	async fn test_store_and_search_session_scoped() {
+		let dim = 4;
+		let store = test_store(dim).await;
+		let chunk = make_chunk("c1", "stored://my_key", "session specific content");
+		let embedding = dummy_embedding(dim);
 
-        store
-            .store_chunks(
-                "stored://my_key",
-                "My Key",
-                "",
-                "hash1",
-                &[chunk],
-                std::slice::from_ref(&embedding),
-                Some("session-abc"),
-            )
-            .await
-            .unwrap();
+		store
+			.store_chunks(
+				"stored://my_key",
+				"My Key",
+				"",
+				"hash1",
+				&[chunk],
+				std::slice::from_ref(&embedding),
+				Some("session-abc"),
+			)
+			.await
+			.unwrap();
 
-        // Search with matching session — should find it
-        let results = store
-            .search(
-                &embedding,
-                "session",
-                None,
-                10,
-                false,
-                Some("session-abc"),
-                None,
-            )
-            .await
-            .unwrap();
+		// Search with matching session — should find it
+		let results = store
+			.search(&embedding, "session", None, 10, false, Some("session-abc"), None)
+			.await
+			.unwrap();
 
-        assert_eq!(results.len(), 1);
-        assert!(results[0].session_scoped);
-        assert_eq!(results[0].chunk.source, "stored://my_key");
-    }
+		assert_eq!(results.len(), 1);
+		assert!(results[0].session_scoped);
+		assert_eq!(results[0].chunk.source, "stored://my_key");
+	}
 
-    #[tokio::test]
-    async fn test_session_isolation() {
-        let dim = 4;
-        let store = test_store(dim).await;
-        let chunk = make_chunk("c1", "stored://secret", "session A data");
-        let embedding = dummy_embedding(dim);
+	#[tokio::test]
+	async fn test_session_isolation() {
+		let dim = 4;
+		let store = test_store(dim).await;
+		let chunk = make_chunk("c1", "stored://secret", "session A data");
+		let embedding = dummy_embedding(dim);
 
-        // Store with session A
-        store
-            .store_chunks(
-                "stored://secret",
-                "Secret",
-                "",
-                "hash1",
-                &[chunk],
-                std::slice::from_ref(&embedding),
-                Some("session-A"),
-            )
-            .await
-            .unwrap();
+		// Store with session A
+		store
+			.store_chunks(
+				"stored://secret",
+				"Secret",
+				"",
+				"hash1",
+				&[chunk],
+				std::slice::from_ref(&embedding),
+				Some("session-A"),
+			)
+			.await
+			.unwrap();
 
-        // Search with session B — should NOT find session A's data
-        let results = store
-            .search(
-                &embedding,
-                "secret",
-                None,
-                10,
-                false,
-                Some("session-B"),
-                None,
-            )
-            .await
-            .unwrap();
+		// Search with session B — should NOT find session A's data
+		let results = store
+			.search(&embedding, "secret", None, 10, false, Some("session-B"), None)
+			.await
+			.unwrap();
 
-        assert_eq!(results.len(), 0);
-    }
+		assert_eq!(results.len(), 0);
+	}
 
-    #[tokio::test]
-    async fn test_persistent_visible_to_all_sessions() {
-        let dim = 4;
-        let store = test_store(dim).await;
-        let chunk = make_chunk("c1", "https://docs.rs", "persistent docs");
-        let embedding = dummy_embedding(dim);
+	#[tokio::test]
+	async fn test_persistent_visible_to_all_sessions() {
+		let dim = 4;
+		let store = test_store(dim).await;
+		let chunk = make_chunk("c1", "https://docs.rs", "persistent docs");
+		let embedding = dummy_embedding(dim);
 
-        // Store persistent (no session)
-        store
-            .store_chunks(
-                "https://docs.rs",
-                "Docs",
-                "",
-                "hash1",
-                &[chunk],
-                std::slice::from_ref(&embedding),
-                None,
-            )
-            .await
-            .unwrap();
+		// Store persistent (no session)
+		store
+			.store_chunks(
+				"https://docs.rs",
+				"Docs",
+				"",
+				"hash1",
+				&[chunk],
+				std::slice::from_ref(&embedding),
+				None,
+			)
+			.await
+			.unwrap();
 
-        // Search with any session — should find persistent
-        let results = store
-            .search(
-                &embedding,
-                "docs",
-                None,
-                10,
-                false,
-                Some("any-session"),
-                None,
-            )
-            .await
-            .unwrap();
+		// Search with any session — should find persistent
+		let results = store
+			.search(&embedding, "docs", None, 10, false, Some("any-session"), None)
+			.await
+			.unwrap();
 
-        assert_eq!(results.len(), 1);
-        assert!(!results[0].session_scoped);
-    }
+		assert_eq!(results.len(), 1);
+		assert!(!results[0].session_scoped);
+	}
 
-    #[tokio::test]
-    async fn test_has_source_in_session() {
-        let dim = 4;
-        let store = test_store(dim).await;
-        let chunk = make_chunk("c1", "stored://key1", "content");
-        let embedding = dummy_embedding(dim);
+	#[tokio::test]
+	async fn test_has_source_in_session() {
+		let dim = 4;
+		let store = test_store(dim).await;
+		let chunk = make_chunk("c1", "stored://key1", "content");
+		let embedding = dummy_embedding(dim);
 
-        store
-            .store_chunks(
-                "stored://key1",
-                "Key1",
-                "",
-                "hash1",
-                &[chunk],
-                &[embedding],
-                Some("sess1"),
-            )
-            .await
-            .unwrap();
+		store
+			.store_chunks(
+				"stored://key1",
+				"Key1",
+				"",
+				"hash1",
+				&[chunk],
+				&[embedding],
+				Some("sess1"),
+			)
+			.await
+			.unwrap();
 
-        assert!(store
-            .has_source_in_session("stored://key1", "sess1")
-            .await
-            .unwrap());
-        assert!(!store
-            .has_source_in_session("stored://key1", "sess2")
-            .await
-            .unwrap());
-        assert!(!store
-            .has_source_in_session("stored://key2", "sess1")
-            .await
-            .unwrap());
-    }
+		assert!(store.has_source_in_session("stored://key1", "sess1").await.unwrap());
+		assert!(!store.has_source_in_session("stored://key1", "sess2").await.unwrap());
+		assert!(!store.has_source_in_session("stored://key2", "sess1").await.unwrap());
+	}
 
-    #[tokio::test]
-    async fn test_delete_by_source_and_session() {
-        let dim = 4;
-        let store = test_store(dim).await;
-        let chunk = make_chunk("c1", "stored://key1", "content to delete");
-        let embedding = dummy_embedding(dim);
+	#[tokio::test]
+	async fn test_delete_by_source_and_session() {
+		let dim = 4;
+		let store = test_store(dim).await;
+		let chunk = make_chunk("c1", "stored://key1", "content to delete");
+		let embedding = dummy_embedding(dim);
 
-        store
-            .store_chunks(
-                "stored://key1",
-                "Key1",
-                "",
-                "hash1",
-                &[chunk],
-                std::slice::from_ref(&embedding),
-                Some("sess1"),
-            )
-            .await
-            .unwrap();
+		store
+			.store_chunks(
+				"stored://key1",
+				"Key1",
+				"",
+				"hash1",
+				&[chunk],
+				std::slice::from_ref(&embedding),
+				Some("sess1"),
+			)
+			.await
+			.unwrap();
 
-        assert!(store
-            .has_source_in_session("stored://key1", "sess1")
-            .await
-            .unwrap());
+		assert!(store.has_source_in_session("stored://key1", "sess1").await.unwrap());
 
-        store
-            .delete_by_source_and_session("stored://key1", "sess1")
-            .await
-            .unwrap();
+		store
+			.delete_by_source_and_session("stored://key1", "sess1")
+			.await
+			.unwrap();
 
-        assert!(!store
-            .has_source_in_session("stored://key1", "sess1")
-            .await
-            .unwrap());
-    }
+		assert!(!store.has_source_in_session("stored://key1", "sess1").await.unwrap());
+	}
 
-    #[tokio::test]
-    async fn test_mixed_persistent_and_session_search() {
-        let dim = 4;
-        let store = test_store(dim).await;
-        let embedding = dummy_embedding(dim);
+	#[tokio::test]
+	async fn test_mixed_persistent_and_session_search() {
+		let dim = 4;
+		let store = test_store(dim).await;
+		let embedding = dummy_embedding(dim);
 
-        // Store persistent chunk
-        let persistent = make_chunk("p1", "https://example.com", "persistent data");
-        store
-            .store_chunks(
-                "https://example.com",
-                "Example",
-                "",
-                "hash1",
-                &[persistent],
-                std::slice::from_ref(&embedding),
-                None,
-            )
-            .await
-            .unwrap();
+		// Store persistent chunk
+		let persistent = make_chunk("p1", "https://example.com", "persistent data");
+		store
+			.store_chunks(
+				"https://example.com",
+				"Example",
+				"",
+				"hash1",
+				&[persistent],
+				std::slice::from_ref(&embedding),
+				None,
+			)
+			.await
+			.unwrap();
 
-        // Store session chunk
-        let session = make_chunk("s1", "stored://notes", "session data");
-        store
-            .store_chunks(
-                "stored://notes",
-                "Notes",
-                "",
-                "hash2",
-                &[session],
-                std::slice::from_ref(&embedding),
-                Some("sess1"),
-            )
-            .await
-            .unwrap();
+		// Store session chunk
+		let session = make_chunk("s1", "stored://notes", "session data");
+		store
+			.store_chunks(
+				"stored://notes",
+				"Notes",
+				"",
+				"hash2",
+				&[session],
+				std::slice::from_ref(&embedding),
+				Some("sess1"),
+			)
+			.await
+			.unwrap();
 
-        // Search with matching session — should see both
-        let results = store
-            .search(&embedding, "data", None, 10, false, Some("sess1"), None)
-            .await
-            .unwrap();
+		// Search with matching session — should see both
+		let results = store
+			.search(&embedding, "data", None, 10, false, Some("sess1"), None)
+			.await
+			.unwrap();
 
-        assert_eq!(results.len(), 2);
+		assert_eq!(results.len(), 2);
 
-        let session_count = results.iter().filter(|r| r.session_scoped).count();
-        let persistent_count = results.iter().filter(|r| !r.session_scoped).count();
-        assert_eq!(session_count, 1);
-        assert_eq!(persistent_count, 1);
-    }
+		let session_count = results.iter().filter(|r| r.session_scoped).count();
+		let persistent_count = results.iter().filter(|r| !r.session_scoped).count();
+		assert_eq!(session_count, 1);
+		assert_eq!(persistent_count, 1);
+	}
 }

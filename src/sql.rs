@@ -25,25 +25,25 @@
 /// DataFusion escapes an embedded `'` by doubling it. Always wrap the result in
 /// single quotes at the call site: `format!("col = '{}'", escape_sql_literal(v))`.
 pub(crate) fn escape_sql_literal(value: &str) -> String {
-    value.replace('\'', "''")
+	value.replace('\'', "''")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+	use super::*;
 
-    #[test]
-    fn doubles_single_quotes() {
-        assert_eq!(escape_sql_literal("o'brien"), "o''brien");
-    }
+	#[test]
+	fn doubles_single_quotes() {
+		assert_eq!(escape_sql_literal("o'brien"), "o''brien");
+	}
 
-    #[test]
-    fn leaves_clean_strings_untouched() {
-        assert_eq!(escape_sql_literal("scope-abc"), "scope-abc");
-    }
+	#[test]
+	fn leaves_clean_strings_untouched() {
+		assert_eq!(escape_sql_literal("scope-abc"), "scope-abc");
+	}
 
-    #[test]
-    fn neutralizes_injection_attempt() {
-        assert_eq!(escape_sql_literal("x' OR '1'='1"), "x'' OR ''1''=''1");
-    }
+	#[test]
+	fn neutralizes_injection_attempt() {
+		assert_eq!(escape_sql_literal("x' OR '1'='1"), "x'' OR ''1''=''1");
+	}
 }

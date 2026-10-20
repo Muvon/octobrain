@@ -21,12 +21,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use octolib::reranker::{
-    create_rerank_provider_from_parts, parse_provider_model, RerankProvider, RerankProviderType,
-};
+use octolib::reranker::{create_rerank_provider_from_parts, parse_provider_model, RerankProvider, RerankProviderType};
 
 static LOCAL_RERANKER_CACHE: LazyLock<Mutex<HashMap<String, Arc<dyn RerankProvider>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+	LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Create a rerank provider from a fully qualified model string
 /// (`provider:model`, e.g. `fastembed:jina-reranker-v1-turbo-en`).
@@ -35,23 +33,23 @@ static LOCAL_RERANKER_CACHE: LazyLock<Mutex<HashMap<String, Arc<dyn RerankProvid
 /// process lifetime, keyed by the model string; API-backed providers are
 /// lightweight and constructed fresh every time.
 pub async fn create_rerank_provider(model_string: &str) -> anyhow::Result<Arc<dyn RerankProvider>> {
-    let (provider, model) = parse_provider_model(model_string)?;
+	let (provider, model) = parse_provider_model(model_string)?;
 
-    let is_local = matches!(
-        &provider,
-        RerankProviderType::FastEmbed | RerankProviderType::HuggingFace
-    );
-    if !is_local {
-        let boxed = create_rerank_provider_from_parts(&provider, &model).await?;
-        return Ok(Arc::from(boxed));
-    }
+	let is_local = matches!(
+		&provider,
+		RerankProviderType::FastEmbed | RerankProviderType::HuggingFace
+	);
+	if !is_local {
+		let boxed = create_rerank_provider_from_parts(&provider, &model).await?;
+		return Ok(Arc::from(boxed));
+	}
 
-    let key = model_string.to_string();
-    if let Some(cached) = LOCAL_RERANKER_CACHE.lock().unwrap().get(&key) {
-        return Ok(cached.clone());
-    }
-    let built = Arc::from(create_rerank_provider_from_parts(&provider, &model).await?);
-    // Keep the first instance if two constructions raced; the loser is dropped.
-    let mut cache = LOCAL_RERANKER_CACHE.lock().unwrap();
-    Ok(cache.entry(key).or_insert(built).clone())
+	let key = model_string.to_string();
+	if let Some(cached) = LOCAL_RERANKER_CACHE.lock().unwrap().get(&key) {
+		return Ok(cached.clone());
+	}
+	let built = Arc::from(create_rerank_provider_from_parts(&provider, &model).await?);
+	// Keep the first instance if two constructions raced; the loser is dropped.
+	let mut cache = LOCAL_RERANKER_CACHE.lock().unwrap();
+	Ok(cache.entry(key).or_insert(built).clone())
 }

@@ -10,69 +10,69 @@ use serde::{Deserialize, Serialize};
 /// it gives richer context without polluting the embedding with too much noise.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeChunk {
-    pub id: String,
-    pub source: String,
-    pub source_title: String,
-    pub chunk_index: i32,
-    /// Small child text — what gets embedded and matched against queries.
-    pub content: String,
-    /// Full parent section text — returned to the user instead of content when present.
-    /// None when the section was already small enough to be its own child.
-    pub parent_content: Option<String>,
-    pub section_path: Vec<String>,
-    pub char_start: usize,
-    pub char_end: usize,
+	pub id: String,
+	pub source: String,
+	pub source_title: String,
+	pub chunk_index: i32,
+	/// Small child text — what gets embedded and matched against queries.
+	pub content: String,
+	/// Full parent section text — returned to the user instead of content when present.
+	/// None when the section was already small enough to be its own child.
+	pub parent_content: Option<String>,
+	pub section_path: Vec<String>,
+	pub char_start: usize,
+	pub char_end: usize,
 }
 
 /// Search result with relevance score
 #[derive(Debug, Clone)]
 pub struct KnowledgeSearchResult {
-    pub chunk: KnowledgeChunk,
-    pub relevance_score: f32,
-    pub session_scoped: bool,
+	pub chunk: KnowledgeChunk,
+	pub relevance_score: f32,
+	pub session_scoped: bool,
 }
 
 /// Statistics about the knowledge base
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeStats {
-    pub total_sources: usize,
-    pub total_chunks: usize,
-    pub oldest_indexed: Option<DateTime<Utc>>,
-    pub newest_indexed: Option<DateTime<Utc>>,
+	pub total_sources: usize,
+	pub total_chunks: usize,
+	pub oldest_indexed: Option<DateTime<Utc>>,
+	pub newest_indexed: Option<DateTime<Utc>>,
 }
 
 /// Result of indexing operation
 #[derive(Debug, Clone)]
 pub struct IndexResult {
-    pub source: String,
-    pub chunks_created: usize,
-    pub was_cached: bool,
-    pub content_changed: bool,
+	pub source: String,
+	pub chunks_created: usize,
+	pub was_cached: bool,
+	pub content_changed: bool,
 }
 
 /// Result of a store operation
 #[derive(Debug, Clone)]
 pub struct StoreResult {
-    pub source: String,
-    pub chunks_created: usize,
+	pub source: String,
+	pub chunks_created: usize,
 }
 
 /// Result of a read operation (full page content)
 #[derive(Debug, Clone)]
 pub struct ReadResult {
-    pub source: String,
-    pub title: String,
-    pub content: String,
-    pub content_type: String,
+	pub source: String,
+	pub title: String,
+	pub content: String,
+	pub content_type: String,
 }
 
 /// A single line match within a knowledge chunk
 #[derive(Debug, Clone)]
 pub struct MatchResult {
-    pub source: String,
-    pub source_title: String,
-    pub line_number: usize,
-    pub matched_line: String,
-    /// Substrings captured by the regex pattern
-    pub captures: Vec<String>,
+	pub source: String,
+	pub source_title: String,
+	pub line_number: usize,
+	pub matched_line: String,
+	/// Substrings captured by the regex pattern
+	pub captures: Vec<String>,
 }

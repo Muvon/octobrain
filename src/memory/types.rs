@@ -24,168 +24,168 @@ use std::collections::HashMap;
 /// `Imported` is for externally ingested data with unknown provenance.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum MemorySource {
-    /// User explicitly confirmed, stated, or approved this — highest trust
-    UserConfirmed,
-    /// AI inferred this from reasoning or investigation — lower trust, may be wrong
-    #[default]
-    AgentInferred,
-    /// Created automatically by the auto-linking system
-    AutoLinked,
-    /// Imported from an external source with unknown provenance
-    Imported,
+	/// User explicitly confirmed, stated, or approved this — highest trust
+	UserConfirmed,
+	/// AI inferred this from reasoning or investigation — lower trust, may be wrong
+	#[default]
+	AgentInferred,
+	/// Created automatically by the auto-linking system
+	AutoLinked,
+	/// Imported from an external source with unknown provenance
+	Imported,
 }
 
 impl std::fmt::Display for MemorySource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MemorySource::UserConfirmed => write!(f, "user_confirmed"),
-            MemorySource::AgentInferred => write!(f, "agent_inferred"),
-            MemorySource::AutoLinked => write!(f, "auto_linked"),
-            MemorySource::Imported => write!(f, "imported"),
-        }
-    }
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			MemorySource::UserConfirmed => write!(f, "user_confirmed"),
+			MemorySource::AgentInferred => write!(f, "agent_inferred"),
+			MemorySource::AutoLinked => write!(f, "auto_linked"),
+			MemorySource::Imported => write!(f, "imported"),
+		}
+	}
 }
 
 impl From<String> for MemorySource {
-    fn from(s: String) -> Self {
-        match s.to_lowercase().as_str() {
-            "user_confirmed" | "confirmed" | "ground_truth" => MemorySource::UserConfirmed,
-            "auto_linked" | "autolinked" => MemorySource::AutoLinked,
-            "imported" => MemorySource::Imported,
-            _ => MemorySource::AgentInferred,
-        }
-    }
+	fn from(s: String) -> Self {
+		match s.to_lowercase().as_str() {
+			"user_confirmed" | "confirmed" | "ground_truth" => MemorySource::UserConfirmed,
+			"auto_linked" | "autolinked" => MemorySource::AutoLinked,
+			"imported" => MemorySource::Imported,
+			_ => MemorySource::AgentInferred,
+		}
+	}
 }
 
 /// Trust multiplier applied to relevance scores during retrieval.
 /// UserConfirmed memories rank higher than AI-inferred ones.
 impl MemorySource {
-    pub fn trust_multiplier(&self) -> f32 {
-        match self {
-            MemorySource::UserConfirmed => 1.0,
-            MemorySource::Imported => 0.9,
-            MemorySource::AgentInferred => 0.85,
-            MemorySource::AutoLinked => 0.8,
-        }
-    }
+	pub fn trust_multiplier(&self) -> f32 {
+		match self {
+			MemorySource::UserConfirmed => 1.0,
+			MemorySource::Imported => 0.9,
+			MemorySource::AgentInferred => 0.85,
+			MemorySource::AutoLinked => 0.8,
+		}
+	}
 
-    pub fn display_label(&self) -> &'static str {
-        match self {
-            MemorySource::UserConfirmed => "[CONFIRMED]",
-            MemorySource::AgentInferred => "[INFERRED]",
-            MemorySource::AutoLinked => "[AUTO]",
-            MemorySource::Imported => "[IMPORTED]",
-        }
-    }
+	pub fn display_label(&self) -> &'static str {
+		match self {
+			MemorySource::UserConfirmed => "[CONFIRMED]",
+			MemorySource::AgentInferred => "[INFERRED]",
+			MemorySource::AutoLinked => "[AUTO]",
+			MemorySource::Imported => "[IMPORTED]",
+		}
+	}
 }
 
 /// Types of memories that can be stored - covers dev, product, and general knowledge workflows
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MemoryType {
-    /// Code insights, patterns, solutions, and implementations
-    Code,
-    /// System architecture, design decisions, and patterns
-    Architecture,
-    /// Bug fixes, issues, and troubleshooting solutions
-    BugFix,
-    /// Feature implementations, requirements, and specifications
-    Feature,
-    /// Documentation, explanations, and knowledge
-    Documentation,
-    /// User preferences, settings, and workflow patterns
-    UserPreference,
-    /// Project decisions, meeting notes, and planning
-    Decision,
-    /// Learning notes, tutorials, and educational content
-    Learning,
-    /// Configuration, environment setup, and deployment
-    Configuration,
-    /// Testing strategies, test cases, and QA insights
-    Testing,
-    /// Performance optimizations and monitoring insights
-    Performance,
-    /// Security considerations, vulnerabilities, and fixes
-    Security,
-    /// Idea validation, product validation, hypothesis testing
-    Validation,
-    /// Market research, technical research, analysis findings
-    Research,
-    /// Process descriptions, SOPs, playbooks
-    Workflow,
-    /// Business requirements, specs, constraints
-    Requirement,
-    /// UI/UX decisions, system design, wireframes
-    Design,
-    /// API integrations, third-party services, data flows
-    Integration,
-    /// Stakeholder updates, team decisions, meeting notes
-    Communication,
-    /// Deployment procedures, runbooks, operational checklists
-    Process,
-    /// General insights, tips, and miscellaneous knowledge
-    Insight,
-    /// A goal, task, or intent — the anchor for event-based consolidation.
-    /// When a Goal is closed via `consolidate_goal`, all memories linked to it
-    /// with `Achieves` are summarized into a consolidated parent and archived.
-    Goal,
+	/// Code insights, patterns, solutions, and implementations
+	Code,
+	/// System architecture, design decisions, and patterns
+	Architecture,
+	/// Bug fixes, issues, and troubleshooting solutions
+	BugFix,
+	/// Feature implementations, requirements, and specifications
+	Feature,
+	/// Documentation, explanations, and knowledge
+	Documentation,
+	/// User preferences, settings, and workflow patterns
+	UserPreference,
+	/// Project decisions, meeting notes, and planning
+	Decision,
+	/// Learning notes, tutorials, and educational content
+	Learning,
+	/// Configuration, environment setup, and deployment
+	Configuration,
+	/// Testing strategies, test cases, and QA insights
+	Testing,
+	/// Performance optimizations and monitoring insights
+	Performance,
+	/// Security considerations, vulnerabilities, and fixes
+	Security,
+	/// Idea validation, product validation, hypothesis testing
+	Validation,
+	/// Market research, technical research, analysis findings
+	Research,
+	/// Process descriptions, SOPs, playbooks
+	Workflow,
+	/// Business requirements, specs, constraints
+	Requirement,
+	/// UI/UX decisions, system design, wireframes
+	Design,
+	/// API integrations, third-party services, data flows
+	Integration,
+	/// Stakeholder updates, team decisions, meeting notes
+	Communication,
+	/// Deployment procedures, runbooks, operational checklists
+	Process,
+	/// General insights, tips, and miscellaneous knowledge
+	Insight,
+	/// A goal, task, or intent — the anchor for event-based consolidation.
+	/// When a Goal is closed via `consolidate_goal`, all memories linked to it
+	/// with `Achieves` are summarized into a consolidated parent and archived.
+	Goal,
 }
 
 impl std::fmt::Display for MemoryType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MemoryType::Code => write!(f, "code"),
-            MemoryType::Architecture => write!(f, "architecture"),
-            MemoryType::BugFix => write!(f, "bug_fix"),
-            MemoryType::Feature => write!(f, "feature"),
-            MemoryType::Documentation => write!(f, "documentation"),
-            MemoryType::UserPreference => write!(f, "user_preference"),
-            MemoryType::Decision => write!(f, "decision"),
-            MemoryType::Learning => write!(f, "learning"),
-            MemoryType::Configuration => write!(f, "configuration"),
-            MemoryType::Testing => write!(f, "testing"),
-            MemoryType::Performance => write!(f, "performance"),
-            MemoryType::Security => write!(f, "security"),
-            MemoryType::Validation => write!(f, "validation"),
-            MemoryType::Research => write!(f, "research"),
-            MemoryType::Workflow => write!(f, "workflow"),
-            MemoryType::Requirement => write!(f, "requirement"),
-            MemoryType::Design => write!(f, "design"),
-            MemoryType::Integration => write!(f, "integration"),
-            MemoryType::Communication => write!(f, "communication"),
-            MemoryType::Process => write!(f, "process"),
-            MemoryType::Insight => write!(f, "insight"),
-            MemoryType::Goal => write!(f, "goal"),
-        }
-    }
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			MemoryType::Code => write!(f, "code"),
+			MemoryType::Architecture => write!(f, "architecture"),
+			MemoryType::BugFix => write!(f, "bug_fix"),
+			MemoryType::Feature => write!(f, "feature"),
+			MemoryType::Documentation => write!(f, "documentation"),
+			MemoryType::UserPreference => write!(f, "user_preference"),
+			MemoryType::Decision => write!(f, "decision"),
+			MemoryType::Learning => write!(f, "learning"),
+			MemoryType::Configuration => write!(f, "configuration"),
+			MemoryType::Testing => write!(f, "testing"),
+			MemoryType::Performance => write!(f, "performance"),
+			MemoryType::Security => write!(f, "security"),
+			MemoryType::Validation => write!(f, "validation"),
+			MemoryType::Research => write!(f, "research"),
+			MemoryType::Workflow => write!(f, "workflow"),
+			MemoryType::Requirement => write!(f, "requirement"),
+			MemoryType::Design => write!(f, "design"),
+			MemoryType::Integration => write!(f, "integration"),
+			MemoryType::Communication => write!(f, "communication"),
+			MemoryType::Process => write!(f, "process"),
+			MemoryType::Insight => write!(f, "insight"),
+			MemoryType::Goal => write!(f, "goal"),
+		}
+	}
 }
 
 impl From<String> for MemoryType {
-    fn from(s: String) -> Self {
-        match s.to_lowercase().as_str() {
-            "code" => MemoryType::Code,
-            "architecture" | "arch" => MemoryType::Architecture,
-            "bug_fix" | "bugfix" | "bug" => MemoryType::BugFix,
-            "feature" => MemoryType::Feature,
-            "documentation" | "docs" | "doc" => MemoryType::Documentation,
-            "user_preference" | "preference" => MemoryType::UserPreference,
-            "decision" => MemoryType::Decision,
-            "learning" | "tutorial" | "education" => MemoryType::Learning,
-            "configuration" | "config" | "setup" => MemoryType::Configuration,
-            "testing" | "test" | "qa" => MemoryType::Testing,
-            "performance" | "perf" | "optimization" => MemoryType::Performance,
-            "security" | "vulnerability" | "vuln" => MemoryType::Security,
-            "validation" | "hypothesis" | "experiment" => MemoryType::Validation,
-            "research" | "analysis" | "investigation" => MemoryType::Research,
-            "workflow" | "sop" | "playbook" => MemoryType::Workflow,
-            "requirement" | "spec" | "constraint" => MemoryType::Requirement,
-            "design" | "ux" | "ui" | "wireframe" => MemoryType::Design,
-            "integration" | "api" | "connector" => MemoryType::Integration,
-            "communication" | "stakeholder" | "update" => MemoryType::Communication,
-            "process" | "runbook" | "procedure" | "deployment" => MemoryType::Process,
-            "goal" | "intent" | "task" | "objective" => MemoryType::Goal,
-            _ => MemoryType::Insight, // Default fallback
-        }
-    }
+	fn from(s: String) -> Self {
+		match s.to_lowercase().as_str() {
+			"code" => MemoryType::Code,
+			"architecture" | "arch" => MemoryType::Architecture,
+			"bug_fix" | "bugfix" | "bug" => MemoryType::BugFix,
+			"feature" => MemoryType::Feature,
+			"documentation" | "docs" | "doc" => MemoryType::Documentation,
+			"user_preference" | "preference" => MemoryType::UserPreference,
+			"decision" => MemoryType::Decision,
+			"learning" | "tutorial" | "education" => MemoryType::Learning,
+			"configuration" | "config" | "setup" => MemoryType::Configuration,
+			"testing" | "test" | "qa" => MemoryType::Testing,
+			"performance" | "perf" | "optimization" => MemoryType::Performance,
+			"security" | "vulnerability" | "vuln" => MemoryType::Security,
+			"validation" | "hypothesis" | "experiment" => MemoryType::Validation,
+			"research" | "analysis" | "investigation" => MemoryType::Research,
+			"workflow" | "sop" | "playbook" => MemoryType::Workflow,
+			"requirement" | "spec" | "constraint" => MemoryType::Requirement,
+			"design" | "ux" | "ui" | "wireframe" => MemoryType::Design,
+			"integration" | "api" | "connector" => MemoryType::Integration,
+			"communication" | "stakeholder" | "update" => MemoryType::Communication,
+			"process" | "runbook" | "procedure" | "deployment" => MemoryType::Process,
+			"goal" | "intent" | "task" | "objective" => MemoryType::Goal,
+			_ => MemoryType::Insight, // Default fallback
+		}
+	}
 }
 
 /// Lifecycle state of a memory.
@@ -197,306 +197,291 @@ impl From<String> for MemoryType {
 /// cleanup paths before hard delete.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum MemoryState {
-    #[default]
-    Working,
-    Consolidated,
-    Archived,
+	#[default]
+	Working,
+	Consolidated,
+	Archived,
 }
 
 impl std::fmt::Display for MemoryState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MemoryState::Working => write!(f, "working"),
-            MemoryState::Consolidated => write!(f, "consolidated"),
-            MemoryState::Archived => write!(f, "archived"),
-        }
-    }
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			MemoryState::Working => write!(f, "working"),
+			MemoryState::Consolidated => write!(f, "consolidated"),
+			MemoryState::Archived => write!(f, "archived"),
+		}
+	}
 }
 
 impl From<String> for MemoryState {
-    fn from(s: String) -> Self {
-        match s.to_lowercase().as_str() {
-            "consolidated" => MemoryState::Consolidated,
-            "archived" => MemoryState::Archived,
-            _ => MemoryState::Working,
-        }
-    }
+	fn from(s: String) -> Self {
+		match s.to_lowercase().as_str() {
+			"consolidated" => MemoryState::Consolidated,
+			"archived" => MemoryState::Archived,
+			_ => MemoryState::Working,
+		}
+	}
 }
 
 /// Temporal decay tracking for memory importance
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryDecay {
-    /// Base importance score before decay (0.0 to 1.0)
-    pub base_importance: f32,
-    /// Number of times this memory has been accessed
-    pub access_count: u32,
-    /// Last time this memory was accessed
-    pub last_accessed: DateTime<Utc>,
-    /// Per-memory decay rate multiplier. The effective half-life for this memory is
-    /// `config.decay_half_life_days / decay_rate`. Default 1.0 → unchanged behavior;
-    /// 2.0 → decays twice as fast (critical / ephemeral); 0.5 → twice as slow (long-lived).
-    pub decay_rate: f32,
+	/// Base importance score before decay (0.0 to 1.0)
+	pub base_importance: f32,
+	/// Number of times this memory has been accessed
+	pub access_count: u32,
+	/// Last time this memory was accessed
+	pub last_accessed: DateTime<Utc>,
+	/// Per-memory decay rate multiplier. The effective half-life for this memory is
+	/// `config.decay_half_life_days / decay_rate`. Default 1.0 → unchanged behavior;
+	/// 2.0 → decays twice as fast (critical / ephemeral); 0.5 → twice as slow (long-lived).
+	pub decay_rate: f32,
 }
 
 impl MemoryDecay {
-    /// Create new decay tracker with base importance
-    pub fn new(base_importance: f32) -> Self {
-        let now = Utc::now();
-        Self {
-            base_importance,
-            access_count: 0,
-            last_accessed: now,
-            decay_rate: 1.0, // Default decay rate
-        }
-    }
+	/// Create new decay tracker with base importance
+	pub fn new(base_importance: f32) -> Self {
+		let now = Utc::now();
+		Self {
+			base_importance,
+			access_count: 0,
+			last_accessed: now,
+			decay_rate: 1.0, // Default decay rate
+		}
+	}
 
-    /// Calculate current importance using config-driven half-life decay and bounded access boost.
-    ///
-    /// Formula: `importance = base_importance * 0.5^(days/half_life) * (1 + boost_factor * ln(1 + access_count))`
-    ///
-    /// `base_importance` is passed in (rather than read from `self.base_importance`) so the
-    /// canonical stored `metadata.importance` is the single source of truth. The field on
-    /// MemoryDecay is kept only for serde back-compat with stored memories.
-    ///
-    /// - At `days_since_access == half_life_days`, the time term is exactly 0.5.
-    /// - At `access_count == 0`, the boost term is exactly 1.0 — zero-access memories are
-    ///   governed by base*time_decay alone (not silently zeroed out as the previous
-    ///   `ln(access_count + 1)` formulation did).
-    /// - `access_boost_factor` scales the logarithmic growth per access; 0 disables the boost.
-    pub fn calculate_current_importance(
-        &self,
-        base_importance: f32,
-        min_threshold: f32,
-        half_life_days: u32,
-        access_boost_factor: f32,
-    ) -> f32 {
-        let now = Utc::now();
-        let days_since_access = (now - self.last_accessed).num_days() as f32;
+	/// Calculate current importance using config-driven half-life decay and bounded access boost.
+	///
+	/// Formula: `importance = base_importance * 0.5^(days/half_life) * (1 + boost_factor * ln(1 + access_count))`
+	///
+	/// `base_importance` is passed in (rather than read from `self.base_importance`) so the
+	/// canonical stored `metadata.importance` is the single source of truth. The field on
+	/// MemoryDecay is kept only for serde back-compat with stored memories.
+	///
+	/// - At `days_since_access == half_life_days`, the time term is exactly 0.5.
+	/// - At `access_count == 0`, the boost term is exactly 1.0 — zero-access memories are
+	///   governed by base*time_decay alone (not silently zeroed out as the previous
+	///   `ln(access_count + 1)` formulation did).
+	/// - `access_boost_factor` scales the logarithmic growth per access; 0 disables the boost.
+	pub fn calculate_current_importance(
+		&self,
+		base_importance: f32,
+		min_threshold: f32,
+		half_life_days: u32,
+		access_boost_factor: f32,
+	) -> f32 {
+		let now = Utc::now();
+		let days_since_access = (now - self.last_accessed).num_days() as f32;
 
-        // Effective half-life = config half-life scaled by this memory's decay_rate.
-        // decay_rate=1.0 (default) → unchanged; >1 → faster decay; <1 → slower decay.
-        let base_half_life = half_life_days.max(1) as f32;
-        let rate = self.decay_rate.max(0.1); // guard against zero/negative
-        let effective_half_life = (base_half_life / rate).max(1.0);
-        let time_decay = 0.5_f32.powf(days_since_access / effective_half_life);
+		// Effective half-life = config half-life scaled by this memory's decay_rate.
+		// decay_rate=1.0 (default) → unchanged; >1 → faster decay; <1 → slower decay.
+		let base_half_life = half_life_days.max(1) as f32;
+		let rate = self.decay_rate.max(0.1); // guard against zero/negative
+		let effective_half_life = (base_half_life / rate).max(1.0);
+		let time_decay = 0.5_f32.powf(days_since_access / effective_half_life);
 
-        let access_boost = 1.0 + access_boost_factor * (self.access_count as f32).ln_1p();
+		let access_boost = 1.0 + access_boost_factor * (self.access_count as f32).ln_1p();
 
-        let current_importance = base_importance * time_decay * access_boost;
-        current_importance.max(min_threshold)
-    }
+		let current_importance = base_importance * time_decay * access_boost;
+		current_importance.max(min_threshold)
+	}
 }
 
 impl Default for MemoryDecay {
-    fn default() -> Self {
-        Self::new(0.5)
-    }
+	fn default() -> Self {
+		Self::new(0.5)
+	}
 }
 
 /// Metadata associated with a memory
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryMetadata {
-    /// Git commit hash when memory was created
-    pub git_commit: Option<String>,
-    /// Files associated with this memory
-    pub related_files: Vec<String>,
-    /// Tags for categorization and search
-    pub tags: Vec<String>,
-    /// Importance score (0.0 to 1.0)
-    pub importance: f32,
-    /// Confidence score (0.0 to 1.0)
-    pub confidence: f32,
-    /// User who created the memory
-    pub created_by: Option<String>,
-    /// Additional key-value metadata
-    pub custom_fields: HashMap<String, String>,
-    /// Temporal decay tracking
-    pub decay: MemoryDecay,
-    /// Trust tier — who/what created this memory
-    pub source: MemorySource,
-    /// Lifecycle state — Working by default, transitions to Consolidated on goal close.
-    #[serde(default)]
-    pub state: MemoryState,
+	/// Git commit hash when memory was created
+	pub git_commit: Option<String>,
+	/// Files associated with this memory
+	pub related_files: Vec<String>,
+	/// Tags for categorization and search
+	pub tags: Vec<String>,
+	/// Importance score (0.0 to 1.0)
+	pub importance: f32,
+	/// Confidence score (0.0 to 1.0)
+	pub confidence: f32,
+	/// User who created the memory
+	pub created_by: Option<String>,
+	/// Additional key-value metadata
+	pub custom_fields: HashMap<String, String>,
+	/// Temporal decay tracking
+	pub decay: MemoryDecay,
+	/// Trust tier — who/what created this memory
+	pub source: MemorySource,
+	/// Lifecycle state — Working by default, transitions to Consolidated on goal close.
+	#[serde(default)]
+	pub state: MemoryState,
 }
 
 impl Default for MemoryMetadata {
-    fn default() -> Self {
-        Self {
-            git_commit: None,
-            related_files: Vec::new(),
-            tags: Vec::new(),
-            importance: 0.5,
-            confidence: 1.0,
-            created_by: None,
-            custom_fields: HashMap::new(),
-            decay: MemoryDecay::new(0.5),
-            source: MemorySource::AgentInferred,
-            state: MemoryState::Working,
-        }
-    }
+	fn default() -> Self {
+		Self {
+			git_commit: None,
+			related_files: Vec::new(),
+			tags: Vec::new(),
+			importance: 0.5,
+			confidence: 1.0,
+			created_by: None,
+			custom_fields: HashMap::new(),
+			decay: MemoryDecay::new(0.5),
+			source: MemorySource::AgentInferred,
+			state: MemoryState::Working,
+		}
+	}
 }
 
 /// Core memory structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memory {
-    /// Unique identifier
-    pub id: String,
-    /// Type of memory
-    pub memory_type: MemoryType,
-    /// Short summary/title
-    pub title: String,
-    /// Detailed content
-    pub content: String,
-    /// Associated metadata
-    pub metadata: MemoryMetadata,
-    /// Creation timestamp
-    pub created_at: DateTime<Utc>,
-    /// Last update timestamp
-    pub updated_at: DateTime<Utc>,
-    /// Optional relevance score from search (not stored)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub relevance_score: Option<f32>,
+	/// Unique identifier
+	pub id: String,
+	/// Type of memory
+	pub memory_type: MemoryType,
+	/// Short summary/title
+	pub title: String,
+	/// Detailed content
+	pub content: String,
+	/// Associated metadata
+	pub metadata: MemoryMetadata,
+	/// Creation timestamp
+	pub created_at: DateTime<Utc>,
+	/// Last update timestamp
+	pub updated_at: DateTime<Utc>,
+	/// Optional relevance score from search (not stored)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub relevance_score: Option<f32>,
 }
 
 impl Memory {
-    /// Create a new memory
-    pub fn new(
-        memory_type: MemoryType,
-        title: String,
-        content: String,
-        metadata: Option<MemoryMetadata>,
-    ) -> Self {
-        let now = Utc::now();
-        Self {
-            id: uuid::Uuid::new_v4().to_string(),
-            memory_type,
-            title,
-            content,
-            metadata: metadata.unwrap_or_default(),
-            created_at: now,
-            updated_at: now,
-            relevance_score: None,
-        }
-    }
+	/// Create a new memory
+	pub fn new(memory_type: MemoryType, title: String, content: String, metadata: Option<MemoryMetadata>) -> Self {
+		let now = Utc::now();
+		Self {
+			id: uuid::Uuid::new_v4().to_string(),
+			memory_type,
+			title,
+			content,
+			metadata: metadata.unwrap_or_default(),
+			created_at: now,
+			updated_at: now,
+			relevance_score: None,
+		}
+	}
 
-    /// Update the memory content and metadata
-    pub fn update(
-        &mut self,
-        title: Option<String>,
-        content: Option<String>,
-        metadata: Option<MemoryMetadata>,
-    ) {
-        if let Some(title) = title {
-            self.title = title;
-        }
-        if let Some(content) = content {
-            self.content = content;
-        }
-        if let Some(metadata) = metadata {
-            self.metadata = metadata;
-        }
-        self.updated_at = Utc::now();
-    }
+	/// Update the memory content and metadata
+	pub fn update(&mut self, title: Option<String>, content: Option<String>, metadata: Option<MemoryMetadata>) {
+		if let Some(title) = title {
+			self.title = title;
+		}
+		if let Some(content) = content {
+			self.content = content;
+		}
+		if let Some(metadata) = metadata {
+			self.metadata = metadata;
+		}
+		self.updated_at = Utc::now();
+	}
 
-    /// Get searchable text for embedding generation
-    pub fn get_searchable_text(&self) -> String {
-        format!(
-            "{} {} {} {}",
-            self.title,
-            self.content,
-            self.metadata.tags.join(" "),
-            self.metadata.related_files.join(" ")
-        )
-    }
+	/// Get searchable text for embedding generation
+	pub fn get_searchable_text(&self) -> String {
+		format!(
+			"{} {} {} {}",
+			self.title,
+			self.content,
+			self.metadata.tags.join(" "),
+			self.metadata.related_files.join(" ")
+		)
+	}
 
-    /// Get current importance considering temporal decay.
-    /// `half_life_days` and `access_boost_factor` should come from MemoryConfig.
-    /// The stored `metadata.importance` is the canonical base_importance.
-    pub fn get_current_importance(
-        &self,
-        decay_enabled: bool,
-        min_threshold: f32,
-        half_life_days: u32,
-        access_boost_factor: f32,
-    ) -> f32 {
-        if decay_enabled {
-            self.metadata.decay.calculate_current_importance(
-                self.metadata.importance,
-                min_threshold,
-                half_life_days,
-                access_boost_factor,
-            )
-        } else {
-            self.metadata.importance
-        }
-    }
+	/// Get current importance considering temporal decay.
+	/// `half_life_days` and `access_boost_factor` should come from MemoryConfig.
+	/// The stored `metadata.importance` is the canonical base_importance.
+	pub fn get_current_importance(
+		&self,
+		decay_enabled: bool,
+		min_threshold: f32,
+		half_life_days: u32,
+		access_boost_factor: f32,
+	) -> f32 {
+		if decay_enabled {
+			self.metadata.decay.calculate_current_importance(
+				self.metadata.importance,
+				min_threshold,
+				half_life_days,
+				access_boost_factor,
+			)
+		} else {
+			self.metadata.importance
+		}
+	}
 
-    /// Add a tag if it doesn't exist
-    pub fn add_tag(&mut self, tag: String) {
-        if !self.metadata.tags.contains(&tag) {
-            self.metadata.tags.push(tag);
-            self.updated_at = Utc::now();
-        }
-    }
+	/// Add a tag if it doesn't exist
+	pub fn add_tag(&mut self, tag: String) {
+		if !self.metadata.tags.contains(&tag) {
+			self.metadata.tags.push(tag);
+			self.updated_at = Utc::now();
+		}
+	}
 
-    /// Remove a tag
-    pub fn remove_tag(&mut self, tag: &str) {
-        if let Some(pos) = self.metadata.tags.iter().position(|t| t == tag) {
-            self.metadata.tags.remove(pos);
-            self.updated_at = Utc::now();
-        }
-    }
+	/// Remove a tag
+	pub fn remove_tag(&mut self, tag: &str) {
+		if let Some(pos) = self.metadata.tags.iter().position(|t| t == tag) {
+			self.metadata.tags.remove(pos);
+			self.updated_at = Utc::now();
+		}
+	}
 
-    /// Add a related file if it doesn't exist
-    pub fn add_related_file(&mut self, file_path: String) {
-        if !self.metadata.related_files.contains(&file_path) {
-            self.metadata.related_files.push(file_path);
-            self.updated_at = Utc::now();
-        }
-    }
+	/// Add a related file if it doesn't exist
+	pub fn add_related_file(&mut self, file_path: String) {
+		if !self.metadata.related_files.contains(&file_path) {
+			self.metadata.related_files.push(file_path);
+			self.updated_at = Utc::now();
+		}
+	}
 
-    /// Remove a related file
-    pub fn remove_related_file(&mut self, file_path: &str) {
-        if let Some(pos) = self
-            .metadata
-            .related_files
-            .iter()
-            .position(|f| f == file_path)
-        {
-            self.metadata.related_files.remove(pos);
-            self.updated_at = Utc::now();
-        }
-    }
+	/// Remove a related file
+	pub fn remove_related_file(&mut self, file_path: &str) {
+		if let Some(pos) = self.metadata.related_files.iter().position(|f| f == file_path) {
+			self.metadata.related_files.remove(pos);
+			self.updated_at = Utc::now();
+		}
+	}
 }
 
 /// Query parameters for memory search
 #[derive(Debug, Clone, Default)]
 pub struct MemoryQuery {
-    /// Text query for semantic search
-    pub query_text: Option<String>,
-    /// Filter by memory types
-    pub memory_types: Option<Vec<MemoryType>>,
-    /// Filter by tags (any of these tags)
-    pub tags: Option<Vec<String>>,
-    /// Filter by related files
-    pub related_files: Option<Vec<String>>,
-    /// Filter by git commit
-    pub git_commit: Option<String>,
-    /// Filter by minimum importance score
-    pub min_importance: Option<f32>,
-    /// Filter by minimum confidence score
-    pub min_confidence: Option<f32>,
-    /// Filter by creation date range
-    pub created_after: Option<DateTime<Utc>>,
-    pub created_before: Option<DateTime<Utc>>,
-    /// Maximum number of results
-    pub limit: Option<usize>,
-    /// Minimum relevance score for vector search
-    pub min_relevance: Option<f32>,
-    /// Sort by field
-    pub sort_by: Option<MemorySortBy>,
-    /// Sort order
-    pub sort_order: Option<SortOrder>,
+	/// Text query for semantic search
+	pub query_text: Option<String>,
+	/// Filter by memory types
+	pub memory_types: Option<Vec<MemoryType>>,
+	/// Filter by tags (any of these tags)
+	pub tags: Option<Vec<String>>,
+	/// Filter by related files
+	pub related_files: Option<Vec<String>>,
+	/// Filter by git commit
+	pub git_commit: Option<String>,
+	/// Filter by minimum importance score
+	pub min_importance: Option<f32>,
+	/// Filter by minimum confidence score
+	pub min_confidence: Option<f32>,
+	/// Filter by creation date range
+	pub created_after: Option<DateTime<Utc>>,
+	pub created_before: Option<DateTime<Utc>>,
+	/// Maximum number of results
+	pub limit: Option<usize>,
+	/// Minimum relevance score for vector search
+	pub min_relevance: Option<f32>,
+	/// Sort by field
+	pub sort_by: Option<MemorySortBy>,
+	/// Sort order
+	pub sort_order: Option<SortOrder>,
 }
 
 /// Hybrid search query combining vector RRF fusion with recency and importance signals.
@@ -506,303 +491,303 @@ pub struct MemoryQuery {
 /// keyword list is needed.
 #[derive(Debug, Clone)]
 pub struct HybridSearchQuery {
-    /// Query text used for both vector embedding and BM25 full-text search
-    pub vector_query: Option<String>,
-    /// Weight applied to the RRF-fused score (vector + BM25 combined)
-    pub vector_weight: f32,
-    /// Weight for recency signal (0.0-1.0)
-    pub recency_weight: f32,
-    /// Weight for importance signal (0.0-1.0)
-    pub importance_weight: f32,
-    /// Standard filters (same as MemoryQuery)
-    pub filters: MemoryQuery,
+	/// Query text used for both vector embedding and BM25 full-text search
+	pub vector_query: Option<String>,
+	/// Weight applied to the RRF-fused score (vector + BM25 combined)
+	pub vector_weight: f32,
+	/// Weight for recency signal (0.0-1.0)
+	pub recency_weight: f32,
+	/// Weight for importance signal (0.0-1.0)
+	pub importance_weight: f32,
+	/// Standard filters (same as MemoryQuery)
+	pub filters: MemoryQuery,
 }
 
 impl Default for HybridSearchQuery {
-    fn default() -> Self {
-        Self {
-            vector_query: None,
-            vector_weight: 0.8,
-            recency_weight: 0.1,
-            importance_weight: 0.1,
-            filters: MemoryQuery::default(),
-        }
-    }
+	fn default() -> Self {
+		Self {
+			vector_query: None,
+			vector_weight: 0.8,
+			recency_weight: 0.1,
+			importance_weight: 0.1,
+			filters: MemoryQuery::default(),
+		}
+	}
 }
 
 impl HybridSearchQuery {
-    /// Validate that weights are in valid ranges and a query is provided
-    pub fn validate(&self) -> Result<(), String> {
-        if self.vector_weight < 0.0 || self.vector_weight > 1.0 {
-            return Err(format!(
-                "vector_weight must be in [0.0, 1.0], got {}",
-                self.vector_weight
-            ));
-        }
-        if self.recency_weight < 0.0 || self.recency_weight > 1.0 {
-            return Err(format!(
-                "recency_weight must be in [0.0, 1.0], got {}",
-                self.recency_weight
-            ));
-        }
-        if self.importance_weight < 0.0 || self.importance_weight > 1.0 {
-            return Err(format!(
-                "importance_weight must be in [0.0, 1.0], got {}",
-                self.importance_weight
-            ));
-        }
+	/// Validate that weights are in valid ranges and a query is provided
+	pub fn validate(&self) -> Result<(), String> {
+		if self.vector_weight < 0.0 || self.vector_weight > 1.0 {
+			return Err(format!(
+				"vector_weight must be in [0.0, 1.0], got {}",
+				self.vector_weight
+			));
+		}
+		if self.recency_weight < 0.0 || self.recency_weight > 1.0 {
+			return Err(format!(
+				"recency_weight must be in [0.0, 1.0], got {}",
+				self.recency_weight
+			));
+		}
+		if self.importance_weight < 0.0 || self.importance_weight > 1.0 {
+			return Err(format!(
+				"importance_weight must be in [0.0, 1.0], got {}",
+				self.importance_weight
+			));
+		}
 
-        if self.vector_query.is_none() {
-            return Err("vector_query must be provided for hybrid search".to_string());
-        }
+		if self.vector_query.is_none() {
+			return Err("vector_query must be provided for hybrid search".to_string());
+		}
 
-        Ok(())
-    }
+		Ok(())
+	}
 }
 
 /// Sort options for memory queries
 #[derive(Debug, Clone)]
 pub enum MemorySortBy {
-    CreatedAt,
-    Importance,
+	CreatedAt,
+	Importance,
 }
 
 /// Sort order
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Ascending is used in match statement but compiler doesn't detect it
 pub enum SortOrder {
-    Ascending,
-    Descending,
+	Ascending,
+	Descending,
 }
 
 /// Search result with relevance scoring
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemorySearchResult {
-    /// The memory
-    pub memory: Memory,
-    /// Relevance score from vector search
-    pub relevance_score: f32,
-    /// Explanation of why this memory was selected
-    pub selection_reason: String,
+	/// The memory
+	pub memory: Memory,
+	/// Relevance score from vector search
+	pub relevance_score: f32,
+	/// Explanation of why this memory was selected
+	pub selection_reason: String,
 }
 
 /// Sort search results by descending relevance score.
 /// NaN scores compare as equal, keeping the ordering total so the sort never panics.
 pub(crate) fn sort_by_relevance_desc(results: &mut [MemorySearchResult]) {
-    results.sort_by(|a, b| {
-        b.relevance_score
-            .partial_cmp(&a.relevance_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+	results.sort_by(|a, b| {
+		b.relevance_score
+			.partial_cmp(&a.relevance_score)
+			.unwrap_or(std::cmp::Ordering::Equal)
+	});
 }
 
 /// Memory relationship between memories
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRelationship {
-    /// Unique identifier
-    pub id: String,
-    /// Source memory ID
-    pub source_id: String,
-    /// Target memory ID
-    pub target_id: String,
-    /// Type of relationship
-    pub relationship_type: RelationshipType,
-    /// Strength of relationship (0.0 to 1.0)
-    pub strength: f32,
-    /// Description of the relationship
-    pub description: String,
-    /// Creation timestamp
-    pub created_at: DateTime<Utc>,
+	/// Unique identifier
+	pub id: String,
+	/// Source memory ID
+	pub source_id: String,
+	/// Target memory ID
+	pub target_id: String,
+	/// Type of relationship
+	pub relationship_type: RelationshipType,
+	/// Strength of relationship (0.0 to 1.0)
+	pub strength: f32,
+	/// Description of the relationship
+	pub description: String,
+	/// Creation timestamp
+	pub created_at: DateTime<Utc>,
 }
 
 /// Memory graph representing a memory and its connected memories
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryGraph {
-    /// Root memory ID
-    pub root: String,
-    /// All memories in the graph (ID -> Memory)
-    pub memories: HashMap<String, Memory>,
-    /// All relationships in the graph
-    pub relationships: Vec<MemoryRelationship>,
+	/// Root memory ID
+	pub root: String,
+	/// All memories in the graph (ID -> Memory)
+	pub memories: HashMap<String, Memory>,
+	/// All relationships in the graph
+	pub relationships: Vec<MemoryRelationship>,
 }
 
 /// Types of relationships between memories
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RelationshipType {
-    /// One memory relates to another
-    RelatedTo,
-    /// One memory depends on another
-    DependsOn,
-    /// One memory supersedes another
-    Supersedes,
-    /// Memories are similar or duplicate
-    Similar,
-    /// Memories conflict with each other
-    Conflicts,
-    /// One memory implements another
-    Implements,
-    /// One memory extends another
-    Extends,
-    /// Automatically detected relationship (via auto-linking)
-    AutoLinked,
-    /// Source memory contributes to / advances a Goal memory.
-    /// Used by goal-anchored consolidation.
-    Achieves,
-    /// Source memory (a consolidated parent) closes / summarizes a Goal memory.
-    /// Marks the goal as completed and the consolidation event.
-    Closes,
-    /// Custom relationship type
-    Custom(String),
+	/// One memory relates to another
+	RelatedTo,
+	/// One memory depends on another
+	DependsOn,
+	/// One memory supersedes another
+	Supersedes,
+	/// Memories are similar or duplicate
+	Similar,
+	/// Memories conflict with each other
+	Conflicts,
+	/// One memory implements another
+	Implements,
+	/// One memory extends another
+	Extends,
+	/// Automatically detected relationship (via auto-linking)
+	AutoLinked,
+	/// Source memory contributes to / advances a Goal memory.
+	/// Used by goal-anchored consolidation.
+	Achieves,
+	/// Source memory (a consolidated parent) closes / summarizes a Goal memory.
+	/// Marks the goal as completed and the consolidation event.
+	Closes,
+	/// Custom relationship type
+	Custom(String),
 }
 
 impl std::fmt::Display for RelationshipType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RelationshipType::RelatedTo => write!(f, "related_to"),
-            RelationshipType::DependsOn => write!(f, "depends_on"),
-            RelationshipType::Supersedes => write!(f, "supersedes"),
-            RelationshipType::Similar => write!(f, "similar"),
-            RelationshipType::Conflicts => write!(f, "conflicts"),
-            RelationshipType::Implements => write!(f, "implements"),
-            RelationshipType::Extends => write!(f, "extends"),
-            RelationshipType::AutoLinked => write!(f, "auto_linked"),
-            RelationshipType::Achieves => write!(f, "achieves"),
-            RelationshipType::Closes => write!(f, "closes"),
-            RelationshipType::Custom(s) => write!(f, "{}", s),
-        }
-    }
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			RelationshipType::RelatedTo => write!(f, "related_to"),
+			RelationshipType::DependsOn => write!(f, "depends_on"),
+			RelationshipType::Supersedes => write!(f, "supersedes"),
+			RelationshipType::Similar => write!(f, "similar"),
+			RelationshipType::Conflicts => write!(f, "conflicts"),
+			RelationshipType::Implements => write!(f, "implements"),
+			RelationshipType::Extends => write!(f, "extends"),
+			RelationshipType::AutoLinked => write!(f, "auto_linked"),
+			RelationshipType::Achieves => write!(f, "achieves"),
+			RelationshipType::Closes => write!(f, "closes"),
+			RelationshipType::Custom(s) => write!(f, "{}", s),
+		}
+	}
 }
 
 impl From<&str> for RelationshipType {
-    /// Parse a stored relationship_type string back into the enum.
-    /// Accepts both the snake_case forms emitted by Display (canonical) and the
-    /// CamelCase forms used by an earlier round-trip path so legacy rows still
-    /// round-trip correctly. Unknown strings become `Custom`.
-    fn from(s: &str) -> Self {
-        match s {
-            "related_to" | "RelatedTo" => RelationshipType::RelatedTo,
-            "depends_on" | "DependsOn" => RelationshipType::DependsOn,
-            "supersedes" | "Supersedes" => RelationshipType::Supersedes,
-            "similar" | "Similar" => RelationshipType::Similar,
-            "conflicts" | "Conflicts" => RelationshipType::Conflicts,
-            "implements" | "Implements" => RelationshipType::Implements,
-            "extends" | "Extends" => RelationshipType::Extends,
-            "auto_linked" | "AutoLinked" => RelationshipType::AutoLinked,
-            "achieves" | "Achieves" => RelationshipType::Achieves,
-            "closes" | "Closes" => RelationshipType::Closes,
-            other => RelationshipType::Custom(other.to_string()),
-        }
-    }
+	/// Parse a stored relationship_type string back into the enum.
+	/// Accepts both the snake_case forms emitted by Display (canonical) and the
+	/// CamelCase forms used by an earlier round-trip path so legacy rows still
+	/// round-trip correctly. Unknown strings become `Custom`.
+	fn from(s: &str) -> Self {
+		match s {
+			"related_to" | "RelatedTo" => RelationshipType::RelatedTo,
+			"depends_on" | "DependsOn" => RelationshipType::DependsOn,
+			"supersedes" | "Supersedes" => RelationshipType::Supersedes,
+			"similar" | "Similar" => RelationshipType::Similar,
+			"conflicts" | "Conflicts" => RelationshipType::Conflicts,
+			"implements" | "Implements" => RelationshipType::Implements,
+			"extends" | "Extends" => RelationshipType::Extends,
+			"auto_linked" | "AutoLinked" => RelationshipType::AutoLinked,
+			"achieves" | "Achieves" => RelationshipType::Achieves,
+			"closes" | "Closes" => RelationshipType::Closes,
+			other => RelationshipType::Custom(other.to_string()),
+		}
+	}
 }
 
 fn default_stale_ref_cleanup_enabled() -> bool {
-    true
+	true
 }
 
 fn default_stale_ref_importance_penalty() -> f32 {
-    0.3
+	0.3
 }
 
 fn default_sleep_consolidation_enabled() -> bool {
-    true
+	true
 }
 
 fn default_sleep_consolidation_interval_hours() -> u32 {
-    24
+	24
 }
 
 fn default_sleep_consolidation_threshold() -> f32 {
-    0.85
+	0.85
 }
 
 fn default_sleep_consolidation_min_cluster_size() -> usize {
-    3
+	3
 }
 
 fn default_sleep_consolidation_max_age_days() -> u32 {
-    7
+	7
 }
 
 /// Configuration for memory system
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
-    /// Maximum number of memories to keep
-    pub max_memories: Option<usize>,
-    /// Automatic cleanup threshold (days)
-    pub auto_cleanup_days: Option<u32>,
-    /// Minimum importance for automatic cleanup
-    pub cleanup_min_importance: f32,
-    /// Maximum memories returned in search
-    pub max_search_results: usize,
-    /// Default importance for new memories
-    pub default_importance: f32,
-    /// Enable temporal decay system
-    pub decay_enabled: bool,
-    /// Half-life for importance decay in days (time for importance to halve)
-    pub decay_half_life_days: u32,
-    /// Boost factor for access reinforcement (multiplier per access)
-    pub access_boost_factor: f32,
-    /// Minimum importance threshold (floor value after decay)
-    pub min_importance_threshold: f32,
-    /// Enable automatic linking between similar memories
-    pub auto_linking_enabled: bool,
-    /// Similarity threshold for auto-linking (0.75-0.85 recommended)
-    pub auto_link_threshold: f32,
-    /// Maximum auto-links per memory (3-5 recommended)
-    pub max_auto_links_per_memory: usize,
-    /// Create bidirectional links
-    pub bidirectional_links: bool,
-    /// Enable automatic cleanup of memories whose related_files no longer exist
-    #[serde(default = "default_stale_ref_cleanup_enabled")]
-    pub stale_ref_cleanup_enabled: bool,
-    /// Importance penalty multiplier for memories with missing file references (0.0-1.0).
-    /// Applied per missing file: if 2 of 3 files are gone, penalty is applied twice.
-    /// Memories where ALL files are gone are deleted entirely.
-    #[serde(default = "default_stale_ref_importance_penalty")]
-    pub stale_ref_importance_penalty: f32,
+	/// Maximum number of memories to keep
+	pub max_memories: Option<usize>,
+	/// Automatic cleanup threshold (days)
+	pub auto_cleanup_days: Option<u32>,
+	/// Minimum importance for automatic cleanup
+	pub cleanup_min_importance: f32,
+	/// Maximum memories returned in search
+	pub max_search_results: usize,
+	/// Default importance for new memories
+	pub default_importance: f32,
+	/// Enable temporal decay system
+	pub decay_enabled: bool,
+	/// Half-life for importance decay in days (time for importance to halve)
+	pub decay_half_life_days: u32,
+	/// Boost factor for access reinforcement (multiplier per access)
+	pub access_boost_factor: f32,
+	/// Minimum importance threshold (floor value after decay)
+	pub min_importance_threshold: f32,
+	/// Enable automatic linking between similar memories
+	pub auto_linking_enabled: bool,
+	/// Similarity threshold for auto-linking (0.75-0.85 recommended)
+	pub auto_link_threshold: f32,
+	/// Maximum auto-links per memory (3-5 recommended)
+	pub max_auto_links_per_memory: usize,
+	/// Create bidirectional links
+	pub bidirectional_links: bool,
+	/// Enable automatic cleanup of memories whose related_files no longer exist
+	#[serde(default = "default_stale_ref_cleanup_enabled")]
+	pub stale_ref_cleanup_enabled: bool,
+	/// Importance penalty multiplier for memories with missing file references (0.0-1.0).
+	/// Applied per missing file: if 2 of 3 files are gone, penalty is applied twice.
+	/// Memories where ALL files are gone are deleted entirely.
+	#[serde(default = "default_stale_ref_importance_penalty")]
+	pub stale_ref_importance_penalty: f32,
 
-    /// Sleep consolidation: lazy, autonomous batch compression of similar recent
-    /// memories. Runs on MemoryManager init when the marker-file gate says enough
-    /// time has passed — no cron, no scheduler, no manual call required.
-    #[serde(default = "default_sleep_consolidation_enabled")]
-    pub sleep_consolidation_enabled: bool,
-    /// Hours between automatic sleep-consolidation passes. Marker file gates this.
-    #[serde(default = "default_sleep_consolidation_interval_hours")]
-    pub sleep_consolidation_interval_hours: u32,
-    /// Cosine similarity threshold for clustering memories during auto-consolidation.
-    #[serde(default = "default_sleep_consolidation_threshold")]
-    pub sleep_consolidation_threshold: f32,
-    /// Minimum cluster size to consolidate.
-    #[serde(default = "default_sleep_consolidation_min_cluster_size")]
-    pub sleep_consolidation_min_cluster_size: usize,
-    /// Only consider Working-state memories created in the last N days.
-    #[serde(default = "default_sleep_consolidation_max_age_days")]
-    pub sleep_consolidation_max_age_days: u32,
+	/// Sleep consolidation: lazy, autonomous batch compression of similar recent
+	/// memories. Runs on MemoryManager init when the marker-file gate says enough
+	/// time has passed — no cron, no scheduler, no manual call required.
+	#[serde(default = "default_sleep_consolidation_enabled")]
+	pub sleep_consolidation_enabled: bool,
+	/// Hours between automatic sleep-consolidation passes. Marker file gates this.
+	#[serde(default = "default_sleep_consolidation_interval_hours")]
+	pub sleep_consolidation_interval_hours: u32,
+	/// Cosine similarity threshold for clustering memories during auto-consolidation.
+	#[serde(default = "default_sleep_consolidation_threshold")]
+	pub sleep_consolidation_threshold: f32,
+	/// Minimum cluster size to consolidate.
+	#[serde(default = "default_sleep_consolidation_min_cluster_size")]
+	pub sleep_consolidation_min_cluster_size: usize,
+	/// Only consider Working-state memories created in the last N days.
+	#[serde(default = "default_sleep_consolidation_max_age_days")]
+	pub sleep_consolidation_max_age_days: u32,
 }
 
 impl Default for MemoryConfig {
-    fn default() -> Self {
-        Self {
-            max_memories: Some(10000),
-            auto_cleanup_days: Some(365),
-            cleanup_min_importance: 0.1,
-            max_search_results: 50,
-            default_importance: 0.5,
-            decay_enabled: true,
-            decay_half_life_days: 90, // 3 months half-life
-            access_boost_factor: 1.2,
-            min_importance_threshold: 0.05, // 5% minimum
-            auto_linking_enabled: true,
-            auto_link_threshold: 0.78, // High threshold for quality links
-            max_auto_links_per_memory: 5,
-            bidirectional_links: true,
-            stale_ref_cleanup_enabled: true,
-            stale_ref_importance_penalty: 0.3, // Multiply importance by 0.3 per missing file
-            sleep_consolidation_enabled: true,
-            sleep_consolidation_interval_hours: 24,
-            sleep_consolidation_threshold: 0.85,
-            sleep_consolidation_min_cluster_size: 3,
-            sleep_consolidation_max_age_days: 7,
-        }
-    }
+	fn default() -> Self {
+		Self {
+			max_memories: Some(10000),
+			auto_cleanup_days: Some(365),
+			cleanup_min_importance: 0.1,
+			max_search_results: 50,
+			default_importance: 0.5,
+			decay_enabled: true,
+			decay_half_life_days: 90, // 3 months half-life
+			access_boost_factor: 1.2,
+			min_importance_threshold: 0.05, // 5% minimum
+			auto_linking_enabled: true,
+			auto_link_threshold: 0.78, // High threshold for quality links
+			max_auto_links_per_memory: 5,
+			bidirectional_links: true,
+			stale_ref_cleanup_enabled: true,
+			stale_ref_importance_penalty: 0.3, // Multiply importance by 0.3 per missing file
+			sleep_consolidation_enabled: true,
+			sleep_consolidation_interval_hours: 24,
+			sleep_consolidation_threshold: 0.85,
+			sleep_consolidation_min_cluster_size: 3,
+			sleep_consolidation_max_age_days: 7,
+		}
+	}
 }

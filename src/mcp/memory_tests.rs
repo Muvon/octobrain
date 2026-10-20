@@ -15,17 +15,15 @@
 use super::*;
 
 impl MemoryProvider {
-    pub(crate) async fn for_scope_test(
-        db: &std::path::Path,
-        workdir: &std::path::Path,
-        scope: Option<String>,
-        role: Option<String>,
-    ) -> Self {
-        Self {
-            memory_manager: Arc::new(Mutex::new(
-                MemoryManager::for_scope_test(db, scope, role).await,
-            )),
-            working_directory: workdir.to_path_buf(),
-        }
-    }
+	pub(crate) async fn for_scope_test(
+		db: &std::path::Path,
+		workdir: &std::path::Path,
+		scope: Option<String>,
+		role: Option<String>,
+	) -> Self {
+		Self {
+			memory_manager: Arc::new(Mutex::new(MemoryManager::for_scope_test(db, scope, role).await)),
+			working_directory: workdir.to_path_buf(),
+		}
+	}
 }

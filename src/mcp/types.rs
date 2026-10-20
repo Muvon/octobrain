@@ -16,44 +16,44 @@
 /// Carries a human-readable message, the operation name for context, and optional details.
 #[derive(Debug, Clone)]
 pub struct McpError {
-    pub message: String,
-    pub operation: String,
-    pub details: Option<String>,
+	pub message: String,
+	pub operation: String,
+	pub details: Option<String>,
 }
 
 impl McpError {
-    pub fn invalid_params(message: impl Into<String>, operation: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            operation: operation.into(),
-            details: None,
-        }
-    }
+	pub fn invalid_params(message: impl Into<String>, operation: impl Into<String>) -> Self {
+		Self {
+			message: message.into(),
+			operation: operation.into(),
+			details: None,
+		}
+	}
 
-    pub fn internal_error(message: impl Into<String>, operation: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            operation: operation.into(),
-            details: None,
-        }
-    }
+	pub fn internal_error(message: impl Into<String>, operation: impl Into<String>) -> Self {
+		Self {
+			message: message.into(),
+			operation: operation.into(),
+			details: None,
+		}
+	}
 
-    pub fn with_details(mut self, details: impl Into<String>) -> Self {
-        self.details = Some(details.into());
-        self
-    }
+	pub fn with_details(mut self, details: impl Into<String>) -> Self {
+		self.details = Some(details.into());
+		self
+	}
 }
 
 impl From<anyhow::Error> for McpError {
-    fn from(error: anyhow::Error) -> Self {
-        McpError::internal_error(error.to_string(), "unknown_operation")
-    }
+	fn from(error: anyhow::Error) -> Self {
+		McpError::internal_error(error.to_string(), "unknown_operation")
+	}
 }
 
 impl std::fmt::Display for McpError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({})", self.message, self.operation)
-    }
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{} ({})", self.message, self.operation)
+	}
 }
 
 impl std::error::Error for McpError {}

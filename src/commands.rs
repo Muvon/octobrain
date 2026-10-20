@@ -23,861 +23,795 @@ use crate::knowledge::KnowledgeManager;
 use crate::memory::{MemoryManager, MemoryQuery, MemoryType};
 
 pub async fn execute(config: &Config, command: Commands) -> Result<()> {
-    match command {
-        Commands::Memory {
-            scope,
-            role,
-            command,
-        } => {
-            let mut memory_manager = MemoryManager::new(config, scope, role).await?;
-            execute_memory_command(&mut memory_manager, command).await
-        }
-        Commands::Knowledge { command } => {
-            let mut knowledge_manager = KnowledgeManager::new(config).await?;
-            execute_knowledge_command(&mut knowledge_manager, command).await
-        }
-        Commands::Box { command } => {
-            let knowledge_manager = KnowledgeManager::new(config).await?;
-            execute_box_command(&knowledge_manager, command).await
-        }
-        Commands::Mcp { bind } => {
-            // Initialize file-only logging for MCP server (no console output)
-            let working_directory = std::env::current_dir()?;
-            crate::mcp::logging::init_mcp_logging(working_directory.clone(), false)?;
+	match command {
+		Commands::Memory { scope, role, command } => {
+			let mut memory_manager = MemoryManager::new(config, scope, role).await?;
+			execute_memory_command(&mut memory_manager, command).await
+		}
+		Commands::Knowledge { command } => {
+			let mut knowledge_manager = KnowledgeManager::new(config).await?;
+			execute_knowledge_command(&mut knowledge_manager, command).await
+		}
+		Commands::Box { command } => {
+			let knowledge_manager = KnowledgeManager::new(config).await?;
+			execute_box_command(&knowledge_manager, command).await
+		}
+		Commands::Mcp { bind } => {
+			// Initialize file-only logging for MCP server (no console output)
+			let working_directory = std::env::current_dir()?;
+			crate::mcp::logging::init_mcp_logging(working_directory.clone(), false)?;
 
-            // Start MCP server using rmcp SDK
-            let server = crate::mcp::McpServer::new(config.clone(), working_directory);
-            match bind {
-                Some(addr) => server.run_http(&addr).await?,
-                None => server.run_stdio().await?,
-            }
-            Ok(())
-        }
-    }
+			// Start MCP server using rmcp SDK
+			let server = crate::mcp::McpServer::new(config.clone(), working_directory);
+			match bind {
+				Some(addr) => server.run_http(&addr).await?,
+				None => server.run_stdio().await?,
+			}
+			Ok(())
+		}
+	}
 }
 
-async fn execute_memory_command(
-    memory_manager: &mut MemoryManager,
-    command: MemoryCommand,
-) -> Result<()> {
-    match command {
-        MemoryCommand::Memorize {
-            title,
-            content,
-            memory_type,
-            importance,
-            tags,
-            files,
-        } => {
-            // Validate input lengths
-            if title.len() < 5 || title.len() > 200 {
-                return Err(anyhow::anyhow!(
-                    "Title must be between 5 and 200 characters"
-                ));
-            }
-            if content.len() < 10 || content.len() > 10000 {
-                return Err(anyhow::anyhow!(
-                    "Content must be between 10 and 10000 characters"
-                ));
-            }
-
-            let mem_type = MemoryType::from(memory_type);
-            let tags_vec = split_csv_opt(&tags);
-            let files_vec = split_csv_opt(&files);
-
-            let memory = memory_manager
-                .memorize(crate::memory::manager::MemorizeParams {
-                    memory_type: mem_type,
-                    title: title.clone(),
-                    content: content.clone(),
-                    importance,
-                    tags: tags_vec,
-                    related_files: files_vec,
-                    source: None, // defaults to AgentInferred
-                })
-                .await?;
-
-            println!("✅ Memory stored successfully!");
-            println!("Memory ID: {}", memory.id);
-            println!("Type: {}", memory.memory_type);
-            println!("Title: {}", memory.title);
-            if let Some(imp) = importance {
-                println!("Importance: {:.2}", imp);
-            }
-        }
-
-        MemoryCommand::Remember {
-            queries,
-            memory_types,
-            tags,
-            files,
-            limit,
-            min_relevance,
-            format,
-            enable_reranker,
-            disable_reranker,
-            reranker_model,
-        } => {
-            // Apply CLI overrides to reranker config
-            if enable_reranker {
-                memory_manager.enable_reranker(reranker_model.clone());
-            } else if disable_reranker {
-                memory_manager.disable_reranker();
-            }
-            let mem_types = parse_memory_types_opt(&memory_types);
-            let tags_vec = split_csv_opt(&tags);
-            let files_vec = split_csv_opt(&files);
-
-            let memory_query = MemoryQuery {
-                memory_types: mem_types,
-                tags: tags_vec,
-                related_files: files_vec,
-                limit: Some(limit.min(50)),
-                min_relevance,
-                ..Default::default()
-            };
-
-            // Validate queries
-            if queries.is_empty() {
-                println!("❌ No queries provided.");
-                return Ok(());
-            }
-
-            if queries.len() > MAX_QUERIES {
-                println!(
-                    "❌ Too many queries: maximum {} queries allowed, got {}.",
-                    MAX_QUERIES,
-                    queries.len()
-                );
-                return Ok(());
-            }
-
-            // Validate each query
-            for query in &queries {
-                if query.len() < 3 || query.len() > 500 {
-                    println!(
-                        "❌ Each query must be between 3 and 500 characters. Invalid query: '{}'",
-                        query
-                    );
-                    return Ok(());
-                }
-            }
-
-            let results = if queries.len() == 1 {
-                memory_manager
-                    .remember(&queries[0], Some(memory_query))
-                    .await?
-            } else {
-                memory_manager
-                    .remember_multi(&queries, Some(memory_query))
-                    .await?
-            };
-
-            if results.is_empty() {
-                println!("❌ No memories found matching your query.");
-                println!("Try using different search terms or removing filters.");
-                return Ok(());
-            }
-
-            match format.as_str() {
-                "json" => {
-                    let json_results: Vec<Value> = results
-                        .iter()
-                        .map(|r| {
-                            serde_json::json!({
-                                "memory_id": r.memory.id,
-                                "title": r.memory.title,
-                                "memory_type": r.memory.memory_type.to_string(),
-                                "relevance_score": r.relevance_score,
-                                "content": r.memory.content,
-                                "created_at": r.memory.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-                                "tags": r.memory.metadata.tags,
-                                "related_files": r.memory.metadata.related_files,
-                                "importance": r.memory.metadata.importance,
-                                "selection_reason": r.selection_reason
-                            })
-                        })
-                        .collect();
-                    println!("{}", serde_json::to_string_pretty(&json_results)?);
-                }
-                "compact" => {
-                    println!("🧠 Found {} memories:", results.len());
-                    for (i, result) in results.iter().enumerate() {
-                        println!(
-                            "{}. [{}] {} (Score: {:.2}) - {}",
-                            i + 1,
-                            result.memory.memory_type,
-                            result.memory.title,
-                            result.relevance_score,
-                            result.memory.id
-                        );
-                    }
-                }
-                _ => {
-                    // Default text format
-                    println!("🧠 Found {} memories:\n", results.len());
-                    for (i, result) in results.iter().enumerate() {
-                        println!("{}. Memory ID: {}", i + 1, result.memory.id);
-                        println!("   Title: {}", result.memory.title);
-                        println!("   Type: {}", result.memory.memory_type);
-                        println!("   Relevance: {:.2}", result.relevance_score);
-                        println!("   Importance: {:.2}", result.memory.metadata.importance);
-                        println!(
-                            "   Created: {}",
-                            result.memory.created_at.format("%Y-%m-%d %H:%M:%S")
-                        );
-                        if !result.memory.metadata.tags.is_empty() {
-                            println!("   Tags: {}", result.memory.metadata.tags.join(", "));
-                        }
-                        if !result.memory.metadata.related_files.is_empty() {
-                            println!(
-                                "   Files: {}",
-                                result.memory.metadata.related_files.join(", ")
-                            );
-                        }
-                        println!("   Content: {}", result.memory.content);
-                        println!("   Why selected: {}", result.selection_reason);
-                        println!();
-                    }
-                }
-            }
-        }
-
-        MemoryCommand::Forget {
-            memory_id,
-            query,
-            memory_types,
-            tags,
-            yes,
-        } => {
-            if let Some(id) = memory_id {
-                if !yes {
-                    print!("Are you sure you want to delete memory '{}'? (y/N): ", id);
-                    io::stdout().flush()?;
-                    let mut input = String::new();
-                    io::stdin().read_line(&mut input)?;
-                    if !input.trim().to_lowercase().starts_with('y') {
-                        println!("Deletion cancelled.");
-                        return Ok(());
-                    }
-                }
-
-                memory_manager.forget(&id).await?;
-                println!("✅ Memory '{}' deleted successfully.", id);
-            } else if let Some(q) = query {
-                if q.len() < 3 || q.len() > 500 {
-                    return Err(anyhow::anyhow!(
-                        "Query must be between 3 and 500 characters"
-                    ));
-                }
-
-                let mem_types = parse_memory_types_opt(&memory_types);
-                let tags_vec = split_csv_opt(&tags);
-
-                let memory_query = MemoryQuery {
-                    query_text: Some(q.clone()),
-                    memory_types: mem_types,
-                    tags: tags_vec,
-                    ..Default::default()
-                };
-
-                if !yes {
-                    // First show what would be deleted
-                    let preview_results = memory_manager
-                        .remember(&q, Some(memory_query.clone()))
-                        .await?;
-                    if preview_results.is_empty() {
-                        println!("❌ No memories found matching your query.");
-                        return Ok(());
-                    }
-
-                    println!(
-                        "Found {} memories that would be deleted:",
-                        preview_results.len()
-                    );
-                    for result in &preview_results {
-                        println!("- [{}] {}", result.memory.id, result.memory.title);
-                    }
-
-                    print!(
-                        "Are you sure you want to delete these {} memories? (y/N): ",
-                        preview_results.len()
-                    );
-                    io::stdout().flush()?;
-                    let mut input = String::new();
-                    io::stdin().read_line(&mut input)?;
-                    if !input.trim().to_lowercase().starts_with('y') {
-                        println!("Deletion cancelled.");
-                        return Ok(());
-                    }
-                }
-
-                let deleted_count = memory_manager.forget_matching(memory_query).await?;
-                println!("✅ {} memories deleted successfully.", deleted_count);
-            } else {
-                return Err(anyhow::anyhow!(
-                    "Either --memory-id or --query must be provided"
-                ));
-            }
-        }
-
-        MemoryCommand::Update {
-            memory_id,
-            title,
-            content,
-            importance: _,
-            add_tags,
-            remove_tags,
-            add_files,
-            remove_files,
-        } => {
-            // Update basic fields
-            let updated_memory = memory_manager
-                .update_memory(&memory_id, title, content, None)
-                .await?;
-
-            if updated_memory.is_none() {
-                println!("❌ Memory '{}' not found.", memory_id);
-                return Ok(());
-            }
-
-            // Handle tag operations
-            if let Some(tags_to_add) = add_tags {
-                for tag in tags_to_add.split(',') {
-                    memory_manager
-                        .add_tag(&memory_id, tag.trim().to_string())
-                        .await?;
-                }
-            }
-            if let Some(tags_to_remove) = remove_tags {
-                for tag in tags_to_remove.split(',') {
-                    memory_manager.remove_tag(&memory_id, tag.trim()).await?;
-                }
-            }
-
-            // Handle file operations
-            if let Some(files_to_add) = add_files {
-                for file in files_to_add.split(',') {
-                    memory_manager
-                        .add_related_file(&memory_id, file.trim().to_string())
-                        .await?;
-                }
-            }
-            if let Some(files_to_remove) = remove_files {
-                for file in files_to_remove.split(',') {
-                    memory_manager
-                        .remove_related_file(&memory_id, file.trim())
-                        .await?;
-                }
-            }
-
-            println!("✅ Memory '{}' updated successfully.", memory_id);
-        }
-
-        MemoryCommand::Get { memory_id, format } => {
-            if let Some(memory) = memory_manager.get_memory(&memory_id).await? {
-                match format.as_str() {
-                    "json" => {
-                        println!("{}", serde_json::to_string_pretty(&memory)?);
-                    }
-                    "compact" => {
-                        println!("[{}] {} - {}", memory.memory_type, memory.title, memory.id);
-                    }
-                    _ => {
-                        println!("Memory ID: {}", memory.id);
-                        println!("Title: {}", memory.title);
-                        println!("Type: {}", memory.memory_type);
-                        println!("Importance: {:.2}", memory.metadata.importance);
-                        println!("Created: {}", memory.created_at.format("%Y-%m-%d %H:%M:%S"));
-                        println!("Updated: {}", memory.updated_at.format("%Y-%m-%d %H:%M:%S"));
-                        if !memory.metadata.tags.is_empty() {
-                            println!("Tags: {}", memory.metadata.tags.join(", "));
-                        }
-                        if !memory.metadata.related_files.is_empty() {
-                            println!("Files: {}", memory.metadata.related_files.join(", "));
-                        }
-                        if let Some(commit) = &memory.metadata.git_commit {
-                            println!("Git commit: {}", commit);
-                        }
-                        println!("Content:\n{}", memory.content);
-                    }
-                }
-            } else {
-                println!("❌ Memory '{}' not found.", memory_id);
-            }
-        }
-
-        MemoryCommand::Recent {
-            limit,
-            memory_type,
-            format,
-        } => {
-            let memories = if let Some(mem_type) = memory_type {
-                let parsed_type = MemoryType::from(mem_type);
-                memory_manager
-                    .get_memories_by_type(parsed_type, Some(limit))
-                    .await?
-            } else {
-                memory_manager.get_recent_memories(limit).await?
-            };
-
-            if memories.is_empty() {
-                println!("❌ No recent memories found.");
-                return Ok(());
-            }
-
-            format_memories(&memories, &format);
-        }
-
-        MemoryCommand::ByType {
-            memory_type,
-            limit,
-            format,
-        } => {
-            let parsed_type = MemoryType::from(memory_type.clone());
-            let memories = memory_manager
-                .get_memories_by_type(parsed_type, Some(limit))
-                .await?;
-
-            if memories.is_empty() {
-                println!("❌ No memories found for type '{}'.", memory_type);
-                return Ok(());
-            }
-
-            format_memories(&memories, &format);
-        }
-
-        MemoryCommand::ForFiles { files, format } => {
-            let file_paths = split_csv(&files);
-            let results = memory_manager.get_memories_for_files(file_paths).await?;
-
-            if results.is_empty() {
-                println!("❌ No memories found for specified files.");
-                return Ok(());
-            }
-
-            format_search_results(&results, &format);
-        }
-
-        MemoryCommand::ByTags { tags, format } => {
-            let tag_list = split_csv(&tags);
-            let results = memory_manager.get_memories_by_tags(tag_list).await?;
-
-            if results.is_empty() {
-                println!("❌ No memories found for specified tags.");
-                return Ok(());
-            }
-
-            format_search_results(&results, &format);
-        }
-
-        MemoryCommand::CurrentCommit { format } => {
-            let memories = memory_manager.get_memories_for_current_commit().await?;
-
-            if memories.is_empty() {
-                println!("❌ No memories found for current Git commit.");
-                return Ok(());
-            }
-
-            format_memories(&memories, &format);
-        }
-
-        MemoryCommand::Stats => {
-            let stats = memory_manager.get_memory_stats().await?;
-            print!("{}", stats.format());
-        }
-
-        MemoryCommand::Maintenance => {
-            println!("Compacting memory tables (this can take a while on a large database)...");
-            memory_manager.run_maintenance().await?;
-            println!("✅ Maintenance complete.");
-        }
-
-        MemoryCommand::Cleanup { yes } => {
-            if !yes {
-                print!("Are you sure you want to clean up old memories? (y/N): ");
-                io::stdout().flush()?;
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
-                if !input.trim().to_lowercase().starts_with('y') {
-                    println!("Cleanup cancelled.");
-                    return Ok(());
-                }
-            }
-
-            let cleaned_count = memory_manager.cleanup().await?;
-            println!("✅ Cleaned up {} old memories.", cleaned_count);
-        }
-
-        MemoryCommand::ClearAll { yes } => {
-            if !yes {
-                println!(
-                    "⚠️  WARNING: This will delete ALL memories and relationships permanently!"
-                );
-                print!("Are you absolutely sure you want to clear ALL memory data? (y/N): ");
-                io::stdout().flush()?;
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
-                if !input.trim().to_lowercase().starts_with('y') {
-                    println!("Clear all cancelled.");
-                    return Ok(());
-                }
-            }
-
-            let deleted_count = memory_manager.clear_all().await?;
-            println!(
-                "✅ Cleared all memory data. {} records deleted.",
-                deleted_count
-            );
-        }
-
-        MemoryCommand::Relate {
-            source_id,
-            target_id,
-            relationship_type,
-            strength,
-            description,
-        } => {
-            let rel_type = match relationship_type.as_str() {
-                "related_to" => crate::memory::RelationshipType::RelatedTo,
-                "depends_on" => crate::memory::RelationshipType::DependsOn,
-                "supersedes" => crate::memory::RelationshipType::Supersedes,
-                "similar" => crate::memory::RelationshipType::Similar,
-                "conflicts" => crate::memory::RelationshipType::Conflicts,
-                "implements" => crate::memory::RelationshipType::Implements,
-                "extends" => crate::memory::RelationshipType::Extends,
-                _ => crate::memory::RelationshipType::Custom(relationship_type),
-            };
-
-            let relationship = memory_manager
-                .create_relationship(source_id, target_id, rel_type, strength, description)
-                .await?;
-
-            println!("✅ Relationship created successfully!");
-            println!("Relationship ID: {}", relationship.id);
-            println!("Type: {}", relationship.relationship_type);
-            println!("Strength: {:.2}", relationship.strength);
-        }
-
-        MemoryCommand::Relationships { memory_id, format } => {
-            let relationships = memory_manager.get_relationships(&memory_id).await?;
-
-            if relationships.is_empty() {
-                println!("❌ No relationships found for memory '{}'.", memory_id);
-                return Ok(());
-            }
-
-            match format.as_str() {
-                "json" => {
-                    println!("{}", serde_json::to_string_pretty(&relationships)?);
-                }
-                "compact" => {
-                    println!("🔗 {} relationships:", relationships.len());
-                    for rel in relationships {
-                        let other_id = if rel.source_id == memory_id {
-                            &rel.target_id
-                        } else {
-                            &rel.source_id
-                        };
-                        println!(
-                            "- {} {} (strength: {:.2})",
-                            rel.relationship_type, other_id, rel.strength
-                        );
-                    }
-                }
-                _ => {
-                    println!("🔗 {} relationships:\n", relationships.len());
-                    for rel in relationships {
-                        println!("Relationship ID: {}", rel.id);
-                        println!("Type: {}", rel.relationship_type);
-                        println!("Source: {}", rel.source_id);
-                        println!("Target: {}", rel.target_id);
-                        println!("Strength: {:.2}", rel.strength);
-                        println!("Description: {}", rel.description);
-                        println!("Created: {}", rel.created_at.format("%Y-%m-%d %H:%M:%S"));
-                        println!();
-                    }
-                }
-            }
-        }
-
-        MemoryCommand::Related { memory_id, format } => {
-            let related_memories = memory_manager.get_related_memories(&memory_id).await?;
-
-            if related_memories.is_empty() {
-                println!("❌ No related memories found for memory '{}'.", memory_id);
-                return Ok(());
-            }
-
-            format_memories(&related_memories, &format);
-        }
-
-        MemoryCommand::AutoLink { memory_id } => {
-            println!("🔗 Auto-linking memory '{}'...", memory_id);
-            let relationships = memory_manager.auto_link_memory(&memory_id).await?;
-
-            if relationships.is_empty() {
-                println!("❌ No similar memories found to link (threshold not met).");
-            } else {
-                println!("✅ Created {} auto-link(s):", relationships.len());
-                for rel in relationships {
-                    println!(
-                        "  {} -> {} (strength: {:.2})",
-                        rel.source_id, rel.target_id, rel.strength
-                    );
-                }
-            }
-        }
-
-        MemoryCommand::Graph {
-            memory_id,
-            depth,
-            format,
-        } => {
-            println!("🕸️  Building memory graph (depth: {})...", depth);
-            let graph = memory_manager.get_memory_graph(&memory_id, depth).await?;
-
-            if graph.memories.is_empty() {
-                println!("❌ Memory '{}' not found.", memory_id);
-                return Ok(());
-            }
-
-            if format == "json" {
-                println!("{}", serde_json::to_string_pretty(&graph)?);
-            } else {
-                println!("\n📊 Memory Graph:");
-                println!("  Root: {}", graph.root);
-                println!("  Memories: {}", graph.memories.len());
-                println!("  Relationships: {}", graph.relationships.len());
-                println!("\n🧠 Memories in Graph:");
-
-                for (id, memory) in &graph.memories {
-                    println!("\n  [{}]", id);
-                    println!("    Title: {}", memory.title);
-                    println!("    Type: {}", memory.memory_type);
-                    println!(
-                        "    Created: {}",
-                        memory.created_at.format("%Y-%m-%d %H:%M")
-                    );
-                }
-
-                if !graph.relationships.is_empty() {
-                    println!("\n🔗 Relationships:");
-                    for rel in &graph.relationships {
-                        println!(
-                            "  {} -> {} ({}, strength: {:.2})",
-                            rel.source_id, rel.target_id, rel.relationship_type, rel.strength
-                        );
-                    }
-                }
-            }
-        }
-
-        MemoryCommand::Consolidate { goal_id, summary } => {
-            println!("🎯 Consolidating goal '{}'...", goal_id);
-            let consolidated = memory_manager
-                .consolidate_goal(&goal_id, None, summary)
-                .await?;
-            println!(
-                "✅ Consolidated → memory ID: {}\n   Title: {}\n   Importance: {:.3}",
-                consolidated.id, consolidated.title, consolidated.metadata.importance
-            );
-        }
-
-        MemoryCommand::SleepConsolidate {
-            threshold,
-            min_size,
-            max_age_days,
-        } => {
-            println!(
-                "💤 Sleep consolidation: threshold={:.2}, min_size={}, max_age_days={}",
-                threshold, min_size, max_age_days
-            );
-            let consolidated = memory_manager
-                .sleep_consolidate(threshold, min_size, max_age_days)
-                .await?;
-            if consolidated.is_empty() {
-                println!(
-                    "ℹ️  No clusters tight enough at threshold {:.2} — nothing consolidated.",
-                    threshold
-                );
-            } else {
-                println!("✅ Consolidated {} cluster(s):", consolidated.len());
-                for m in &consolidated {
-                    println!(
-                        "  • {} (id={}, importance={:.3})",
-                        m.title, m.id, m.metadata.importance
-                    );
-                }
-            }
-        }
-    }
-
-    Ok(())
+async fn execute_memory_command(memory_manager: &mut MemoryManager, command: MemoryCommand) -> Result<()> {
+	match command {
+		MemoryCommand::Memorize {
+			title,
+			content,
+			memory_type,
+			importance,
+			tags,
+			files,
+		} => {
+			// Validate input lengths
+			if title.len() < 5 || title.len() > 200 {
+				return Err(anyhow::anyhow!("Title must be between 5 and 200 characters"));
+			}
+			if content.len() < 10 || content.len() > 10000 {
+				return Err(anyhow::anyhow!("Content must be between 10 and 10000 characters"));
+			}
+
+			let mem_type = MemoryType::from(memory_type);
+			let tags_vec = split_csv_opt(&tags);
+			let files_vec = split_csv_opt(&files);
+
+			let memory = memory_manager
+				.memorize(crate::memory::manager::MemorizeParams {
+					memory_type: mem_type,
+					title: title.clone(),
+					content: content.clone(),
+					importance,
+					tags: tags_vec,
+					related_files: files_vec,
+					source: None, // defaults to AgentInferred
+				})
+				.await?;
+
+			println!("✅ Memory stored successfully!");
+			println!("Memory ID: {}", memory.id);
+			println!("Type: {}", memory.memory_type);
+			println!("Title: {}", memory.title);
+			if let Some(imp) = importance {
+				println!("Importance: {:.2}", imp);
+			}
+		}
+
+		MemoryCommand::Remember {
+			queries,
+			memory_types,
+			tags,
+			files,
+			limit,
+			min_relevance,
+			format,
+			enable_reranker,
+			disable_reranker,
+			reranker_model,
+		} => {
+			// Apply CLI overrides to reranker config
+			if enable_reranker {
+				memory_manager.enable_reranker(reranker_model.clone());
+			} else if disable_reranker {
+				memory_manager.disable_reranker();
+			}
+			let mem_types = parse_memory_types_opt(&memory_types);
+			let tags_vec = split_csv_opt(&tags);
+			let files_vec = split_csv_opt(&files);
+
+			let memory_query = MemoryQuery {
+				memory_types: mem_types,
+				tags: tags_vec,
+				related_files: files_vec,
+				limit: Some(limit.min(50)),
+				min_relevance,
+				..Default::default()
+			};
+
+			// Validate queries
+			if queries.is_empty() {
+				println!("❌ No queries provided.");
+				return Ok(());
+			}
+
+			if queries.len() > MAX_QUERIES {
+				println!(
+					"❌ Too many queries: maximum {} queries allowed, got {}.",
+					MAX_QUERIES,
+					queries.len()
+				);
+				return Ok(());
+			}
+
+			// Validate each query
+			for query in &queries {
+				if query.len() < 3 || query.len() > 500 {
+					println!(
+						"❌ Each query must be between 3 and 500 characters. Invalid query: '{}'",
+						query
+					);
+					return Ok(());
+				}
+			}
+
+			let results = if queries.len() == 1 {
+				memory_manager.remember(&queries[0], Some(memory_query)).await?
+			} else {
+				memory_manager.remember_multi(&queries, Some(memory_query)).await?
+			};
+
+			if results.is_empty() {
+				println!("❌ No memories found matching your query.");
+				println!("Try using different search terms or removing filters.");
+				return Ok(());
+			}
+
+			match format.as_str() {
+				"json" => {
+					let json_results: Vec<Value> = results
+						.iter()
+						.map(|r| {
+							serde_json::json!({
+								"memory_id": r.memory.id,
+								"title": r.memory.title,
+								"memory_type": r.memory.memory_type.to_string(),
+								"relevance_score": r.relevance_score,
+								"content": r.memory.content,
+								"created_at": r.memory.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+								"tags": r.memory.metadata.tags,
+								"related_files": r.memory.metadata.related_files,
+								"importance": r.memory.metadata.importance,
+								"selection_reason": r.selection_reason
+							})
+						})
+						.collect();
+					println!("{}", serde_json::to_string_pretty(&json_results)?);
+				}
+				"compact" => {
+					println!("🧠 Found {} memories:", results.len());
+					for (i, result) in results.iter().enumerate() {
+						println!(
+							"{}. [{}] {} (Score: {:.2}) - {}",
+							i + 1,
+							result.memory.memory_type,
+							result.memory.title,
+							result.relevance_score,
+							result.memory.id
+						);
+					}
+				}
+				_ => {
+					// Default text format
+					println!("🧠 Found {} memories:\n", results.len());
+					for (i, result) in results.iter().enumerate() {
+						println!("{}. Memory ID: {}", i + 1, result.memory.id);
+						println!("   Title: {}", result.memory.title);
+						println!("   Type: {}", result.memory.memory_type);
+						println!("   Relevance: {:.2}", result.relevance_score);
+						println!("   Importance: {:.2}", result.memory.metadata.importance);
+						println!("   Created: {}", result.memory.created_at.format("%Y-%m-%d %H:%M:%S"));
+						if !result.memory.metadata.tags.is_empty() {
+							println!("   Tags: {}", result.memory.metadata.tags.join(", "));
+						}
+						if !result.memory.metadata.related_files.is_empty() {
+							println!("   Files: {}", result.memory.metadata.related_files.join(", "));
+						}
+						println!("   Content: {}", result.memory.content);
+						println!("   Why selected: {}", result.selection_reason);
+						println!();
+					}
+				}
+			}
+		}
+
+		MemoryCommand::Forget {
+			memory_id,
+			query,
+			memory_types,
+			tags,
+			yes,
+		} => {
+			if let Some(id) = memory_id {
+				if !yes {
+					print!("Are you sure you want to delete memory '{}'? (y/N): ", id);
+					io::stdout().flush()?;
+					let mut input = String::new();
+					io::stdin().read_line(&mut input)?;
+					if !input.trim().to_lowercase().starts_with('y') {
+						println!("Deletion cancelled.");
+						return Ok(());
+					}
+				}
+
+				memory_manager.forget(&id).await?;
+				println!("✅ Memory '{}' deleted successfully.", id);
+			} else if let Some(q) = query {
+				if q.len() < 3 || q.len() > 500 {
+					return Err(anyhow::anyhow!("Query must be between 3 and 500 characters"));
+				}
+
+				let mem_types = parse_memory_types_opt(&memory_types);
+				let tags_vec = split_csv_opt(&tags);
+
+				let memory_query = MemoryQuery {
+					query_text: Some(q.clone()),
+					memory_types: mem_types,
+					tags: tags_vec,
+					..Default::default()
+				};
+
+				if !yes {
+					// First show what would be deleted
+					let preview_results = memory_manager.remember(&q, Some(memory_query.clone())).await?;
+					if preview_results.is_empty() {
+						println!("❌ No memories found matching your query.");
+						return Ok(());
+					}
+
+					println!("Found {} memories that would be deleted:", preview_results.len());
+					for result in &preview_results {
+						println!("- [{}] {}", result.memory.id, result.memory.title);
+					}
+
+					print!(
+						"Are you sure you want to delete these {} memories? (y/N): ",
+						preview_results.len()
+					);
+					io::stdout().flush()?;
+					let mut input = String::new();
+					io::stdin().read_line(&mut input)?;
+					if !input.trim().to_lowercase().starts_with('y') {
+						println!("Deletion cancelled.");
+						return Ok(());
+					}
+				}
+
+				let deleted_count = memory_manager.forget_matching(memory_query).await?;
+				println!("✅ {} memories deleted successfully.", deleted_count);
+			} else {
+				return Err(anyhow::anyhow!("Either --memory-id or --query must be provided"));
+			}
+		}
+
+		MemoryCommand::Update {
+			memory_id,
+			title,
+			content,
+			importance: _,
+			add_tags,
+			remove_tags,
+			add_files,
+			remove_files,
+		} => {
+			// Update basic fields
+			let updated_memory = memory_manager.update_memory(&memory_id, title, content, None).await?;
+
+			if updated_memory.is_none() {
+				println!("❌ Memory '{}' not found.", memory_id);
+				return Ok(());
+			}
+
+			// Handle tag operations
+			if let Some(tags_to_add) = add_tags {
+				for tag in tags_to_add.split(',') {
+					memory_manager.add_tag(&memory_id, tag.trim().to_string()).await?;
+				}
+			}
+			if let Some(tags_to_remove) = remove_tags {
+				for tag in tags_to_remove.split(',') {
+					memory_manager.remove_tag(&memory_id, tag.trim()).await?;
+				}
+			}
+
+			// Handle file operations
+			if let Some(files_to_add) = add_files {
+				for file in files_to_add.split(',') {
+					memory_manager
+						.add_related_file(&memory_id, file.trim().to_string())
+						.await?;
+				}
+			}
+			if let Some(files_to_remove) = remove_files {
+				for file in files_to_remove.split(',') {
+					memory_manager.remove_related_file(&memory_id, file.trim()).await?;
+				}
+			}
+
+			println!("✅ Memory '{}' updated successfully.", memory_id);
+		}
+
+		MemoryCommand::Get { memory_id, format } => {
+			if let Some(memory) = memory_manager.get_memory(&memory_id).await? {
+				match format.as_str() {
+					"json" => {
+						println!("{}", serde_json::to_string_pretty(&memory)?);
+					}
+					"compact" => {
+						println!("[{}] {} - {}", memory.memory_type, memory.title, memory.id);
+					}
+					_ => {
+						println!("Memory ID: {}", memory.id);
+						println!("Title: {}", memory.title);
+						println!("Type: {}", memory.memory_type);
+						println!("Importance: {:.2}", memory.metadata.importance);
+						println!("Created: {}", memory.created_at.format("%Y-%m-%d %H:%M:%S"));
+						println!("Updated: {}", memory.updated_at.format("%Y-%m-%d %H:%M:%S"));
+						if !memory.metadata.tags.is_empty() {
+							println!("Tags: {}", memory.metadata.tags.join(", "));
+						}
+						if !memory.metadata.related_files.is_empty() {
+							println!("Files: {}", memory.metadata.related_files.join(", "));
+						}
+						if let Some(commit) = &memory.metadata.git_commit {
+							println!("Git commit: {}", commit);
+						}
+						println!("Content:\n{}", memory.content);
+					}
+				}
+			} else {
+				println!("❌ Memory '{}' not found.", memory_id);
+			}
+		}
+
+		MemoryCommand::Recent {
+			limit,
+			memory_type,
+			format,
+		} => {
+			let memories = if let Some(mem_type) = memory_type {
+				let parsed_type = MemoryType::from(mem_type);
+				memory_manager.get_memories_by_type(parsed_type, Some(limit)).await?
+			} else {
+				memory_manager.get_recent_memories(limit).await?
+			};
+
+			if memories.is_empty() {
+				println!("❌ No recent memories found.");
+				return Ok(());
+			}
+
+			format_memories(&memories, &format);
+		}
+
+		MemoryCommand::ByType {
+			memory_type,
+			limit,
+			format,
+		} => {
+			let parsed_type = MemoryType::from(memory_type.clone());
+			let memories = memory_manager.get_memories_by_type(parsed_type, Some(limit)).await?;
+
+			if memories.is_empty() {
+				println!("❌ No memories found for type '{}'.", memory_type);
+				return Ok(());
+			}
+
+			format_memories(&memories, &format);
+		}
+
+		MemoryCommand::ForFiles { files, format } => {
+			let file_paths = split_csv(&files);
+			let results = memory_manager.get_memories_for_files(file_paths).await?;
+
+			if results.is_empty() {
+				println!("❌ No memories found for specified files.");
+				return Ok(());
+			}
+
+			format_search_results(&results, &format);
+		}
+
+		MemoryCommand::ByTags { tags, format } => {
+			let tag_list = split_csv(&tags);
+			let results = memory_manager.get_memories_by_tags(tag_list).await?;
+
+			if results.is_empty() {
+				println!("❌ No memories found for specified tags.");
+				return Ok(());
+			}
+
+			format_search_results(&results, &format);
+		}
+
+		MemoryCommand::CurrentCommit { format } => {
+			let memories = memory_manager.get_memories_for_current_commit().await?;
+
+			if memories.is_empty() {
+				println!("❌ No memories found for current Git commit.");
+				return Ok(());
+			}
+
+			format_memories(&memories, &format);
+		}
+
+		MemoryCommand::Stats => {
+			let stats = memory_manager.get_memory_stats().await?;
+			print!("{}", stats.format());
+		}
+
+		MemoryCommand::Maintenance => {
+			println!("Compacting memory tables (this can take a while on a large database)...");
+			memory_manager.run_maintenance().await?;
+			println!("✅ Maintenance complete.");
+		}
+
+		MemoryCommand::Cleanup { yes } => {
+			if !yes {
+				print!("Are you sure you want to clean up old memories? (y/N): ");
+				io::stdout().flush()?;
+				let mut input = String::new();
+				io::stdin().read_line(&mut input)?;
+				if !input.trim().to_lowercase().starts_with('y') {
+					println!("Cleanup cancelled.");
+					return Ok(());
+				}
+			}
+
+			let cleaned_count = memory_manager.cleanup().await?;
+			println!("✅ Cleaned up {} old memories.", cleaned_count);
+		}
+
+		MemoryCommand::ClearAll { yes } => {
+			if !yes {
+				println!("⚠️  WARNING: This will delete ALL memories and relationships permanently!");
+				print!("Are you absolutely sure you want to clear ALL memory data? (y/N): ");
+				io::stdout().flush()?;
+				let mut input = String::new();
+				io::stdin().read_line(&mut input)?;
+				if !input.trim().to_lowercase().starts_with('y') {
+					println!("Clear all cancelled.");
+					return Ok(());
+				}
+			}
+
+			let deleted_count = memory_manager.clear_all().await?;
+			println!("✅ Cleared all memory data. {} records deleted.", deleted_count);
+		}
+
+		MemoryCommand::Relate {
+			source_id,
+			target_id,
+			relationship_type,
+			strength,
+			description,
+		} => {
+			let rel_type = match relationship_type.as_str() {
+				"related_to" => crate::memory::RelationshipType::RelatedTo,
+				"depends_on" => crate::memory::RelationshipType::DependsOn,
+				"supersedes" => crate::memory::RelationshipType::Supersedes,
+				"similar" => crate::memory::RelationshipType::Similar,
+				"conflicts" => crate::memory::RelationshipType::Conflicts,
+				"implements" => crate::memory::RelationshipType::Implements,
+				"extends" => crate::memory::RelationshipType::Extends,
+				_ => crate::memory::RelationshipType::Custom(relationship_type),
+			};
+
+			let relationship = memory_manager
+				.create_relationship(source_id, target_id, rel_type, strength, description)
+				.await?;
+
+			println!("✅ Relationship created successfully!");
+			println!("Relationship ID: {}", relationship.id);
+			println!("Type: {}", relationship.relationship_type);
+			println!("Strength: {:.2}", relationship.strength);
+		}
+
+		MemoryCommand::Relationships { memory_id, format } => {
+			let relationships = memory_manager.get_relationships(&memory_id).await?;
+
+			if relationships.is_empty() {
+				println!("❌ No relationships found for memory '{}'.", memory_id);
+				return Ok(());
+			}
+
+			match format.as_str() {
+				"json" => {
+					println!("{}", serde_json::to_string_pretty(&relationships)?);
+				}
+				"compact" => {
+					println!("🔗 {} relationships:", relationships.len());
+					for rel in relationships {
+						let other_id = if rel.source_id == memory_id {
+							&rel.target_id
+						} else {
+							&rel.source_id
+						};
+						println!(
+							"- {} {} (strength: {:.2})",
+							rel.relationship_type, other_id, rel.strength
+						);
+					}
+				}
+				_ => {
+					println!("🔗 {} relationships:\n", relationships.len());
+					for rel in relationships {
+						println!("Relationship ID: {}", rel.id);
+						println!("Type: {}", rel.relationship_type);
+						println!("Source: {}", rel.source_id);
+						println!("Target: {}", rel.target_id);
+						println!("Strength: {:.2}", rel.strength);
+						println!("Description: {}", rel.description);
+						println!("Created: {}", rel.created_at.format("%Y-%m-%d %H:%M:%S"));
+						println!();
+					}
+				}
+			}
+		}
+
+		MemoryCommand::Related { memory_id, format } => {
+			let related_memories = memory_manager.get_related_memories(&memory_id).await?;
+
+			if related_memories.is_empty() {
+				println!("❌ No related memories found for memory '{}'.", memory_id);
+				return Ok(());
+			}
+
+			format_memories(&related_memories, &format);
+		}
+
+		MemoryCommand::AutoLink { memory_id } => {
+			println!("🔗 Auto-linking memory '{}'...", memory_id);
+			let relationships = memory_manager.auto_link_memory(&memory_id).await?;
+
+			if relationships.is_empty() {
+				println!("❌ No similar memories found to link (threshold not met).");
+			} else {
+				println!("✅ Created {} auto-link(s):", relationships.len());
+				for rel in relationships {
+					println!(
+						"  {} -> {} (strength: {:.2})",
+						rel.source_id, rel.target_id, rel.strength
+					);
+				}
+			}
+		}
+
+		MemoryCommand::Graph {
+			memory_id,
+			depth,
+			format,
+		} => {
+			println!("🕸️  Building memory graph (depth: {})...", depth);
+			let graph = memory_manager.get_memory_graph(&memory_id, depth).await?;
+
+			if graph.memories.is_empty() {
+				println!("❌ Memory '{}' not found.", memory_id);
+				return Ok(());
+			}
+
+			if format == "json" {
+				println!("{}", serde_json::to_string_pretty(&graph)?);
+			} else {
+				println!("\n📊 Memory Graph:");
+				println!("  Root: {}", graph.root);
+				println!("  Memories: {}", graph.memories.len());
+				println!("  Relationships: {}", graph.relationships.len());
+				println!("\n🧠 Memories in Graph:");
+
+				for (id, memory) in &graph.memories {
+					println!("\n  [{}]", id);
+					println!("    Title: {}", memory.title);
+					println!("    Type: {}", memory.memory_type);
+					println!("    Created: {}", memory.created_at.format("%Y-%m-%d %H:%M"));
+				}
+
+				if !graph.relationships.is_empty() {
+					println!("\n🔗 Relationships:");
+					for rel in &graph.relationships {
+						println!(
+							"  {} -> {} ({}, strength: {:.2})",
+							rel.source_id, rel.target_id, rel.relationship_type, rel.strength
+						);
+					}
+				}
+			}
+		}
+
+		MemoryCommand::Consolidate { goal_id, summary } => {
+			println!("🎯 Consolidating goal '{}'...", goal_id);
+			let consolidated = memory_manager.consolidate_goal(&goal_id, None, summary).await?;
+			println!(
+				"✅ Consolidated → memory ID: {}\n   Title: {}\n   Importance: {:.3}",
+				consolidated.id, consolidated.title, consolidated.metadata.importance
+			);
+		}
+
+		MemoryCommand::SleepConsolidate {
+			threshold,
+			min_size,
+			max_age_days,
+		} => {
+			println!(
+				"💤 Sleep consolidation: threshold={:.2}, min_size={}, max_age_days={}",
+				threshold, min_size, max_age_days
+			);
+			let consolidated = memory_manager
+				.sleep_consolidate(threshold, min_size, max_age_days)
+				.await?;
+			if consolidated.is_empty() {
+				println!(
+					"ℹ️  No clusters tight enough at threshold {:.2} — nothing consolidated.",
+					threshold
+				);
+			} else {
+				println!("✅ Consolidated {} cluster(s):", consolidated.len());
+				for m in &consolidated {
+					println!("  • {} (id={}, importance={:.3})", m.title, m.id, m.metadata.importance);
+				}
+			}
+		}
+	}
+
+	Ok(())
 }
 
-async fn execute_knowledge_command(
-    knowledge_manager: &mut KnowledgeManager,
-    command: KnowledgeCommand,
-) -> Result<()> {
-    match command {
-        KnowledgeCommand::Index { source } => {
-            println!("Indexing source...");
-            let result = knowledge_manager.index_source(&source).await?;
+async fn execute_knowledge_command(knowledge_manager: &mut KnowledgeManager, command: KnowledgeCommand) -> Result<()> {
+	match command {
+		KnowledgeCommand::Index { source } => {
+			println!("Indexing source...");
+			let result = knowledge_manager.index_source(&source).await?;
 
-            if result.was_cached && !result.content_changed {
-                println!("✓ Cached: {} (content unchanged)", result.source);
-            } else {
-                println!(
-                    "✓ Indexed: {} ({} chunks created)",
-                    result.source, result.chunks_created
-                );
-            }
-            Ok(())
-        }
-        KnowledgeCommand::Search { query, source } => {
-            // Scope CLI search to the current project (its boxes + org + global + hot).
-            let active = octolib::utils::path_to_scope(&std::env::current_dir()?);
-            let results = knowledge_manager
-                .search(&query, source.as_deref(), None, Some(&active))
-                .await?;
+			if result.was_cached && !result.content_changed {
+				println!("✓ Cached: {} (content unchanged)", result.source);
+			} else {
+				println!(
+					"✓ Indexed: {} ({} chunks created)",
+					result.source, result.chunks_created
+				);
+			}
+			Ok(())
+		}
+		KnowledgeCommand::Search { query, source } => {
+			// Scope CLI search to the current project (its boxes + org + global + hot).
+			let active = octolib::utils::path_to_scope(&std::env::current_dir()?);
+			let results = knowledge_manager
+				.search(&query, source.as_deref(), None, Some(&active))
+				.await?;
 
-            if results.is_empty() {
-                println!("No results found");
-            } else {
-                use crate::knowledge::formatting::format_search_results;
-                println!("{}", format_search_results(&results));
-            }
-            Ok(())
-        }
-        KnowledgeCommand::Store {
-            key,
-            content,
-            session_id,
-        } => {
-            let sid = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            let result = knowledge_manager
-                .store_content(&key, &content, &sid)
-                .await?;
-            println!(
-                "✓ Stored '{}' as {} ({} chunks indexed, session: {})",
-                key, result.source, result.chunks_created, sid
-            );
-            Ok(())
-        }
-        KnowledgeCommand::Delete { source } => {
-            knowledge_manager.delete_source(&source).await?;
-            println!("✓ Deleted {} from knowledge base", source);
-            Ok(())
-        }
-        KnowledgeCommand::DeleteStored { key, session_id } => {
-            let sid = session_id.unwrap_or_else(|| "cli".to_string());
-            knowledge_manager.delete_content(&key, &sid).await?;
-            println!("✓ Deleted stored knowledge '{}'", key);
-            Ok(())
-        }
-        KnowledgeCommand::Stats => {
-            let stats = knowledge_manager.get_stats().await?;
-            use crate::knowledge::formatting::format_stats;
-            println!("{}", format_stats(&stats));
-            Ok(())
-        }
-        KnowledgeCommand::List { limit } => {
-            let sources = knowledge_manager.list_sources(Some(limit)).await?;
-            use crate::knowledge::formatting::format_source_list;
-            println!("{}", format_source_list(&sources));
-            Ok(())
-        }
-        KnowledgeCommand::Read { source } => {
-            let result = knowledge_manager.read(&source).await?;
-            use crate::knowledge::formatting::format_read_result;
-            println!("{}", format_read_result(&result));
-            Ok(())
-        }
-        KnowledgeCommand::Match { pattern, source } => {
-            let active = octolib::utils::path_to_scope(&std::env::current_dir()?);
-            let results = knowledge_manager
-                .match_content(&pattern, source.as_deref(), None, Some(&active))
-                .await?;
-            if results.is_empty() {
-                println!("No matches found");
-            } else {
-                use crate::knowledge::formatting::format_match_results;
-                println!("{}", format_match_results(&results));
-            }
-            Ok(())
-        }
-    }
+			if results.is_empty() {
+				println!("No results found");
+			} else {
+				use crate::knowledge::formatting::format_search_results;
+				println!("{}", format_search_results(&results));
+			}
+			Ok(())
+		}
+		KnowledgeCommand::Store {
+			key,
+			content,
+			session_id,
+		} => {
+			let sid = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+			let result = knowledge_manager.store_content(&key, &content, &sid).await?;
+			println!(
+				"✓ Stored '{}' as {} ({} chunks indexed, session: {})",
+				key, result.source, result.chunks_created, sid
+			);
+			Ok(())
+		}
+		KnowledgeCommand::Delete { source } => {
+			knowledge_manager.delete_source(&source).await?;
+			println!("✓ Deleted {} from knowledge base", source);
+			Ok(())
+		}
+		KnowledgeCommand::DeleteStored { key, session_id } => {
+			let sid = session_id.unwrap_or_else(|| "cli".to_string());
+			knowledge_manager.delete_content(&key, &sid).await?;
+			println!("✓ Deleted stored knowledge '{}'", key);
+			Ok(())
+		}
+		KnowledgeCommand::Stats => {
+			let stats = knowledge_manager.get_stats().await?;
+			use crate::knowledge::formatting::format_stats;
+			println!("{}", format_stats(&stats));
+			Ok(())
+		}
+		KnowledgeCommand::List { limit } => {
+			let sources = knowledge_manager.list_sources(Some(limit)).await?;
+			use crate::knowledge::formatting::format_source_list;
+			println!("{}", format_source_list(&sources));
+			Ok(())
+		}
+		KnowledgeCommand::Read { source } => {
+			let result = knowledge_manager.read(&source).await?;
+			use crate::knowledge::formatting::format_read_result;
+			println!("{}", format_read_result(&result));
+			Ok(())
+		}
+		KnowledgeCommand::Match { pattern, source } => {
+			let active = octolib::utils::path_to_scope(&std::env::current_dir()?);
+			let results = knowledge_manager
+				.match_content(&pattern, source.as_deref(), None, Some(&active))
+				.await?;
+			if results.is_empty() {
+				println!("No matches found");
+			} else {
+				use crate::knowledge::formatting::format_match_results;
+				println!("{}", format_match_results(&results));
+			}
+			Ok(())
+		}
+	}
 }
 
-async fn execute_box_command(
-    knowledge_manager: &KnowledgeManager,
-    command: BoxCommand,
-) -> Result<()> {
-    match command {
-        BoxCommand::Import { url, scope, global } => {
-            println!("Importing box from {}...", url);
-            let count = knowledge_manager
-                .import_box(&url, scope.as_deref(), global)
-                .await?;
-            println!("✓ Imported box ({} files indexed)", count);
-            Ok(())
-        }
-        BoxCommand::Sync => {
-            let cwd = std::env::current_dir()?;
-            let scope = octolib::utils::path_to_scope(&cwd);
-            println!("Syncing boxes...");
-            knowledge_manager.sync_boxes(&[(cwd, scope)]).await?;
-            println!("✓ Boxes synced");
-            Ok(())
-        }
-        BoxCommand::List => {
-            let boxes = knowledge_manager.list_boxes()?;
-            if boxes.is_empty() {
-                println!("No subscribed boxes");
-            } else {
-                for b in boxes {
-                    let scope = if b.scope.is_empty() {
-                        "(global)"
-                    } else {
-                        b.scope.as_str()
-                    };
-                    println!("{}  scope={}  {}", b.box_id, scope, b.url);
-                }
-            }
-            Ok(())
-        }
-        BoxCommand::Remove { box_id } => {
-            knowledge_manager.remove_box(&box_id).await?;
-            println!("✓ Removed box {}", box_id);
-            Ok(())
-        }
-    }
+async fn execute_box_command(knowledge_manager: &KnowledgeManager, command: BoxCommand) -> Result<()> {
+	match command {
+		BoxCommand::Import { url, scope, global } => {
+			println!("Importing box from {}...", url);
+			let count = knowledge_manager.import_box(&url, scope.as_deref(), global).await?;
+			println!("✓ Imported box ({} files indexed)", count);
+			Ok(())
+		}
+		BoxCommand::Sync => {
+			let cwd = std::env::current_dir()?;
+			let scope = octolib::utils::path_to_scope(&cwd);
+			println!("Syncing boxes...");
+			knowledge_manager.sync_boxes(&[(cwd, scope)]).await?;
+			println!("✓ Boxes synced");
+			Ok(())
+		}
+		BoxCommand::List => {
+			let boxes = knowledge_manager.list_boxes()?;
+			if boxes.is_empty() {
+				println!("No subscribed boxes");
+			} else {
+				for b in boxes {
+					let scope = if b.scope.is_empty() {
+						"(global)"
+					} else {
+						b.scope.as_str()
+					};
+					println!("{}  scope={}  {}", b.box_id, scope, b.url);
+				}
+			}
+			Ok(())
+		}
+		BoxCommand::Remove { box_id } => {
+			knowledge_manager.remove_box(&box_id).await?;
+			println!("✓ Removed box {}", box_id);
+			Ok(())
+		}
+	}
 }
 
 fn format_memories(memories: &[crate::memory::Memory], format: &str) {
-    crate::memory::formatting::format_plain_memories_for_cli(memories, format);
+	crate::memory::formatting::format_plain_memories_for_cli(memories, format);
 }
 
 fn format_search_results(results: &[crate::memory::MemorySearchResult], format: &str) {
-    crate::memory::format_memories_for_cli(results, format);
+	crate::memory::format_memories_for_cli(results, format);
 }
 
 /// Split a comma-separated CLI argument into trimmed, owned segments.
 fn split_csv(raw: &str) -> Vec<String> {
-    raw.split(',').map(|s| s.trim().to_string()).collect()
+	raw.split(',').map(|s| s.trim().to_string()).collect()
 }
 
 /// Split an optional comma-separated CLI argument into `Option<Vec<String>>`.
 fn split_csv_opt(raw: &Option<String>) -> Option<Vec<String>> {
-    raw.as_ref().map(|s| split_csv(s))
+	raw.as_ref().map(|s| split_csv(s))
 }
 
 /// Parse an optional comma-separated `memory_types` argument into `Option<Vec<MemoryType>>`.
 fn parse_memory_types_opt(raw: &Option<String>) -> Option<Vec<MemoryType>> {
-    raw.as_ref().map(|s| {
-        s.split(',')
-            .map(|t| MemoryType::from(t.trim().to_string()))
-            .collect()
-    })
+	raw.as_ref()
+		.map(|s| s.split(',').map(|t| MemoryType::from(t.trim().to_string())).collect())
 }
