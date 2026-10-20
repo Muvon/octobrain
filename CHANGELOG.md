@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.14.8] - 2026-10-20
+
+### 🔧 Improvements & Optimizations
+
+- format Rust code at 120 columns `fbd3a56f`
+- **release**: inherit secrets in release workflow `b906f1c3`
+
+### 🔄 Other Changes
+
+2 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.14.7] - 2026-10-11
 
 ### 📋 Release Summary
