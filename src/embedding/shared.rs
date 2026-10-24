@@ -47,9 +47,11 @@ use octolib::embedding::{EmbeddingProvider, EmbeddingUsage};
 use super::create_embedding_provider_from_parts;
 use super::InputType;
 
-/// Deferred construction of the real provider — only the election winner
-/// runs it, so clients never pay the model load.
-type BuildInner = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = Result<Box<dyn EmbeddingProvider>>> + Send>> + Send>;
+/// Constructs the real provider — run only by an election winner, so clients
+/// never pay the model load. Reusable: a process that was a client becomes the
+/// owner (and loads the weights) when it wins a later election.
+type BuildInner =
+	Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<Box<dyn EmbeddingProvider>>> + Send>> + Send + Sync>;
 
 /// Endpoint descriptor written by the owner, read by clients.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -93,13 +95,29 @@ struct Response {
 pub(super) async fn join(model_key: &str, provider: EmbeddingProviderType, model: &str) -> Result<SharedProvider> {
 	let dir = crate::storage::get_system_storage_dir()?.join("run");
 	let model = model.to_string();
-	let build: BuildInner =
-		Box::new(move || Box::pin(async move { create_embedding_provider_from_parts(&provider, &model).await }));
+	let build: BuildInner = Arc::new(move || {
+		let provider = provider.clone();
+		let model = model.clone();
+		Box::pin(async move { create_embedding_provider_from_parts(&provider, &model).await })
+	});
 	join_in(&dir, model_key, build).await
 }
 
 /// Election + attach. `dir` is injectable for tests.
 async fn join_in(dir: &Path, model_key: &str, build: BuildInner) -> Result<SharedProvider> {
+	let (role, revision, dim) = elect(dir, model_key, &build).await?;
+	Ok(SharedProvider {
+		dir: dir.to_path_buf(),
+		model_key: model_key.to_string(),
+		build,
+		revision,
+		dim,
+		role: tokio::sync::RwLock::new(role),
+	})
+}
+
+/// Win the election and serve the weights, or attach to the process that did.
+async fn elect(dir: &Path, model_key: &str, build: &BuildInner) -> Result<(Role, Option<String>, usize)> {
 	const ATTEMPTS: usize = 3;
 	std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
 	let path = endpoint_path(dir, model_key)?;
@@ -140,7 +158,7 @@ async fn join_in(dir: &Path, model_key: &str, build: BuildInner) -> Result<Share
 				let revision = inner.model_revision().await.unwrap_or(None);
 				serve(listener, token, Arc::clone(&inner), revision.clone(), dim);
 				tracing::debug!("embedding service: elected owner for '{model_key}' on port {port}");
-				return Ok(SharedProvider::Owner { inner, revision, dim });
+				return Ok((Role::Owner { inner }, revision, dim));
 			}
 			Ok(false) => {
 				drop(listener);
@@ -155,7 +173,7 @@ async fn join_in(dir: &Path, model_key: &str, build: BuildInner) -> Result<Share
 							"embedding service: using '{model_key}' owned by pid {} (no local weights)",
 							existing.pid
 						);
-						return Ok(SharedProvider::Client { client, hello });
+						return Ok((Role::Client { client }, hello.revision, hello.dim));
 					}
 					Err(e) => {
 						// Owner is gone. Drop its claim only if nobody has
@@ -178,44 +196,109 @@ async fn join_in(dir: &Path, model_key: &str, build: BuildInner) -> Result<Share
 /// The sharing provider: owner of the loaded weights, or a client of the
 /// process that owns them. Implements `EmbeddingProvider` so callers cannot
 /// tell the difference.
-pub(super) enum SharedProvider {
-	Owner {
-		inner: Arc<dyn EmbeddingProvider>,
-		revision: Option<String>,
-		dim: usize,
-	},
-	Client {
-		client: Client,
-		hello: Hello,
-	},
+///
+/// A client outlives its owner: the owner is any octobrain process (a
+/// subagent's, an OOM-killed one), and the provider is cached for this
+/// process's lifetime. So a request the owner no longer answers re-runs the
+/// election and retries once — attaching to the new owner, or loading the
+/// weights here. Before, a dead owner left every client failing
+/// `Connection refused` until it restarted (prod 2026-10-24: 426 knowledge
+/// searches in a day on one machine).
+pub(super) struct SharedProvider {
+	dir: PathBuf,
+	model_key: String,
+	build: BuildInner,
+	/// Fixed by the first election: the same model reports the same facts.
+	revision: Option<String>,
+	dim: usize,
+	role: tokio::sync::RwLock<Role>,
+}
+
+enum Role {
+	Owner { inner: Arc<dyn EmbeddingProvider> },
+	Client { client: Client },
+}
+
+/// Where a request goes: the weights in this process, or the owner's answer.
+enum Reply {
+	Local(Arc<dyn EmbeddingProvider>),
+	Remote(Response),
+}
+
+impl SharedProvider {
+	/// Whether this process holds the weights.
+	#[cfg(test)]
+	pub(super) async fn owns_model(&self) -> bool {
+		matches!(*self.role.read().await, Role::Owner { .. })
+	}
+
+	/// Send `req` to the owner; when the owner is gone, re-elect and send once more.
+	/// Only a transport failure re-elects: an error the service answered with is
+	/// the model's, and travels back in the `Response` untouched.
+	async fn send(&self, req: &Request) -> Result<Reply> {
+		let mut retried = true;
+		loop {
+			let client = match &*self.role.read().await {
+				Role::Owner { inner } => return Ok(Reply::Local(Arc::clone(inner))),
+				Role::Client { client } => client.clone(),
+			};
+			match client.request(req).await {
+				Ok(resp) => return Ok(Reply::Remote(resp)),
+				Err(e) if !retried => {
+					tracing::warn!("embedding service: owner unreachable ({e:#}); re-electing");
+					self.rejoin(&client).await?;
+					retried = true;
+				}
+				Err(e) => return Err(e),
+			}
+		}
+	}
+
+	/// Replace `failed` with whatever the election yields now. Requests that hit
+	/// the same dead owner together re-elect once: the first one through the write
+	/// lock swaps the role, the rest find it already replaced.
+	async fn rejoin(&self, failed: &Client) -> Result<()> {
+		let mut role = self.role.write().await;
+		if !matches!(&*role, Role::Client { client } if client.addr == failed.addr && client.token == failed.token) {
+			return Ok(());
+		}
+		let (next, _revision, dim) = elect(&self.dir, &self.model_key, &self.build).await?;
+		if dim != self.dim {
+			bail!(
+				"embedding service for '{}' now reports dimension {dim}, expected {}",
+				self.model_key,
+				self.dim
+			);
+		}
+		*role = next;
+		Ok(())
+	}
 }
 
 #[async_trait::async_trait]
 impl EmbeddingProvider for SharedProvider {
 	async fn generate_embedding(&self, text: &str) -> Result<(Vec<f32>, EmbeddingUsage)> {
-		match self {
-			SharedProvider::Owner { inner, .. } => inner.generate_embedding(text).await,
-			SharedProvider::Client { client, .. } => {
-				let resp = client.request(&Request::Single { text: text.to_string() }).await?;
-				let vector = resp
-					.vectors
-					.filter(|v| v.len() == 1)
-					.map(|mut v| v.pop().expect("length checked above"))
-					.ok_or_else(|| {
-						anyhow::anyhow!(
-							"embedding service returned no vector: {}",
-							resp.error.unwrap_or_default()
-						)
-					})?;
-				Ok((
-					vector,
-					EmbeddingUsage {
-						input_tokens: resp.input_tokens,
-						cost: None,
-					},
-				))
-			}
-		}
+		let resp = match self.send(&Request::Single { text: text.to_string() }).await? {
+			Reply::Local(inner) => return inner.generate_embedding(text).await,
+			Reply::Remote(resp) => resp,
+		};
+		let vector = resp
+			.vectors
+			.filter(|v| v.len() == 1)
+			.map(|mut v| v.pop().expect("length checked above"))
+			.ok_or_else(|| {
+				anyhow::anyhow!(
+					"embedding service returned no vector: {}",
+					resp.error.unwrap_or_default()
+				)
+			})?;
+		Ok((
+			vector,
+			EmbeddingUsage {
+				input_tokens: resp.input_tokens,
+				cost: None,
+			},
+		))
 	}
 
 	async fn generate_embeddings_batch(
@@ -223,34 +306,33 @@ impl EmbeddingProvider for SharedProvider {
 		texts: Vec<String>,
 		input_type: InputType,
 	) -> Result<(Vec<Vec<f32>>, EmbeddingUsage)> {
-		match self {
-			SharedProvider::Owner { inner, .. } => inner.generate_embeddings_batch(texts, input_type).await,
-			SharedProvider::Client { client, .. } => {
-				let resp = client
-					.request(&Request::Batch {
-						texts,
-						input_type: input_type.as_api_str().unwrap_or("none").to_string(),
-					})
-					.await?;
-				let vectors = resp.vectors.ok_or_else(|| {
-					anyhow::anyhow!("embedding service batch failed: {}", resp.error.unwrap_or_default())
-				})?;
-				Ok((
-					vectors,
-					EmbeddingUsage {
-						input_tokens: resp.input_tokens,
-						cost: None,
-					},
-				))
+		let req = Request::Batch {
+			texts,
+			input_type: input_type.as_api_str().unwrap_or("none").to_string(),
+		};
+		let resp = match self.send(&req).await? {
+			Reply::Local(inner) => {
+				let Request::Batch { texts, .. } = req else {
+					unreachable!("built as a batch above")
+				};
+				return inner.generate_embeddings_batch(texts, input_type).await;
 			}
-		}
+			Reply::Remote(resp) => resp,
+		};
+		let vectors = resp
+			.vectors
+			.ok_or_else(|| anyhow::anyhow!("embedding service batch failed: {}", resp.error.unwrap_or_default()))?;
+		Ok((
+			vectors,
+			EmbeddingUsage {
+				input_tokens: resp.input_tokens,
+				cost: None,
+			},
+		))
 	}
 
 	fn get_dimension(&self) -> usize {
-		match self {
-			SharedProvider::Owner { dim, .. } => *dim,
-			SharedProvider::Client { hello, .. } => hello.dim,
-		}
+		self.dim
 	}
 
 	fn is_model_supported(&self) -> bool {
@@ -258,10 +340,7 @@ impl EmbeddingProvider for SharedProvider {
 	}
 
 	async fn model_revision(&self) -> Result<Option<String>> {
-		match self {
-			SharedProvider::Owner { revision, .. } => Ok(revision.clone()),
-			SharedProvider::Client { hello, .. } => Ok(hello.revision.clone()),
-		}
+		Ok(self.revision.clone())
 	}
 }
 
