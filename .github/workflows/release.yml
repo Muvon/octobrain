@@ -234,6 +234,11 @@ jobs:
         else
           # macOS aarch64: pyke ships prebuilts. Build with default features
           # (fastembed + huggingface) natively.
+          # Pyke's ort-sys 2.0.0-rc.15 prebuilt calls ___isPlatformVersionAtLeast
+          # (CoreML @available checks). It lives only in clang's compiler-rt
+          # archive, which rustc does not link on macOS, so pass it explicitly.
+          # RUSTFLAGS replaces .cargo/config.toml target flags, so re-apply +fp16.
+          export RUSTFLAGS="-C target-feature=+fp16 -C link-arg=$(xcrun clang --print-resource-dir)/lib/darwin/libclang_rt.osx.a"
           cargo build --release --target ${{ matrix.target }}
         fi
 
