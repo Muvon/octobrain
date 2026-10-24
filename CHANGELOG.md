@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.14.9] - 2026-10-24
+
+### 📋 Release Summary
+
+Embedding requests now retry after an initial transport failure and recover when embedding owners are unavailable.
+
+### 🐛 Bug Fixes & Stability
+
+- **embedding**: retry after initial transport failure `3b014469`
+- **embedding**: recover from unavailable embedding owners `be4007d0`
+
+### 🔄 Other Changes
+
+1 maintenance, dependency, and tooling update not listed individually.
+
 ## [0.14.8] - 2026-10-20
 
 ### 🔧 Improvements & Optimizations
