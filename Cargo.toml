@@ -105,7 +105,7 @@ alloc-stdlib = "=0.2.2"
 brotli-decompressor = "=5.0.1"
 
 # Local dep for testing
-octolib = { version = "0.43.2", default-features = false, features = ["embeddings", "reranker"] }
+octolib = { version = "0.45.1", default-features = false, features = ["embeddings", "reranker"] }
 # octolib = { path = "../octolib", default-features = false, features = ["embeddings", "reranker"] }
 
 # Replace esaxx-rs 0.1.10 (transitive: tokenizers/esaxx_fast → esaxx-rs/cpp).
