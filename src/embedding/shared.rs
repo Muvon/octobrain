@@ -236,7 +236,7 @@ impl SharedProvider {
 	/// Only a transport failure re-elects: an error the service answered with is
 	/// the model's, and travels back in the `Response` untouched.
 	async fn send(&self, req: &Request) -> Result<Reply> {
-		let mut retried = true;
+		let mut retried = false;
 		loop {
 			let client = match &*self.role.read().await {
 				Role::Owner { inner } => return Ok(Reply::Local(Arc::clone(inner))),
