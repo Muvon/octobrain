@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.14.10] - 2026-10-25
+
+### 🔧 Improvements & Optimizations
+
+- **dependencies**: update locked dependency versions `e288aaec`
+- **mcp**: upgrade rmcp to 3.7.0 `f56a83af`
+- **dependencies**: update octolib to 0.45.3 `cc0819db`
+
+### 🔄 Other Changes
+
+1 maintenance, dependency, and tooling update not listed individually.
+
 ## [0.14.9] - 2026-10-24
 
 ### 📋 Release Summary
