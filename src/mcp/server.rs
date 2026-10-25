@@ -551,7 +551,7 @@ impl McpServer {
 		Ok(())
 	}
 
-	/// Run server using HTTP transport (streamable HTTP for MCP 2025-03-26)
+	/// Run server using streamable HTTP transport (advertises MCP 2026-07-28; rmcp's legacy `initialize` serves older clients)
 	pub async fn run_http(self, bind_addr: &str) -> Result<()> {
 		use axum::Router;
 		use tower_http::cors::{Any, CorsLayer};
