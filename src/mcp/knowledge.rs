@@ -241,12 +241,37 @@ impl KnowledgeProvider {
 	}
 
 	/// Discover/refresh knowledge boxes (project `.box/`, org auto-probe, subscribed
-	/// remotes). Intended to be driven from a background task on the MCP server.
-	pub async fn sync_boxes(&self, projects: &[(std::path::PathBuf, String)]) -> Result<(), McpError> {
+	/// remotes). Returns the count of files (re)indexed.
+	pub async fn sync_boxes(&self, projects: &[(std::path::PathBuf, String)]) -> Result<usize, McpError> {
 		let manager = self.knowledge_manager.lock().await;
 		manager
 			.sync_boxes(projects)
 			.await
 			.map_err(|e| McpError::internal_error(format!("Box sync failed: {}", e), "knowledge"))
+	}
+
+	/// Execute sync command — re-index the session repos' `.box/` dirs and subscribed
+	/// boxes, so files the agent just wrote are searchable in the same session.
+	pub async fn execute_sync(&self, projects: &[(std::path::PathBuf, String)]) -> Result<String, McpError> {
+		let reindexed = self.sync_boxes(projects).await?;
+		if projects.is_empty() {
+			return Ok(format!(
+				"Synced subscribed boxes: {} file(s) re-indexed. No Git repository in this session's workdir, so there is no project .box/.",
+				reindexed
+			));
+		}
+		let box_dirs: Vec<String> = projects
+			.iter()
+			.map(|(repo, _)| {
+				repo.join(crate::knowledge::boxes::PROJECT_BOX_DIR)
+					.display()
+					.to_string()
+			})
+			.collect();
+		Ok(format!(
+			"Synced knowledge boxes: {} file(s) re-indexed (unchanged files skipped, removed files pruned).\nProject box dirs (create one to add docs): {}",
+			reindexed,
+			box_dirs.join(", ")
+		))
 	}
 }

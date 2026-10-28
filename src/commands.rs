@@ -764,8 +764,8 @@ async fn execute_box_command(knowledge_manager: &KnowledgeManager, command: BoxC
 			let cwd = std::env::current_dir()?;
 			let scope = octolib::utils::path_to_scope(&cwd);
 			println!("Syncing boxes...");
-			knowledge_manager.sync_boxes(&[(cwd, scope)]).await?;
-			println!("✓ Boxes synced");
+			let count = knowledge_manager.sync_boxes(&[(cwd, scope)]).await?;
+			println!("✓ Boxes synced ({} files indexed)", count);
 			Ok(())
 		}
 		BoxCommand::List => {

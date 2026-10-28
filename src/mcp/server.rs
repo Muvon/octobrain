@@ -29,7 +29,7 @@ use rmcp::{
 	ErrorData as McpError, RoleServer, ServiceExt,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
@@ -248,13 +248,21 @@ fn discover_projects(root: &std::path::Path) -> Vec<(std::path::PathBuf, String)
 	found
 }
 
+/// `discover_projects` off the async runtime — it walks the directory synchronously.
+async fn discover_session_projects(workdir: std::path::PathBuf) -> Result<Vec<(std::path::PathBuf, String)>, McpError> {
+	tokio::task::spawn_blocking(move || discover_projects(&workdir))
+		.await
+		.map_err(|e| McpError::internal_error(format!("Failed to discover projects: {}", e), None))
+}
+
 /// Build the instructions string, optionally including available scope hints.
 fn build_instructions(scopes: &[String]) -> String {
-	let base = "This server provides memory tools for storing and retrieving AI context. \
-                Use 'memorize' to store information (supports 'related_to' for inline relationships), \
-                'remember' for semantic search, 'forget' to delete memories, \
-                and 'knowledge' to search/index/read/match indexed content. \
-                The 'knowledge' tool's 'source' parameter is always a SINGLE FILE or URL — never a directory.";
+	let base = "Octobrain gives you durable memory and a searchable knowledge base. Choose where to keep something by what it is:\n\
+		- 'memorize': one fact, decision, preference or lesson to recall in later sessions (short and atomic; link it via 'related_to'). 'remember' searches memories, 'forget' deletes them.\n\
+		- Knowledge box: durable reference documents (rules, guides, decisions, specs) as Markdown files under '<repo>/.box/', versioned and shared with the repo. Write them with your file tools, then run knowledge 'sync'; knowledge 'search' and 'match' cover them.\n\
+		- knowledge 'store': scratch text for this session only — never durable.\n\
+		- knowledge 'search' with 'source': one external URL or local file, indexed on demand ('read' returns its full text instead).\n\
+		The 'knowledge' tool's 'source' parameter is always a SINGLE FILE or URL — never a directory.";
 
 	if scopes.is_empty() {
 		return base.to_string();
@@ -285,6 +293,8 @@ pub struct SessionState {
 	/// Unlocked session: the repos discovered under its workdir, the other scopes a
 	/// call may name.
 	pub scope_choices: Vec<String>,
+	/// Directory whose repos this session works in — where its project `.box/` dirs live.
+	pub workdir: std::path::PathBuf,
 }
 
 impl Default for SessionState {
@@ -297,6 +307,7 @@ impl Default for SessionState {
 			scope_locked: false,
 			default_scope: None,
 			scope_choices: Vec::new(),
+			workdir: std::path::PathBuf::new(),
 		}
 	}
 }
@@ -386,7 +397,11 @@ pub struct McpServer {
 	session: SessionState,
 	instructions: String,
 	workdir_scopes: Arc<Mutex<HashMap<std::path::PathBuf, WorkdirScope>>>,
-	box_sync_started: Arc<AtomicBool>,
+	/// Workdirs whose boxes this server instance has synced — one background sync each, so
+	/// every session workdir's repos get their `.box/` indexed, not just the server cwd.
+	box_synced_workdirs: Arc<Mutex<HashSet<std::path::PathBuf>>>,
+	/// Tests turn it off: a background sync would load a real embedding model.
+	box_sync_enabled: Arc<AtomicBool>,
 }
 
 impl McpServer {
@@ -400,15 +415,20 @@ impl McpServer {
 			},
 		)]);
 		let instructions = build_instructions(&scopes);
+		let session = SessionState {
+			workdir: working_directory.clone(),
+			..Default::default()
+		};
 		Self {
 			config,
 			working_directory,
 			memory: Arc::new(Mutex::new(HashMap::new())),
 			knowledge: Arc::new(Mutex::new(None)),
-			session: SessionState::default(),
+			session,
 			instructions,
 			workdir_scopes: Arc::new(Mutex::new(workdir_scopes)),
-			box_sync_started: Arc::new(AtomicBool::new(false)),
+			box_synced_workdirs: Arc::new(Mutex::new(HashSet::new())),
+			box_sync_enabled: Arc::new(AtomicBool::new(true)),
 		}
 	}
 
@@ -429,6 +449,7 @@ impl McpServer {
 						.filter(|path| !path.trim().is_empty())
 						.map(std::path::PathBuf::from)
 						.unwrap_or_else(|| self.working_directory.clone());
+					session.workdir = workdir.clone();
 					let workdir_scope = {
 						let mut cache = self.workdir_scopes.lock().await;
 						if let Some(workdir_scope) = cache.get(&workdir) {
@@ -460,18 +481,21 @@ impl McpServer {
 			}
 		}
 
-		if !self.box_sync_started.swap(true, Ordering::SeqCst) {
+		if self.box_sync_enabled.load(Ordering::SeqCst)
+			&& self.box_synced_workdirs.lock().await.insert(session.workdir.clone())
+		{
 			let server = self.clone();
+			let workdir = session.workdir.clone();
 			tokio::spawn(async move {
-				server.run_box_sync_background().await;
+				server.run_box_sync_background(workdir).await;
 			});
 		}
 		Ok(session)
 	}
 
-	/// Background, non-blocking box discovery + sync. Logs and swallows errors so a
-	/// missing embedding provider or offline remote never disrupts the session.
-	async fn run_box_sync_background(&self) {
+	/// Background, non-blocking box discovery + sync for one workdir. Logs and swallows
+	/// errors so a missing embedding provider or offline remote never disrupts the session.
+	async fn run_box_sync_background(&self, workdir: std::path::PathBuf) {
 		let provider = match self.get_or_init_knowledge().await {
 			Ok(p) => p,
 			Err(e) => {
@@ -479,7 +503,13 @@ impl McpServer {
 				return;
 			}
 		};
-		let projects = discover_projects(&self.working_directory);
+		let projects = match discover_session_projects(workdir).await {
+			Ok(projects) => projects,
+			Err(e) => {
+				debug!("Box sync skipped (project discovery failed): {:?}", e);
+				return;
+			}
+		};
 		if let Err(e) = provider.sync_boxes(&projects).await {
 			debug!("Box sync failed: {:?}", e);
 		}
@@ -814,7 +844,8 @@ pub struct ForgetParams {
 /// knowledge), store (store raw text content under a unique key,
 /// session-scoped), delete (delete stored content by key), read (read full
 /// content of a URL or local file — fallback when search is insufficient),
-/// match (search indexed content by regex pattern, like grep).
+/// match (search indexed content by regex pattern, like grep), sync (re-index
+/// knowledge boxes after files under <repo>/.box/ change).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeAction {
@@ -823,19 +854,20 @@ pub enum KnowledgeAction {
 	Delete,
 	Read,
 	Match,
+	Sync,
 }
 
 /// Knowledge tool parameters
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct KnowledgeParams {
-	/// Command to execute: search, store, delete, read, match
+	/// Command to execute: search, store, delete, read, match, sync
 	pub command: KnowledgeAction,
 	/// [search] What to search for, in natural language (required for search)
 	#[schemars(length(min = 3, max = 500))]
 	pub query: Option<String>,
-	/// [search] Source filter — a SINGLE URL or local FILE path to auto-index and search within. MUST point to one specific file (e.g. /path/to/notes.md, https://example.com/page) — directories are NOT supported and will be rejected. Supports http/https URLs, file:///path, or /absolute/path. File types: .html, .txt, .md, .pdf, .docx. Omit to search across ALL previously indexed sources.
-	/// [read] A SINGLE URL or local FILE path to read full content from. MUST point to one specific file — directories are NOT supported. Supports http/https URLs, file:///path, or /absolute/path. File types: .html, .txt, .md, .pdf, .docx.
-	/// [match] Source filter — a SINGLE URL or local FILE path. MUST point to one specific file — directories are NOT supported. Omit to match across ALL indexed sources.
+	/// [search] Source filter — a SINGLE URL or local FILE path to auto-index and search within, or a box:// source from earlier results to search one box file. MUST point to one specific file (e.g. /path/to/notes.md, https://example.com/page) — directories are NOT supported and will be rejected. Supports http/https URLs, file:///path, or /absolute/path. File types: .html, .txt, .md, .pdf, .docx. Never pass a file under .box/ as a path (it indexes a duplicate). Omit to search across ALL indexed sources, knowledge boxes included.
+	/// [read] A SINGLE URL or local FILE path to read full content from. MUST point to one specific file — directories are NOT supported. Supports http/https URLs, file:///path, or /absolute/path. File types: .html, .txt, .md, .pdf, .docx. (box:// is not accepted; read the file under .box/ itself)
+	/// [match] Source filter — a SINGLE URL, local FILE path or box:// source. MUST point to one specific file — directories are NOT supported. Omit to match across ALL indexed sources, knowledge boxes included.
 	pub source: Option<String>,
 	/// [store/delete] Unique identifier key for the content. Error if key already exists on store — delete first to replace.
 	pub key: Option<String>,
@@ -854,7 +886,7 @@ pub struct KnowledgeParams {
 impl McpServer {
 	#[tool(
 		name = "memorize",
-		description = "Store information, insights, or context in memory. Call remember first to avoid duplicates. Set source='user_confirmed' for user-stated facts (importance 0.8-1.0), 'agent_inferred' for AI conclusions (0.3-0.6). Skip transient state or things easily re-derived.\n\nUse related_to[] to link the new memory to existing ones in the same call. Relationship types: related_to, depends_on, supersedes, similar, conflicts, implements, extends, achieves, closes.\n\nKnowledge updates: when a new fact replaces or corrects an existing memory (a value changed, a decision was reversed), memorize the new fact with related_to=[{target_id: <old_id>, relationship_type: 'supersedes'}]. Retrieval then ranks the current fact above the outdated one, which stays queryable for history. remember first to find the old_id.\n\nGoal workflow:\n1. memorize a 'goal' type memory for the task — captures intent\n2. For each contributing memory: memorize with related_to=[{target_id: goal_id, relationship_type: 'achieves'}]\n3. When the task closes: memorize the completion / lesson-learned note with related_to=[{target_id: goal_id, relationship_type: 'closes'}] (goal_id must be a 'goal' memory with at least one Working achieves source). This triggers automatic consolidation — your closing memo becomes the consolidated parent, all Achieves sources transition to Consolidated state with dampened importance (still queryable for audit). Importance of the closing memo is bumped to max(sources) * 1.1. No separate consolidate call needed.\n\nglobal=true (only available when session scope is locked): stores the memory in the shared global scope instead of the locked project scope. Use this for cross-project facts — user preferences, personal habits, universal conventions, tool choices — things that apply regardless of which project is active. Do NOT use global for project-specific knowledge.",
+		description = "Store information, insights, or context in memory. Call remember first to avoid duplicates. Set source='user_confirmed' for user-stated facts (importance 0.8-1.0), 'agent_inferred' for AI conclusions (0.3-0.6). Skip transient state or things easily re-derived. For a longer reference document, write a knowledge box file instead (see the knowledge tool).\n\nUse related_to[] to link the new memory to existing ones in the same call. Relationship types: related_to, depends_on, supersedes, similar, conflicts, implements, extends, achieves, closes.\n\nKnowledge updates: when a new fact replaces or corrects an existing memory (a value changed, a decision was reversed), memorize the new fact with related_to=[{target_id: <old_id>, relationship_type: 'supersedes'}]. Retrieval then ranks the current fact above the outdated one, which stays queryable for history. remember first to find the old_id.\n\nGoal workflow:\n1. memorize a 'goal' type memory for the task — captures intent\n2. For each contributing memory: memorize with related_to=[{target_id: goal_id, relationship_type: 'achieves'}]\n3. When the task closes: memorize the completion / lesson-learned note with related_to=[{target_id: goal_id, relationship_type: 'closes'}] (goal_id must be a 'goal' memory with at least one Working achieves source). This triggers automatic consolidation — your closing memo becomes the consolidated parent, all Achieves sources transition to Consolidated state with dampened importance (still queryable for audit). Importance of the closing memo is bumped to max(sources) * 1.1. No separate consolidate call needed.\n\nglobal=true (only available when session scope is locked): stores the memory in the shared global scope instead of the locked project scope. Use this for cross-project facts — user preferences, personal habits, universal conventions, tool choices — things that apply regardless of which project is active. Do NOT use global for project-specific knowledge.",
 		annotations(
 			title = "Memorize",
 			read_only_hint = false,
@@ -926,7 +958,7 @@ impl McpServer {
 
 	#[tool(
         name = "knowledge",
-        description = "Knowledge base with five commands. The 'source' parameter (when used) ALWAYS refers to a SINGLE FILE or URL — never a directory; passing a directory path is an error. URLs are fetched anonymously — public documentation and information pages only, never API endpoints that need credentials (GitHub Actions logs, private repos, etc. return 403; use the platform's own CLI for those). 'search': semantic search across indexed content — provide source (single URL or file) to auto-index on-the-fly, omit to search all indexed sources. 'store': save raw text under a unique key (session-scoped, auto-cleaned) — error if key exists, delete first to replace. 'delete': remove stored content by key. 'read': fetch and return the FULL text content of a single URL or file — use ONLY as a last resort when search results are insufficient; prefer 'search' for targeted retrieval. 'match': search indexed content by regex pattern (like grep) — returns matching lines only; prefer 'search' for semantic queries, use 'match' for exact string/regex patterns. Supported file types: .html, .txt, .md, .pdf, .docx.",
+        description = "Knowledge base with six commands. The 'source' parameter (when used) ALWAYS refers to a SINGLE FILE or URL — never a directory; passing a directory path is an error. URLs are fetched anonymously — public documentation and information pages only, never API endpoints that need credentials (GitHub Actions logs, private repos, etc. return 403; use the platform's own CLI for those). 'search': semantic search across indexed content — provide source (single URL or file) to auto-index on-the-fly, omit to search all indexed sources, knowledge boxes included. 'store': save raw text under a unique key (session-scoped scratch, auto-cleaned, never durable) — error if key exists, delete first to replace. 'delete': remove stored content by key. 'read': fetch and return the FULL text content of a single URL or file — use ONLY as a last resort when search results are insufficient; prefer 'search' for targeted retrieval. 'match': search indexed content by regex pattern (like grep) — returns matching lines only; prefer 'search' for semantic queries, use 'match' for exact string/regex patterns. 'sync': re-index knowledge boxes — run it after you create, edit or delete files under '<repo>/.box/'. Supported file types: .html, .txt, .md, .pdf, .docx.\n\nKnowledge boxes are the durable, shared knowledge base: files under '<repo>/.box/' (one topic per Markdown file, grouped in folders such as rules/, guides/, decisions/; the root README.md is not indexed), plus boxes subscribed with the octobrain CLI. Box results show source 'box://<box_id>/<path>'; for this project's box the file is '<repo>/.box/<path>' — edit it with your file tools, then 'sync'. A box:// source in search or match narrows to that one file; never pass a .box/ file path as source (it indexes a duplicate). One fact or decision belongs in memorize, not a box file.",
         // Mixed commands: `delete` mutates stored content and URL fetch
         // reaches the open world — spec defaults kept deliberately.
         annotations(title = "Knowledge", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
@@ -968,6 +1000,10 @@ impl McpServer {
 						active_scope.as_deref(),
 					)
 					.await
+			}
+			KnowledgeAction::Sync => {
+				let projects = discover_session_projects(session.workdir.clone()).await?;
+				provider.execute_sync(&projects).await
 			}
 		}
 		.map_err(to_rmcp_error)

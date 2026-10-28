@@ -556,17 +556,20 @@ impl KnowledgeManager {
 	/// Bootstrap/refresh sync: index project `.box/` for the given repos, auto-probe
 	/// each org for a conventional box, then pull + smart-reindex every subscribed
 	/// remote box. Failures are logged and skipped, never fatal. `projects` is a list
-	/// of (repo_path, scope) pairs discovered by the caller.
-	pub async fn sync_boxes(&self, projects: &[(PathBuf, String)]) -> Result<()> {
+	/// of (repo_path, scope) pairs discovered by the caller. Returns the count of files
+	/// (re)indexed across all boxes; unchanged files are skipped.
+	pub async fn sync_boxes(&self, projects: &[(PathBuf, String)]) -> Result<usize> {
 		use crate::knowledge::boxes;
 		let boxes_dir = crate::storage::get_boxes_dir()?;
+		let mut reindexed = 0usize;
 
 		// 1. Project-local .box/ — box_id is the project scope itself.
 		for (repo_path, scope) in projects {
 			let box_dir = repo_path.join(boxes::PROJECT_BOX_DIR);
 			if box_dir.is_dir() {
-				if let Err(e) = self.index_box_dir(&box_dir, scope, scope).await {
-					tracing::warn!("Project box index failed ({}): {}", box_dir.display(), e);
+				match self.index_box_dir(&box_dir, scope, scope).await {
+					Ok(count) => reindexed += count,
+					Err(e) => tracing::warn!("Project box index failed ({}): {}", box_dir.display(), e),
 				}
 			}
 		}
@@ -618,7 +621,8 @@ impl KnowledgeManager {
 				continue; // unreachable/offline — keep whatever is already indexed
 			}
 			match self.index_box_dir(&dest, &b.box_id, &b.scope).await {
-				Ok(_) => {
+				Ok(count) => {
+					reindexed += count;
 					let last_commit = boxes::head_commit(&dest).await.unwrap_or_default();
 					if let Some(entry) = registry.boxes.iter_mut().find(|e| e.box_id == b.box_id) {
 						entry.last_commit = last_commit;
@@ -633,7 +637,7 @@ impl KnowledgeManager {
 		if dirty {
 			registry.save()?;
 		}
-		Ok(())
+		Ok(reindexed)
 	}
 
 	/// Index a box directory: smart-reindex changed files (by content_hash), prune

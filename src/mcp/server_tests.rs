@@ -27,7 +27,7 @@ fn serve_in_memory(
 	rmcp::service::RunningService<RoleServer, McpServer>,
 	tokio::io::DuplexStream,
 ) {
-	server.box_sync_started.store(true, Ordering::SeqCst);
+	server.box_sync_enabled.store(false, Ordering::SeqCst);
 	let (transport, client_transport) = tokio::io::duplex(4096);
 	(
 		rmcp::service::serve_directly(server.clone(), transport, client),

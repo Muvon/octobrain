@@ -256,6 +256,7 @@ octobrain box import https://github.com/org/docs-repo.git
 octobrain box import https://github.com/org/docs-repo.git --global
 
 # Pull and re-index all subscribed boxes + local .box/ directories
+# (the MCP server syncs each session's repos on first contact; agents run `knowledge` `sync` after editing .box/)
 octobrain box sync
 
 # List subscribed boxes
@@ -284,7 +285,7 @@ octobrain mcp --bind 0.0.0.0:12345
 | `memorize` | Store memories with metadata; optional `related_to` for inline relationships |
 | `remember` | Semantic search with filters; returns 1-hop graph neighbors |
 | `forget` | Delete memories (requires confirmation) |
-| `knowledge` | Unified tool: `search`, `store`, `delete`, `read`, `match` via `command` field |
+| `knowledge` | Unified tool: `search`, `store`, `delete`, `read`, `match`, `sync` via `command` field; `sync` re-indexes knowledge boxes after `.box/` edits |
 See [MCP Integration](#mcp-integration) for Claude Desktop setup.
 
 ## Features
