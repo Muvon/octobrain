@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.15.0] - 2026-10-28
+
+### 📋 Release Summary
+
+MCP knowledge box synchronization is now supported, with goal and closes relationships for memories. Memory rewrites handle missing role columns, visibility is respected across scopes, and MCP memory scope behavior is clarified.
+
+### ✨ New Features & Enhancements
+
+- **mcp**: support MCP knowledge box synchronization `b4d2f8da`
+- **mcp**: add goal and closes memory relationships `dd50b92b`
+
+### 🔧 Improvements & Optimizations
+
+- **dependencies**: update octolib and locked dependencies `8cef7b78`
+
+### 🐛 Bug Fixes & Stability
+
+- **memory**: handle missing role columns in rewrites `2b007f0e`
+- **memory**: respect memory visibility across scopes `4a76b66a`
+- **mcp**: clarify memory scope behavior `8e1a3f35`
+
 ## [0.14.10] - 2026-10-25
 
 ### 🔧 Improvements & Optimizations
