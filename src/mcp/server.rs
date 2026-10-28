@@ -253,7 +253,7 @@ fn build_instructions(scopes: &[String]) -> String {
 		return base.to_string();
 	}
 
-	let mut hint = String::from("\n\nAvailable project scopes (pass as the 'scope' parameter):");
+	let mut hint = String::from("\n\nAvailable project scopes (the optional 'scope' parameter takes one of these):");
 	for scope in scopes {
 		hint.push_str(&format!("\n  {}", scope));
 	}
@@ -737,7 +737,7 @@ pub struct MemorizeParams {
 	pub related_files: Option<Vec<String>>,
 	/// Trust tier: 'user_confirmed' (user explicitly stated/approved) ranks higher in retrieval; 'agent_inferred' for AI conclusions
 	pub source: Option<SourceTrust>,
-	/// Scope string to store this memory under (e.g. 'github.com/org/repo'). Defaults to auto-detected scope from cwd.
+	/// Scope string to store this memory under (e.g. 'github.com/org/repo'). Omit for the session's project; without a session, omitted means global.
 	pub scope: Option<String>,
 	/// When true, store this memory in the global scope (shared across all projects) regardless of the locked session scope.
 	pub global: Option<bool>,
@@ -755,7 +755,7 @@ pub struct MemorizeParams {
 /// Remember tool parameters
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RememberParams {
-	/// String or array of 2-5 related terms. Array preferred for broader semantic coverage.
+	/// String or array of 2-5 related terms (max 5; drop the weakest extras). Array preferred for broader semantic coverage.
 	#[schemars(schema_with = "query_input_schema")]
 	pub query: QueryInput,
 	/// Narrow results to specific memory categories
@@ -776,7 +776,7 @@ pub struct RememberParams {
 	/// Only return memories created on/before this time (ISO-8601). Pair with created_after
 	/// to scope a window (e.g. a specific month).
 	pub created_before: Option<String>,
-	/// Filter by scope. If omitted, returns memories from all scopes (global + current).
+	/// Filter by scope. If omitted, returns memories from the session's project plus global ones (all scopes without a session).
 	pub scope: Option<String>,
 	/// Filter by role. If omitted, returns memories for all roles.
 	pub role: Option<String>,
@@ -873,7 +873,7 @@ impl McpServer {
 
 	#[tool(
 		name = "remember",
-		description = "Semantic search over stored memories. Call before memorize to avoid duplicates, and at task start to load context. Results include 1-hop graph neighbors automatically. Prefer 2-5 related query terms for broader coverage. Results show [CONFIRMED]/[INFERRED] trust labels. For temporal questions (\"last week\", \"in May\"), set created_after/created_before (ISO-8601) to scope the time window — you know today's date, so compute the bounds.",
+		description = "Semantic search over stored memories. Call before memorize to avoid duplicates, and at task start to load context. Results include 1-hop graph neighbors automatically. A project scope also returns global memories. Prefer 2-5 related query terms for broader coverage. Results show [CONFIRMED]/[INFERRED] trust labels. For temporal questions (\"last week\", \"in May\"), set created_after/created_before (ISO-8601) to scope the time window — you know today's date, so compute the bounds.",
 		annotations(title = "Remember", read_only_hint = true, open_world_hint = false)
 	)]
 	async fn remember(
@@ -892,7 +892,7 @@ impl McpServer {
 
 	#[tool(
 		name = "forget",
-		description = "Permanently delete memories. Irreversible — requires confirm=true. Use memory_id for single deletion, or query+filters for bulk removal. Don't forget memories just because they're old — importance decay handles that. Only delete when information is wrong or superseded.",
+		description = "Permanently delete memories. Irreversible — requires confirm=true. Use memory_id for single deletion, or query+filters for bulk removal. Deletes only in the given scope (omitted: the session's project), so a global memory needs scope=''. Don't forget memories just because they're old — importance decay handles that. Only delete when information is wrong; for a replaced fact, memorize the new one with supersedes instead.",
 		annotations(
 			title = "Forget",
 			read_only_hint = false,
