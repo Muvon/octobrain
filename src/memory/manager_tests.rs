@@ -110,6 +110,7 @@ async fn project_writes_keep_global_rows_global() {
 	// A bulk delete stays in the project; a by-id delete reaches global rows too.
 	let query = MemoryQuery {
 		query_text: Some("fact".to_string()),
+		min_relevance: Some(0.0),
 		..Default::default()
 	};
 	assert_eq!(alpha.forget_matching(query).await.unwrap(), 1);

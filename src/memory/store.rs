@@ -1425,7 +1425,7 @@ impl MemoryStore {
 		// Working if absent so legacy rows keep their normal retrieval behavior.
 		let state_array = string_column_opt(batch, "state");
 		let scope_array = string_column(batch, "scope")?;
-		let role_array = string_column(batch, "role")?;
+		let role_array = string_column_opt(batch, "role");
 
 		for i in 0..num_rows {
 			let memory_type = super::types::MemoryType::from(memory_type_array.value(i).to_string());
@@ -1491,12 +1491,13 @@ impl MemoryStore {
 				metadata,
 				relevance_score: None,
 				scope: Some(scope_array.value(i).to_string()),
-				// role is nullable: a NULL role reads as "" so a rewrite never stamps the store's role.
-				role: Some(if role_array.is_null(i) {
-					String::new()
-				} else {
-					role_array.value(i).to_string()
-				}),
+				// A NULL or absent role reads as "" so a rewrite never stamps the store's role.
+				role: Some(
+					role_array
+						.filter(|a| !a.is_null(i))
+						.map(|a| a.value(i).to_string())
+						.unwrap_or_default(),
+				),
 			};
 
 			memories.push(memory);
