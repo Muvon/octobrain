@@ -632,6 +632,7 @@ pub enum MemoryType {
 	Communication,
 	Process,
 	Insight,
+	Goal,
 	#[serde(other)]
 	Other,
 }
@@ -649,8 +650,8 @@ pub enum SourceTrust {
 /// depends_on (A needs B), supersedes (A replaces B), similar (near-duplicate),
 /// conflicts (contradicts), implements (concrete implementation of abstract
 /// concept), extends (builds on top of), achieves (this memory contributes to /
-/// advances a Goal memory — `consolidate(goal_id)` later folds all Achieves
-/// sources into a single consolidated parent).
+/// advances a Goal memory), closes (this memory completes a Goal — folds all
+/// Achieves sources into it as the consolidated parent).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationshipKind {
@@ -662,6 +663,7 @@ pub enum RelationshipKind {
 	Implements,
 	Extends,
 	Achieves,
+	Closes,
 }
 
 /// A relationship to create alongside a `memorize` call.
@@ -745,7 +747,7 @@ pub struct MemorizeParams {
 	/// memories in the same call. Subsumes the standalone relate tool.
 	/// Most common use: contributing toward a Goal via
 	/// `{ target_id: goal_id, relationship_type: "achieves" }`, then later
-	/// closing it with `consolidate(goal_id)`.
+	/// closing it with `{ target_id: goal_id, relationship_type: "closes" }`.
 	#[schemars(length(max = 20))]
 	pub related_to: Option<Vec<RelationshipSpec>>,
 }
