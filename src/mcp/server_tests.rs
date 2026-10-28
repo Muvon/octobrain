@@ -195,7 +195,7 @@ async fn shared_server_scopes_writes_reads_and_forget() {
 		.unwrap();
 	let memorize = tools.tools.iter().find(|tool| tool.name == "memorize").unwrap();
 	assert!(memorize.input_schema["properties"].get("global").is_some());
-	server
+	let explicit_global = server
 		.memorize(
 			context(service.peer(), session("alpha", root.path())),
 			Parameters(
@@ -207,6 +207,10 @@ async fn shared_server_scopes_writes_reads_and_forget() {
 		)
 		.await
 		.unwrap();
+	memory_ids.insert(
+		"explicit-global",
+		explicit_global.strip_prefix("Memory stored: ").unwrap().to_string(),
+	);
 	let connection = lancedb::connect(db.to_str().unwrap()).execute().await.unwrap();
 	let table = connection.open_table("memories").execute().await.unwrap();
 	for (name, role, count) in [
@@ -296,6 +300,21 @@ async fn shared_server_scopes_writes_reads_and_forget() {
 		"{after_alpha}"
 	);
 	assert!(after_beta.contains("beta-private"), "{after_beta}");
+	// A by-id forget reaches any memory remember returns, global ones included.
+	server
+		.forget(
+			context(service.peer(), session("alpha", root.path())),
+			Parameters(
+				serde_json::from_value(json!({"memory_id": memory_ids["explicit-global"], "confirm": true})).unwrap(),
+			),
+		)
+		.await
+		.unwrap();
+	let after_forget_global = recall("beta").await;
+	assert!(
+		!after_forget_global.contains("explicit-global"),
+		"{after_forget_global}"
+	);
 }
 
 #[tokio::test]

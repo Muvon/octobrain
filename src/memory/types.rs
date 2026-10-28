@@ -356,6 +356,13 @@ pub struct Memory {
 	/// Optional relevance score from search (not stored)
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub relevance_score: Option<f32>,
+	/// Scope of the stored row; `None` until stored. Writes keep it, so updating a
+	/// visible global memory from a project never moves it into that project.
+	#[serde(skip)]
+	pub scope: Option<String>,
+	/// Role of the stored row; `None` until stored. Kept on writes like `scope`.
+	#[serde(skip)]
+	pub role: Option<String>,
 }
 
 impl Memory {
@@ -371,6 +378,8 @@ impl Memory {
 			created_at: now,
 			updated_at: now,
 			relevance_score: None,
+			scope: None,
+			role: None,
 		}
 	}
 

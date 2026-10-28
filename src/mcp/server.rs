@@ -44,6 +44,8 @@ const MAINTENANCE_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::fro
 static TOOLS_LOCKED: OnceLock<Vec<Tool>> = OnceLock::new();
 /// Tools with only role stripped — built once.
 static TOOLS_ROLE_ONLY: OnceLock<Vec<Tool>> = OnceLock::new();
+/// Tools with only scope stripped — built once.
+static TOOLS_SCOPE_ONLY: OnceLock<Vec<Tool>> = OnceLock::new();
 /// Full tools list — built once.
 static TOOLS_FULL: OnceLock<Vec<Tool>> = OnceLock::new();
 /// Full tools without global flag (unlocked sessions don't need it — use scope="" directly).
@@ -177,7 +179,7 @@ fn tools_full_no_global() -> &'static Vec<Tool> {
 	TOOLS_FULL_NO_GLOBAL.get_or_init(|| strip_fields(&["global"]))
 }
 
-/// Scope locked: strip `scope` + `role` + keep `global` so AI can opt into global scope.
+/// Scope and role locked: strip `scope` + `role` + keep `global` so AI can opt into global scope.
 fn tools_locked() -> &'static Vec<Tool> {
 	TOOLS_LOCKED.get_or_init(|| strip_fields(&["scope", "role"]))
 }
@@ -185,6 +187,11 @@ fn tools_locked() -> &'static Vec<Tool> {
 /// Role locked only: strip `role` + `global` (scope still free, no lock).
 fn tools_role_only() -> &'static Vec<Tool> {
 	TOOLS_ROLE_ONLY.get_or_init(|| strip_fields(&["role", "global"]))
+}
+
+/// Scope locked only: strip `scope`, keep `role` + `global` so AI can opt into global scope.
+fn tools_scope_only() -> &'static Vec<Tool> {
+	TOOLS_SCOPE_ONLY.get_or_init(|| strip_fields(&["scope"]))
 }
 
 use crate::config::Config;
@@ -253,7 +260,9 @@ fn build_instructions(scopes: &[String]) -> String {
 		return base.to_string();
 	}
 
-	let mut hint = String::from("\n\nAvailable project scopes (the optional 'scope' parameter takes one of these):");
+	let mut hint = String::from(
+		"\n\nAvailable project scopes (the optional 'scope' parameter takes one of these, or '' for global):",
+	);
 	for scope in scopes {
 		hint.push_str(&format!("\n  {}", scope));
 	}
@@ -795,9 +804,9 @@ pub struct ForgetParams {
 	pub tags: Option<Vec<String>>,
 	/// Must be true — deletion is permanent
 	pub confirm: bool,
-	/// Scope filter
+	/// Scope to delete in. Omit for the session's project.
 	pub scope: Option<String>,
-	/// Role filter
+	/// Role filter for query deletion
 	pub role: Option<String>,
 }
 
@@ -845,7 +854,7 @@ pub struct KnowledgeParams {
 impl McpServer {
 	#[tool(
 		name = "memorize",
-		description = "Store information, insights, or context in memory. Call remember first to avoid duplicates. Set source='user_confirmed' for user-stated facts (importance 0.8-1.0), 'agent_inferred' for AI conclusions (0.3-0.6). Skip transient state or things easily re-derived.\n\nUse related_to[] to link the new memory to existing ones in the same call. Relationship types: related_to, depends_on, supersedes, similar, conflicts, implements, extends, achieves, closes.\n\nKnowledge updates: when a new fact replaces or corrects an existing memory (a value changed, a decision was reversed), memorize the new fact with related_to=[{target_id: <old_id>, relationship_type: 'supersedes'}]. Retrieval then ranks the current fact above the outdated one, which stays queryable for history. remember first to find the old_id.\n\nGoal workflow:\n1. memorize a 'goal' type memory for the task — captures intent\n2. For each contributing memory: memorize with related_to=[{target_id: goal_id, relationship_type: 'achieves'}]\n3. When the task closes: memorize the completion / lesson-learned note with related_to=[{target_id: goal_id, relationship_type: 'closes'}]. This triggers automatic consolidation — your closing memo becomes the consolidated parent, all Achieves sources transition to Consolidated state with dampened importance (still queryable for audit). Importance of the closing memo is bumped to max(sources) * 1.1. No separate consolidate call needed.\n\nglobal=true (only available when session scope is locked): stores the memory in the shared global scope instead of the locked project scope. Use this for cross-project facts — user preferences, personal habits, universal conventions, tool choices — things that apply regardless of which project is active. Do NOT use global for project-specific knowledge.",
+		description = "Store information, insights, or context in memory. Call remember first to avoid duplicates. Set source='user_confirmed' for user-stated facts (importance 0.8-1.0), 'agent_inferred' for AI conclusions (0.3-0.6). Skip transient state or things easily re-derived.\n\nUse related_to[] to link the new memory to existing ones in the same call. Relationship types: related_to, depends_on, supersedes, similar, conflicts, implements, extends, achieves, closes.\n\nKnowledge updates: when a new fact replaces or corrects an existing memory (a value changed, a decision was reversed), memorize the new fact with related_to=[{target_id: <old_id>, relationship_type: 'supersedes'}]. Retrieval then ranks the current fact above the outdated one, which stays queryable for history. remember first to find the old_id.\n\nGoal workflow:\n1. memorize a 'goal' type memory for the task — captures intent\n2. For each contributing memory: memorize with related_to=[{target_id: goal_id, relationship_type: 'achieves'}]\n3. When the task closes: memorize the completion / lesson-learned note with related_to=[{target_id: goal_id, relationship_type: 'closes'}] (goal_id must be a 'goal' memory with at least one Working achieves source). This triggers automatic consolidation — your closing memo becomes the consolidated parent, all Achieves sources transition to Consolidated state with dampened importance (still queryable for audit). Importance of the closing memo is bumped to max(sources) * 1.1. No separate consolidate call needed.\n\nglobal=true (only available when session scope is locked): stores the memory in the shared global scope instead of the locked project scope. Use this for cross-project facts — user preferences, personal habits, universal conventions, tool choices — things that apply regardless of which project is active. Do NOT use global for project-specific knowledge.",
 		annotations(
 			title = "Memorize",
 			read_only_hint = false,
@@ -892,7 +901,7 @@ impl McpServer {
 
 	#[tool(
 		name = "forget",
-		description = "Permanently delete memories. Irreversible — requires confirm=true. Use memory_id for single deletion, or query+filters for bulk removal. Deletes only in the given scope (omitted: the session's project), so a global memory needs scope=''. Don't forget memories just because they're old — importance decay handles that. Only delete when information is wrong; for a replaced fact, memorize the new one with supersedes instead.",
+		description = "Permanently delete memories. Irreversible — requires confirm=true. Use memory_id for single deletion, or query+filters for bulk removal. memory_id deletes any memory remember returned, project or global; query deletes only in the given scope (omitted: the session's project), so a project query never deletes global memories. Don't forget memories just because they're old — importance decay handles that. Only delete when information is wrong; for a replaced fact, memorize the new one with supersedes instead.",
 		annotations(
 			title = "Forget",
 			read_only_hint = false,
@@ -1032,6 +1041,8 @@ impl ServerHandler for McpServer {
 			tools_locked().clone() // strip scope + role
 		} else if session.role_locked {
 			tools_role_only().clone() // strip role only, scope stays visible
+		} else if session.scope_locked {
+			tools_scope_only().clone() // strip scope only, role + global stay visible
 		} else {
 			tools_full_no_global().clone()
 		};
@@ -1112,7 +1123,13 @@ mod schema_tests {
 			("forget", Some(false), Some(true), Some(true), Some(false)),
 			("knowledge", Some(false), Some(true), Some(false), Some(true)),
 		];
-		for variant in [tools_full(), tools_full_no_global(), tools_locked(), tools_role_only()] {
+		for variant in [
+			tools_full(),
+			tools_full_no_global(),
+			tools_locked(),
+			tools_role_only(),
+			tools_scope_only(),
+		] {
 			for (name, read_only, destructive, idempotent, open_world) in expected {
 				let tool = variant
 					.iter()

@@ -430,7 +430,8 @@ impl MemoryManager {
 					_ => 0.9, // RelatedTo, AutoLinked, Similar, etc.
 				};
 
-				if let Some(mut neighbor) = self.store.get_memory(neighbor_id).await? {
+				// Staleness comes from this repo's files: never penalize a global memory for it.
+				if let Some(mut neighbor) = self.store.get_memory(neighbor_id).await?.filter(|m| self.store.owns(m)) {
 					neighbor.metadata.importance =
 						(neighbor.metadata.importance * penalty).max(self.config.min_importance_threshold);
 					self.store.update_memory(&neighbor).await?;
@@ -709,17 +710,21 @@ impl MemoryManager {
 		Ok(self.suppress_superseded(final_results).await)
 	}
 
-	/// Forget (delete) a memory by ID
+	/// Forget (delete) a memory by ID — any memory this store retrieves, own or global.
 	pub async fn forget(&mut self, memory_id: &str) -> Result<()> {
+		if self.store.get_memory(memory_id).await?.is_none() {
+			return Err(anyhow::anyhow!("Memory not found: {}", memory_id));
+		}
 		self.store.delete_memory(memory_id).await
 	}
 
-	/// Forget memories matching criteria
+	/// Forget memories matching criteria. A bulk delete stays in this store's own scope:
+	/// a broad query must never wipe global memories every project shares.
 	pub async fn forget_matching(&mut self, query: MemoryQuery) -> Result<usize> {
 		let search_results = self.store.search_memories(&query).await?;
 		let mut deleted_count = 0;
 
-		for result in search_results {
+		for result in search_results.iter().filter(|r| self.store.owns(&r.memory)) {
 			self.store.delete_memory(&result.memory.id).await?;
 			deleted_count += 1;
 		}

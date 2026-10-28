@@ -74,20 +74,23 @@ use crate::embedding::EmbeddingProvider;
 /// [`crate::sql::escape_sql_literal`]. Aliased here to keep predicate call sites terse.
 use crate::sql::escape_sql_literal as escape_sql;
 
+/// SQL predicate for the rows a store scope sees: a project sees its own plus global,
+/// `""` sees only global, unscoped (admin) sees everything. Reads and by-id writes
+/// share it, so any memory a store can retrieve it can also update or delete.
+fn visible_scope_predicate(scope: Option<&str>) -> Option<String> {
+	match scope {
+		None => None,
+		Some("") => Some("scope = ''".to_string()),
+		Some(s) => Some(format!("(scope = '{}' OR scope = '')", escape_sql(s))),
+	}
+}
+
 /// Build a SQL predicate string for scalar fields that LanceDB can filter at the storage layer.
 ///
 /// Tags and related_files are excluded here because they are stored as JSON-serialized strings
 /// and cannot be queried with simple SQL equality — those are handled post-fetch in Rust.
 fn build_scalar_predicate(scope: Option<&str>, role: Option<&str>, query: &MemoryQuery) -> String {
-	// scope filter:
-	//   None        → no filter (admin/unscoped: returns all scopes)
-	//   Some("")    → global scope only
-	//   Some(s)     → project scope UNION global (always injected)
-	let mut parts: Vec<String> = match scope {
-		None => Vec::new(),
-		Some("") => vec!["scope = ''".to_string()],
-		Some(s) => vec![format!("(scope = '{}' OR scope = '')", escape_sql(s))],
-	};
+	let mut parts: Vec<String> = visible_scope_predicate(scope).into_iter().collect();
 
 	// role filter — only applied when a role is set (None = no filter)
 	if let Some(role) = role {
@@ -213,6 +216,25 @@ impl MemoryStore {
 	/// store is unscoped, which is safe because unscoped stores are admin-only.
 	fn scope_label(&self) -> &str {
 		self.scope.as_deref().unwrap_or("")
+	}
+
+	/// `predicate` limited to the rows this store sees (see `visible_scope_predicate`).
+	fn with_visible_scope(&self, predicate: String) -> String {
+		match visible_scope_predicate(self.scope.as_deref()) {
+			Some(scope) => format!("({}) AND {}", predicate, scope),
+			None => predicate,
+		}
+	}
+
+	/// This store's own rows only, for counts and background sweeps (stale refs, sleep
+	/// consolidation): global memories belong to no single repo's files or activity.
+	fn own_scope_predicate(&self) -> Option<String> {
+		self.scope.as_deref().map(|s| format!("scope = '{}'", escape_sql(s)))
+	}
+
+	/// Whether `memory` is one of this store's own rows (always true when unscoped).
+	pub fn owns(&self, memory: &Memory) -> bool {
+		self.scope.is_none() || memory.scope == self.scope
 	}
 
 	/// Current importance for `memory` under this store's decay configuration.
@@ -510,6 +532,9 @@ impl MemoryStore {
 		// Prepare data
 		let tags_json = serde_json::to_string(&memory.metadata.tags)?;
 		let files_json = serde_json::to_string(&memory.metadata.related_files)?;
+		// A stored row keeps its own scope/role; only a new memory takes the store's.
+		let scope = memory.scope.as_deref().or(self.scope.as_deref()).unwrap_or("");
+		let role = memory.role.as_deref().or(self.role.as_deref()).unwrap_or("");
 
 		let embedding_values = Float32Array::from(embedding);
 		let embedding_array = FixedSizeListArray::new(
@@ -523,8 +548,8 @@ impl MemoryStore {
 			self.schema.clone(),
 			vec![
 				Arc::new(StringArray::from(vec![memory.id.clone()])),
-				Arc::new(StringArray::from(vec![self.scope.as_deref().unwrap_or("").to_string()])),
-				Arc::new(StringArray::from(vec![self.role.clone().unwrap_or_default()])),
+				Arc::new(StringArray::from(vec![scope.to_string()])),
+				Arc::new(StringArray::from(vec![role.to_string()])),
 				Arc::new(StringArray::from(vec![memory.memory_type.to_string()])),
 				Arc::new(StringArray::from(vec![memory.title.clone()])),
 				Arc::new(StringArray::from(vec![memory.content.clone()])),
@@ -565,21 +590,17 @@ impl MemoryStore {
 		self.store_memory(memory).await
 	}
 
-	/// Delete a memory by ID
+	/// Delete a memory by ID — any memory this store sees (own or global).
 	pub async fn delete_memory(&self, memory_id: &str) -> Result<()> {
 		let id = escape_sql(memory_id);
-		let scope_esc = escape_sql(self.scope_label());
 
 		self.memories_table
-			.delete(&format!("id = '{}' AND scope = '{}'", id, scope_esc))
+			.delete(&self.with_visible_scope(format!("id = '{}'", id)))
 			.await?;
 
-		// Also delete any relationships involving this memory (scoped to scope)
+		// Also delete any relationships involving this memory
 		self.relationships_table
-			.delete(&format!(
-				"(source_id = '{}' OR target_id = '{}') AND scope = '{}'",
-				id, id, scope_esc
-			))
+			.delete(&self.with_visible_scope(format!("source_id = '{}' OR target_id = '{}'", id, id)))
 			.await
 			.ok();
 
@@ -661,13 +682,7 @@ impl MemoryStore {
 		let mut results = self
 			.memories_table
 			.query()
-			.only_if(match self.scope.as_deref() {
-				Some(s) if !s.is_empty() => {
-					format!("id = '{}' AND (scope = '{}' OR scope = '')", id, escape_sql(s))
-				}
-				Some(_) => format!("id = '{}' AND scope = ''", id),
-				None => format!("id = '{}'", id),
-			})
+			.only_if(self.with_visible_scope(format!("id = '{}'", id)))
 			.limit(1)
 			.execute()
 			.await?;
@@ -789,9 +804,7 @@ impl MemoryStore {
 		new_state: super::types::MemoryState,
 		new_importance: f32,
 	) -> Result<()> {
-		let scope_esc = escape_sql(self.scope_label());
-		let id_escaped = escape_sql(id);
-		let predicate = format!("id = '{}' AND scope = '{}'", id_escaped, scope_esc);
+		let predicate = self.with_visible_scope(format!("id = '{}'", escape_sql(id)));
 		let clamped = new_importance.clamp(0.0, 1.0);
 
 		self.memories_table
@@ -816,8 +829,7 @@ impl MemoryStore {
 			.map(|id| format!("'{}'", escape_sql(id)))
 			.collect::<Vec<_>>()
 			.join(",");
-		let scope_esc = escape_sql(self.scope_label());
-		let predicate = format!("id IN ({}) AND scope = '{}'", id_list, scope_esc);
+		let predicate = self.with_visible_scope(format!("id IN ({})", id_list));
 		let now_literal = format!("'{}'", Utc::now().to_rfc3339());
 
 		self.memories_table
@@ -1188,14 +1200,10 @@ impl MemoryStore {
 	}
 
 	/// Fetch all Working-state memories created on or after `since`. Used by
-	/// sleep consolidation to scope the clustering pass to recent activity.
+	/// sleep consolidation to scope the clustering pass to recent activity in this
+	/// store's own scope.
 	pub async fn get_recent_working_memories(&self, since: chrono::DateTime<Utc>) -> Result<Vec<Memory>> {
-		let mut parts: Vec<String> = Vec::new();
-		match self.scope.as_deref() {
-			None => {}
-			Some("") => parts.push("scope = ''".to_string()),
-			Some(s) => parts.push(format!("(scope = '{}' OR scope = '')", escape_sql(s))),
-		}
+		let mut parts: Vec<String> = self.own_scope_predicate().into_iter().collect();
 		if let Some(role) = self.role.as_deref() {
 			parts.push(format!("role = '{}'", escape_sql(role)));
 		}
@@ -1253,16 +1261,7 @@ impl MemoryStore {
 		let mut results = self
 			.relationships_table
 			.query()
-			.only_if(match self.scope.as_deref() {
-				Some(s) if !s.is_empty() => format!(
-					"(source_id = '{}' OR target_id = '{}') AND (scope = '{}' OR scope = '')",
-					id,
-					id,
-					escape_sql(s)
-				),
-				Some(_) => format!("(source_id = '{}' OR target_id = '{}') AND scope = ''", id, id),
-				None => format!("source_id = '{}' OR target_id = '{}'", id, id),
-			})
+			.only_if(self.with_visible_scope(format!("source_id = '{}' OR target_id = '{}'", id, id)))
 			.execute()
 			.await?;
 
@@ -1284,12 +1283,10 @@ impl MemoryStore {
 	pub async fn delete_auto_linked_relationships(&self, memory_id: &str) -> Result<()> {
 		let id = escape_sql(memory_id);
 		self.relationships_table
-			.delete(&format!(
-				"(source_id = '{}' OR target_id = '{}') AND relationship_type = 'auto_linked' AND scope = '{}'",
-				id,
-				id,
-				escape_sql(self.scope_label())
-			))
+			.delete(&self.with_visible_scope(format!(
+				"(source_id = '{}' OR target_id = '{}') AND relationship_type = 'auto_linked'",
+				id, id
+			)))
 			.await
 			.ok();
 		Ok(())
@@ -1297,15 +1294,14 @@ impl MemoryStore {
 
 	/// Get total count of memories (all scopes when scope is None)
 	pub async fn get_memory_count(&self) -> Result<usize> {
-		let filter = self.scope.as_deref().map(|s| format!("scope = '{}'", escape_sql(s)));
-		Ok(self.memories_table.count_rows(filter).await?)
+		Ok(self.memories_table.count_rows(self.own_scope_predicate()).await?)
 	}
 
 	/// Get distinct scope and role values across all stored memories
 	pub async fn get_distinct_projects_and_roles(&self) -> Result<(Vec<String>, Vec<String>)> {
 		let mut q = self.memories_table.query();
-		if let Some(s) = self.scope.as_deref() {
-			q = q.only_if(format!("scope = '{}'", escape_sql(s)));
+		if let Some(filter) = self.own_scope_predicate() {
+			q = q.only_if(filter);
 		}
 		let mut results = q.execute().await?;
 
@@ -1342,16 +1338,14 @@ impl MemoryStore {
 		Ok((scopes, roles))
 	}
 
-	/// Get all memories that have non-empty related_files (for stale reference cleanup).
+	/// Get this store's own memories that have non-empty related_files (for stale reference
+	/// cleanup — related files are paths in this repo, so global memories are never checked).
 	/// Returns (id, related_files, importance) tuples to avoid loading full embeddings.
 	pub async fn get_memories_with_files(&self) -> Result<Vec<Memory>> {
-		let filter = match self.scope.as_deref() {
-			Some(s) if !s.is_empty() => format!(
-				"(scope = '{}' OR scope = '') AND related_files IS NOT NULL AND related_files != '[]'",
-				escape_sql(s)
-			),
-			Some(_) => "scope = '' AND related_files IS NOT NULL AND related_files != '[]'".to_string(),
-			None => "related_files IS NOT NULL AND related_files != '[]'".to_string(),
+		let has_files = "related_files IS NOT NULL AND related_files != '[]'";
+		let filter = match self.own_scope_predicate() {
+			Some(scope) => format!("{} AND {}", scope, has_files),
+			None => has_files.to_string(),
 		};
 
 		let mut results = self.memories_table.query().only_if(filter).execute().await?;
@@ -1430,6 +1424,8 @@ impl MemoryStore {
 		// State column is added by migrate_state_column on existing tables; default to
 		// Working if absent so legacy rows keep their normal retrieval behavior.
 		let state_array = string_column_opt(batch, "state");
+		let scope_array = string_column(batch, "scope")?;
+		let role_array = string_column(batch, "role")?;
 
 		for i in 0..num_rows {
 			let memory_type = super::types::MemoryType::from(memory_type_array.value(i).to_string());
@@ -1494,6 +1490,13 @@ impl MemoryStore {
 				updated_at: DateTime::parse_from_rfc3339(updated_at_array.value(i))?.with_timezone(&Utc),
 				metadata,
 				relevance_score: None,
+				scope: Some(scope_array.value(i).to_string()),
+				// role is nullable: a NULL role reads as "" so a rewrite never stamps the store's role.
+				role: Some(if role_array.is_null(i) {
+					String::new()
+				} else {
+					role_array.value(i).to_string()
+				}),
 			};
 
 			memories.push(memory);

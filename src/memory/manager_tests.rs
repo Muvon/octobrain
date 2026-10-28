@@ -77,3 +77,45 @@ impl MemoryManager {
 		}
 	}
 }
+
+fn note(title: &str) -> MemorizeParams {
+	MemorizeParams {
+		memory_type: MemoryType::Insight,
+		title: title.to_string(),
+		content: title.to_string(),
+		importance: None,
+		tags: None,
+		related_files: None,
+		source: None,
+	}
+}
+
+#[tokio::test]
+async fn project_writes_keep_global_rows_global() {
+	let root = tempfile::tempdir().unwrap();
+	let db = root.path().join("memory");
+	let mut global = MemoryManager::for_scope_test(&db, Some(String::new()), None).await;
+	let mut alpha = MemoryManager::for_scope_test(&db, Some("alpha".to_string()), None).await;
+	let beta = MemoryManager::for_scope_test(&db, Some("beta".to_string()), None).await;
+
+	let shared = global.memorize(note("shared fact")).await.unwrap();
+	let own = alpha.memorize(note("alpha fact")).await.unwrap();
+
+	// An update from a project rewrites the row but must not move it out of global.
+	assert!(alpha.add_tag(&shared.id, "seen".to_string()).await.unwrap());
+	let updated = beta.store.get_memory(&shared.id).await.unwrap().unwrap();
+	assert_eq!(updated.scope.as_deref(), Some(""));
+	assert!(updated.metadata.tags.contains(&"seen".to_string()));
+
+	// A bulk delete stays in the project; a by-id delete reaches global rows too.
+	let query = MemoryQuery {
+		query_text: Some("fact".to_string()),
+		..Default::default()
+	};
+	assert_eq!(alpha.forget_matching(query).await.unwrap(), 1);
+	assert!(alpha.store.get_memory(&own.id).await.unwrap().is_none());
+	assert!(beta.store.get_memory(&shared.id).await.unwrap().is_some());
+	alpha.forget(&shared.id).await.unwrap();
+	assert!(beta.store.get_memory(&shared.id).await.unwrap().is_none());
+	assert!(alpha.forget(&shared.id).await.is_err());
+}
