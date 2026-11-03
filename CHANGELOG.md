@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.1] - 2026-11-03
+
+### 🔧 Improvements & Optimizations
+
+- **dependencies**: refresh dependency versions `999899c1`
+- **workflows**: pin GitHub Actions to commit SHAs `92867b26`
+
 ## [0.15.0] - 2026-10-28
 
 ### 📋 Release Summary
