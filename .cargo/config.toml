@@ -47,9 +47,6 @@ rustflags = [
     "-C", "target-feature=+fp16",
 ]
 
-[target.x86_64-apple-darwin]
-rustflags = []
-
 [registry]
 default = "crates-io"
 
