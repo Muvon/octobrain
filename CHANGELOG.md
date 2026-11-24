@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.15.3] - 2026-11-24
+
+### 🔧 Improvements & Optimizations
+
+- **ci**: use prebuilt musl ONNX Runtime archives `beed8629`
+
+### 🔄 Other Changes
+
+1 maintenance, dependency, and tooling update not listed individually.
+
 ## [0.15.2] - 2026-11-08
 
 ### 🔄 Other Changes
